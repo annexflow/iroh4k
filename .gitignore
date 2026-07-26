@@ -1,0 +1,16 @@
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Cargo build output. Note Cargo.lock IS committed (see iroh4k/src/rust/.gitignore)
+# so the exact iroh patch version is reproducible across targets and CI.
+target/
+
+# cargo-ndk output, rebuilt from source
+iroh4k/src/androidMain/jniLibs/
+
+.idea/
+*.iml
+.DS_Store
+local.properties
+.kotlin/

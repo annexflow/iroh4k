@@ -1,0 +1,60 @@
+[package]
+name = "iroh4k"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+# staticlib -> linked into Kotlin/Native targets via cinterop (FFI).
+# cdylib    -> loaded at runtime by the JVM and Android via JNI.
+crate-type = ["staticlib", "cdylib"]
+
+[profile.release]
+opt-level = 3
+strip = true
+lto = true
+# Unwinding across the `extern "C"` FFI boundary is undefined behaviour, so we abort.
+# All recoverable errors are returned as result values, never panics.
+panic = "abort"
+codegen-units = 1
+
+[dependencies]
+# https://crates.io/crates/tokio
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+# https://crates.io/crates/iroh
+# `tls-ring` is part of iroh's default feature set. Keep it: the alternative
+# (`tls-aws-lc-rs`) needs cmake + a C toolchain and cross-compiles poorly to
+# iOS/Android/mingw. Never enable `tls-aws-lc-rs` here.
+iroh = { version = "1.0.3" }
+# https://crates.io/crates/iroh-base
+iroh-base = { version = "1.0.3" }
+# https://crates.io/crates/iroh-relay
+iroh-relay = { version = "1.0.3", default-features = false }
+# https://crates.io/crates/iroh-services
+iroh-services = { version = "1.0.0", default-features = false }
+# https://crates.io/crates/iroh-tickets
+iroh-tickets = { version = "1.0.0" }
+# https://crates.io/crates/iroh-metrics
+iroh-metrics = { version = "1.0.1" }
+
+# https://crates.io/crates/n0-future
+n0-future = "0.3"
+# https://crates.io/crates/n0-watcher
+n0-watcher = "1.0"
+# https://crates.io/crates/n0-error
+n0-error = "1.0"
+
+# https://crates.io/crates/tracing
+tracing = "0.1"
+# https://crates.io/crates/tracing-subscriber
+tracing-subscriber = "0.3"
+
+# https://crates.io/crates/jni
+# Only needed for the JNI (JVM/Android) path. iOS uses the FFI/cinterop path exclusively.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+jni = { version = "0.21.1" }
+
+[build-dependencies]
+# https://crates.io/crates/cbindgen
+cbindgen = "0.29.2"

@@ -1,0 +1,29 @@
+package = iroh4k.ffi
+headers = iroh4k.h
+compilerOpts = -I./src/rust/target
+staticLibraries = libiroh4k.a
+libraryPaths.ios_arm64 = ./src/rust/target/aarch64-apple-ios/release
+libraryPaths.ios_simulator_arm64 = ./src/rust/target/aarch64-apple-ios-sim/release
+libraryPaths.android_arm64 = ./src/rust/target/aarch64-linux-android/release
+libraryPaths.android_x64 = ./src/rust/target/x86_64-linux-android/release
+libraryPaths.macos_arm64 = ./src/rust/target/aarch64-apple-darwin/release
+libraryPaths.macos_x64 = ./src/rust/target/x86_64-apple-darwin/release
+libraryPaths.linux_arm64 = ./src/rust/target/aarch64-unknown-linux-gnu/release
+libraryPaths.linux_x64 = ./src/rust/target/x86_64-unknown-linux-gnu/release
+
+# iroh brings in QUIC + TLS (rustls with the `ring` provider) and platform network
+# introspection, so the Kotlin/Native linker must be told about the system libraries the Rust
+# static library references. Get the exact list for a target with:
+#   cd src/rust && RUSTFLAGS="--print=native-static-libs" cargo build --release --target <triple>
+#
+# Apple: netwatch/net-report read Wi-Fi state (CoreWLAN) and network configuration
+# (SystemConfiguration); rustls-platform-verifier uses Security/SecurityFoundation.
+linkerOpts.macos_arm64 = -framework Security -framework SecurityFoundation -framework SystemConfiguration -framework CoreWLAN -framework CoreFoundation -framework Foundation -lobjc -liconv
+linkerOpts.macos_x64 = -framework Security -framework SecurityFoundation -framework SystemConfiguration -framework CoreWLAN -framework CoreFoundation -framework Foundation -lobjc -liconv
+# iOS has no CoreWLAN.
+linkerOpts.ios_arm64 = -framework Security -framework SecurityFoundation -framework SystemConfiguration -framework CoreFoundation -framework Foundation -lobjc -liconv
+linkerOpts.ios_simulator_arm64 = -framework Security -framework SecurityFoundation -framework SystemConfiguration -framework CoreFoundation -framework Foundation -lobjc -liconv
+# On Linux these live in separate libraries rather than libSystem. (Android/bionic keeps them
+# in libc, so no opts there.) Verify against --print=native-static-libs when enabling M9.
+linkerOpts.linux_x64 = -ldl -lpthread -lm
+linkerOpts.linux_arm64 = -ldl -lpthread -lm

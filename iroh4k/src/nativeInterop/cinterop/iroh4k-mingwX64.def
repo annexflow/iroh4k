@@ -1,0 +1,11 @@
+package = iroh4k.ffi
+headers = iroh4k.h
+compilerOpts = -I./src/rust/target
+staticLibraries = libiroh4k.a
+libraryPaths = ./src/rust/target/x86_64-pc-windows-gnu/release
+
+# Placeholder list — mingwX64 is enabled in M9. Derive the real set with:
+#   cd src/rust && RUSTFLAGS="--print=native-static-libs" cargo build --release --target x86_64-pc-windows-gnu
+# iroh needs the Windows socket/crypto/network-configuration stack, so expect this to be
+# considerably longer than a plain -lntdll.
+linkerOpts = -lws2_32 -lntdll -lbcrypt -lcrypt32 -lsecur32 -liphlpapi -luserenv -ladvapi32 -lole32 -lkernel32

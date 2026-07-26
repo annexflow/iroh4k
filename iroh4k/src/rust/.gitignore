@@ -1,0 +1,5 @@
+/target
+# Cargo.lock is intentionally committed: this crate is a cdylib/staticlib shipped as a
+# binary artifact, so the exact dependency versions must be reproducible across every
+# cross-compilation target and CI runner.
+!Cargo.lock

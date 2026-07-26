@@ -1,0 +1,9 @@
+language = "C"
+
+# The JNI exports (`Java_*`) take `jni`-crate argument types that cbindgen cannot
+# represent, so they are skipped automatically and never reach the C header consumed
+# by Kotlin/Native cinterop. Only the `#[repr(C)]` types and the `extern "C"` FFI
+# functions are emitted.
+#
+# Note: cbindgen only emits a `#[repr(C)]` type that appears in an exported function
+# signature, which is why `ffi.rs` carries no-op `auto_generated_for_struct_*` exports.
