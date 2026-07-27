@@ -30,20 +30,20 @@ plugins {
  * It follows `-Ptargets` like every other target, so the toolchain a build needs stays a function
  * of what it was asked to build:
  *
- *  - `-Ptargets=jvm,android` — the AAR without any Kotlin/Native Android target, which is what
- *    Phase 1 can build: no NDK, no `*-linux-android` Rust targets.
- *  - `-Ptargets=all` — implied by `androidNativeArm64`/`androidNativeX64`, so a publish (which
- *    has to run with `all`) ships the AAR rather than silently dropping the platform.
+ *  - `-Ptargets=jvm,android` — the AAR on its own: an Android SDK, an NDK and `cargo ndk`, but no
+ *    Kotlin/Native Android toolchain.
+ *  - `-Ptargets=all` — includes `android`, so a publish (which has to run with `all`) ships the
+ *    AAR rather than silently dropping the platform.
  *  - the default (`jvm` plus the build host), `-Ptargets=jvm`, `-Ptargets=macosArm64` — off, and
  *    no Android SDK is needed to configure the build.
  *
- * `Utils.allTargets` has no `android` entry, so `android` is a token this module understands and
- * `Utils` does not; `multiplatform.lib` ignores it, being absent from its target map. That is the
- * seam this file works within — `Utils` belongs to `build-logic`.
+ * Deliberately not implied by `androidNativeArm64`/`androidNativeX64`: those are Kotlin/Native
+ * targets on the cinterop path and have nothing to do with the AAR, so asking for one should not
+ * drag in an Android SDK. `Utils.allTargets` carries the `android` token for the `all` case;
+ * `multiplatform.lib` ignores it, being absent from its target map, because the target is created
+ * here.
  */
-val androidEnabled: Boolean = Utils.targetsOf(project).let { targets ->
-    "android" in targets || targets.any { it.startsWith("androidNative") }
-}
+val androidEnabled: Boolean = "android" in Utils.targetsOf(project)
 
 // Applied by id rather than through the `plugins { }` block above, because a plugin listed there
 // is applied unconditionally and this one has to be conditional. The cost is that the generated
