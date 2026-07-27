@@ -8,9 +8,10 @@ import tech.annexflow.iroh4k.internal.BinaryReader
  *
  * Its only job is to prove the Rust encoder and this decoder agree — a mismatch in field order,
  * width, or endianness shows up here rather than inside a real `ConnectionStats` later.
- * Temporary: superseded by the real records in M5/M6.
+ * Not public API: it exists purely as a conformance check, and the real records
+ * (`ConnectionStats`, `PathSnapshot`, …) are what callers actually see.
  */
-data class SmokeRecord(
+internal data class SmokeRecord(
     val flag: Boolean,
     val byte: Int,
     val int32: Int,
@@ -56,27 +57,31 @@ object Iroh4k {
      *
      * Exercises the async bridge end to end — on native that means a `StableRef` continuation
      * resumed from a `staticCFunction` on a tokio worker thread; on the JVM a blocking call
-     * dispatched to `Dispatchers.IO`. Temporary: removed once real operations land in M3.
+     * dispatched to `Dispatchers.IO`.
+     *
+     * Kept, though the endpoint and stream operations now exercise the same bridge: this is the
+     * only test of it in isolation, so a bridge regression fails here rather than as a confusing
+     * symptom three domains away.
      */
-    suspend fun smokeEcho(value: Long): Long = nativeSmokeAsyncEcho(value)
+    internal suspend fun smokeEcho(value: Long): Long = nativeSmokeAsyncEcho(value)
 
     /**
      * Always fails with [IrohError.Code.InvalidArgument], covering error propagation and the
-     * ordinal decoding of [IrohError.Code]. Temporary, as above.
+     * ordinal decoding of [IrohError.Code]. Kept for the reason given on [smokeEcho].
      */
-    suspend fun smokeError(): Nothing = nativeSmokeAsyncError()
+    internal suspend fun smokeError(): Nothing = nativeSmokeAsyncError()
 
     /**
      * Sleeps in Rust for [millis], then returns it.
      *
      * Stands in for iroh's genuinely long-running operations so cancellation can be exercised:
      * cancelling the calling coroutine aborts the Rust task instead of leaving it running.
-     * Temporary, as above.
+     * Kept for the reason given on [smokeEcho].
      */
-    suspend fun smokeSleep(millis: Long): Long = nativeSmokeAsyncSleep(millis)
+    internal suspend fun smokeSleep(millis: Long): Long = nativeSmokeAsyncSleep(millis)
 
     /** Decodes a [SmokeRecord] encoded by Rust, verifying the codec across languages. */
-    fun smokeRecord(): SmokeRecord = SmokeRecord.decode(nativeSmokeRecord())
+    internal fun smokeRecord(): SmokeRecord = SmokeRecord.decode(nativeSmokeRecord())
 
     /**
      * Operations still registered in the Rust op registry.

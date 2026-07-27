@@ -1,8 +1,13 @@
 group = "tech.annexflow.iroh4k"
 version = "0.1.0-SNAPSHOT"
 
+// Declared here, applied by the convention plugins in `build-logic`. `apply false` puts each on
+// the build classpath without applying it to the root project, which is what lets a convention
+// plugin reference it by id.
 plugins {
     alias(libs.plugins.kotlin.multiplatform) apply false
+    alias(libs.plugins.publish) apply false
+    alias(libs.plugins.dokka) apply false
 }
 
 repositories {

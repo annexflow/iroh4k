@@ -9,6 +9,11 @@ target/
 # cargo-ndk output, rebuilt from source
 iroh4k/src/androidMain/jniLibs/
 
+# JVM fatal-error logs. Note release builds set strip=true, so any such log has useless
+# symbol attribution — rebuild with strip=false + debug=true before trying to read one.
+hs_err_pid*.log
+replay_pid*.log
+
 .idea/
 *.iml
 .DS_Store

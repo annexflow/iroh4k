@@ -1,5 +1,9 @@
 package tech.annexflow.iroh4k
 
+import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import tech.annexflow.iroh4k.internal.BinaryReader
 
 /**
@@ -61,4 +65,64 @@ internal fun ByteArray.jniBytesOrThrow(): ByteArray = decodeResult().let {
 internal fun ByteArray.jniLongOrThrow(): Long = decodeResult().let {
     it.throwIfError()
     it.longValue
+}
+
+/** The codec payload of a completed operation, or an empty array when Rust sent none. */
+internal fun JniResult.payload(): ByteArray = bytes ?: ByteArray(0)
+
+/**
+ * Runs an asynchronous Rust operation, propagating coroutine cancellation into it.
+ *
+ * [start] must return an operation id. The blocking await runs on [Dispatchers.IO] inside an
+ * `async` so cancellation can be observed *while* the thread is still blocked: on cancellation
+ * `opCancel` aborts the Rust task, which makes the awaiting thread's channel yield
+ * `ERROR_CANCELLED` and return.
+ *
+ * Awaiting directly with `withContext` would **deadlock** — it waits for its block to finish, the
+ * block is parked in an uninterruptible native call, and the cancel that would release it never
+ * runs. That subtlety is why this lives in one shared place rather than being written per domain:
+ * an `online()` or an `accept()` that got it wrong would hang forever.
+ */
+internal suspend fun <T> jniOp(
+    start: () -> Long,
+    freeHandle: ((Long) -> Unit)? = null,
+    decode: (JniResult) -> T,
+): T {
+    val op = start()
+    if (op <= 0L) IrohError(IrohError.Code.Unknown, "failed to start native operation").raise()
+    return coroutineScope {
+        val pending = async(Dispatchers.IO) { Iroh4kJni.opAwait(op).decodeResult() }
+        val result = try {
+            pending.await()
+        } catch (cancellation: CancellationException) {
+            // Unblocks the IO thread sitting in opAwait; without this it would leak until the
+            // operation finished on its own — which, for `online()` without a relay, is never.
+            Iroh4kJni.opCancel(op)
+            // `await` can throw cancellation while the operation itself *succeeded*, so a result
+            // may still arrive that no caller will ever receive. If it carries an object, release
+            // it here — the sibling case, a cancel beating the operation, is handled in Rust by
+            // `ops::OpResult::discard`.
+            //
+            // Registered only on this path on purpose: a handler attached before the `await` would
+            // race it and could free a handle the caller is about to be given.
+            //
+            // Note this handler is not the only safety net. If the scope is cancelled before the
+            // `async` body ever dispatches, `opAwait` is never entered at all — so `ops::cancel_op`
+            // also drops the registry entry itself, and a result left queued in a channel whose
+            // receiver dies is freed by `OpResult`'s `Drop`. All three are needed: this one covers
+            // "completed but nobody took it", the other two cover "never awaited at all".
+            if (freeHandle != null) {
+                pending.invokeOnCompletion { cause ->
+                    if (cause == null) {
+                        @Suppress("OPT_IN_USAGE")
+                        val produced = pending.getCompleted()
+                        if (produced.handle != 0L) freeHandle(produced.handle)
+                    }
+                }
+            }
+            throw cancellation
+        }
+        result.throwIfError()
+        decode(result)
+    }
 }

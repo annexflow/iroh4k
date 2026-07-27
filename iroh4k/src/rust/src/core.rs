@@ -4,9 +4,9 @@
 //! both [`crate::ffi`] (cinterop) and [`crate::jni`] (JVM/Android) call into. This is the
 //! single source of truth — the two facades only marshal arguments and results.
 
-// The full error taxonomy and the argument helpers are declared up front so the ordinal
-// contract with Kotlin's `IrohError.Code` is fixed from the start; the operations that use
-// each one land in later milestones.
+// The error taxonomy is declared as a complete set so the ordinal contract with Kotlin's
+// `IrohError.Code` is append-only, and a few argument helpers have no caller in the current
+// domains. Both are kept deliberately rather than trimmed to whatever happens to be used today.
 #![allow(dead_code)]
 
 use std::{
@@ -52,6 +52,11 @@ pub struct Iroh4kPtr {
 }
 unsafe impl Send for Iroh4kPtr {}
 unsafe impl Sync for Iroh4kPtr {}
+
+/// Releases the object behind [`Iroh4kResult::handle`].
+///
+/// Supplied per handle type, because only the producing domain knows what `T` is.
+pub type HandleDrop = unsafe extern "C" fn(*mut c_void);
 
 /// The single result type for every operation.
 ///
@@ -120,6 +125,19 @@ pub fn bytes_result(bytes: Vec<u8>) -> *mut Iroh4kResult {
     .leak()
 }
 
+/// A result carrying a live object handle.
+///
+/// An async operation that *produces* an object must additionally tell [`crate::ops`] how to
+/// release it — see `OpResult::with_handle` — so a cancel winning the deliver-once race cannot
+/// strand a bound socket or a live QUIC connection.
+pub fn handle_result(handle: *mut c_void) -> *mut Iroh4kResult {
+    Iroh4kResult {
+        handle,
+        ..Default::default()
+    }
+    .leak()
+}
+
 pub fn error_result(code: c_int, message: impl AsRef<str>) -> *mut Iroh4kResult {
     let message = CString::new(message.as_ref()).unwrap_or_else(|_| {
         CString::new("error message contained an interior nul byte").expect("static string")
@@ -172,6 +190,10 @@ pub fn serialize_result(ptr: *mut Iroh4kResult) -> Vec<u8> {
 
 /// Frees a result previously handed to Kotlin. Every allocation reachable from the struct
 /// is released here; Kotlin never frees Rust memory itself.
+///
+/// Deliberately does **not** touch `handle`: by the time Kotlin calls this it has already taken
+/// ownership of the object. Releasing a handle that was never delivered is `crate::ops`' job,
+/// since only it knows a result was discarded.
 pub fn free_result(ptr: *mut Iroh4kResult) {
     if ptr.is_null() {
         return;
@@ -264,7 +286,7 @@ pub fn smoke_sleep_completions() -> i64 {
 /// decoder are verified against each other rather than each against its own assumptions.
 ///
 /// Field order and values are asserted in `CommonSmokeTests`. Temporary: superseded by real
-/// records (`ConnectionStats`, `PathSnapshot`, …) in M5/M6.
+/// records (`ConnectionStats`, `PathSnapshot`, …) are what callers actually see.
 pub fn smoke_record() -> Vec<u8> {
     let mut w = crate::codec::Writer::new();
     w.bool(true)

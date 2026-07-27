@@ -1,6 +1,8 @@
 plugins {
     id("tech.annexflow.iroh4k.multiplatform.lib")
     id("tech.annexflow.iroh4k.rust.jni")
+    id("tech.annexflow.iroh4k.publish")
+    id("tech.annexflow.iroh4k.dokka")
 }
 
 kotlin {

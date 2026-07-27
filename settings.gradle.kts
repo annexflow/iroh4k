@@ -11,3 +11,4 @@ pluginManagement {
 }
 
 include("iroh4k")
+include("examples:echo")

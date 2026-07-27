@@ -33,5 +33,10 @@ mod jni;
 // modules stay independently editable — the same reason iroh-ffi splits into key.rs, net.rs,
 // relay.rs and ticket.rs rather than one flat FFI surface.
 mod addr;
+mod connection;
+mod endpoint;
 mod keys;
 mod relay;
+mod services;
+mod stream;
+mod watch;

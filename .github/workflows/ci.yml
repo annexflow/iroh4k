@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The targets that can actually be *tested*, not merely linked. Both facades run here: the
+  # Kotlin/Native tests exercise the statically-linked FFI path, the JVM tests the JNI path
+  # against the same Rust core.
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            targets: macosArm64,jvm
+            tasks: ":iroh4k:macosArm64Test :iroh4k:jvmTest"
+          - os: ubuntu-latest
+            targets: linuxX64,jvm
+            tasks: ":iroh4k:linuxX64Test :iroh4k:jvmTest"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install Rust
+        run: rustup show
+
+      # Keyed on Cargo.lock: the crate takes minutes to build from cold, and ~/.konan is a large
+      # download. Both are pure function of their inputs, so caching them is safe.
+      - name: Cache cargo and konan
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.konan
+            iroh4k/src/rust/target
+          key: ${{ matrix.os }}-iroh4k-${{ hashFiles('iroh4k/src/rust/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-iroh4k-
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Run the two test tasks in separate invocations. Sharing one invocation has been observed
+      # to let a Rust rebuild swap the JNI shared library out from under a running test JVM,
+      # producing NoClassDefFoundError and a dead test worker rather than an honest failure.
+      - name: Test
+        run: |
+          for task in ${{ matrix.tasks }}; do
+            ./gradlew "$task" -Ptargets=${{ matrix.targets }}
+          done
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
+          path: |
+            iroh4k/build/test-results/**/*.xml
+            iroh4k/**/hs_err_pid*.log
+
+  # Targets that cannot run tests here (no device, no emulator, or no runner) but must still
+  # compile and link. Linking is the part that breaks: the Rust static library pulls in a
+  # different set of system libraries per platform, and the `.def` linkerOpts have to match.
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: iosArm64
+            rust: aarch64-apple-ios
+          - os: macos-latest
+            target: iosSimulatorArm64
+            rust: aarch64-apple-ios-sim
+          - os: ubuntu-latest
+            target: linuxArm64
+            rust: aarch64-unknown-linux-gnu
+          - os: windows-latest
+            target: mingwX64
+            rust: x86_64-pc-windows-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.rust }}
+
+      - name: Install Linux cross toolchain
+        if: matrix.target == 'linuxArm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p ~/.cargo
+          printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' >> ~/.cargo/config.toml
+
+      - name: Cache cargo and konan
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.konan
+            iroh4k/src/rust/target
+          key: ${{ matrix.os }}-${{ matrix.target }}-${{ hashFiles('iroh4k/src/rust/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-${{ matrix.target }}-
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Assemble
+        run: ./gradlew :iroh4k:assemble -Ptargets=${{ matrix.target }}
+
+  lint:
+    name: Rust lint
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add clippy rustfmt
+      - name: Format
+        run: cargo fmt --manifest-path iroh4k/src/rust/Cargo.toml -- --check
+      - name: Clippy
+        run: cargo clippy --manifest-path iroh4k/src/rust/Cargo.toml --release -- -D warnings

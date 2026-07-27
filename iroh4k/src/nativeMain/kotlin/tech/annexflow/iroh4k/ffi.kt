@@ -8,6 +8,7 @@ import iroh4k.ffi.iroh4k_free_result
 import iroh4k.ffi.iroh4k_op_cancel
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.CPointed
 import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.CValue
@@ -70,9 +71,10 @@ internal fun CPointer<Iroh4kResult>?.bytesOrThrow(): ByteArray = use {
  * cancelling concurrently with completion cannot resume twice.
  */
 internal suspend inline fun iroh(
+    noinline freeHandle: ((COpaquePointer) -> Unit)? = null,
     crossinline operation: (continuationPtr: CPointer<out CPointed>) -> Long
 ): CPointer<Iroh4kResult>? = suspendCancellableCoroutine { continuation ->
-    val stableRef = StableRef.create(continuation)
+    val stableRef = StableRef.create(PendingOp(continuation, freeHandle))
     val op = operation(stableRef.asCPointer())
     // Registered after starting; if the coroutine is already cancelled the handler runs
     // immediately, which is exactly the desired abort.
@@ -80,18 +82,45 @@ internal suspend inline fun iroh(
 }
 
 /**
+ * What an in-flight operation has to remember, pinned for Rust to hand back.
+ *
+ * [staticCFunction] cannot capture, so everything the completion callback needs travels through
+ * the [StableRef] instead — including how to release an object the result carried.
+ */
+internal class PendingOp(
+    val continuation: CancellableContinuation<CPointer<Iroh4kResult>?>,
+    /**
+     * Releases the result's `handle` if the continuation discards it. `null` for operations that
+     * do not produce an object.
+     */
+    val freeHandle: ((COpaquePointer) -> Unit)?,
+)
+
+/**
  * The completion callback handed to every async FFI function.
  *
  * Disposes the [StableRef] — without which every operation would leak a pinned continuation —
- * and resumes. The `onCancellation` arm frees the result when the continuation has already been
- * cancelled and therefore discards the value: Rust hands ownership of every result to Kotlin, so
- * a discarded one still has to be freed.
+ * and resumes.
+ *
+ * The `onCancellation` arm handles the case where the operation *succeeded* but the continuation
+ * was cancelled before it could be resumed, so the value is dropped on the floor. Rust hands
+ * ownership of the whole result to Kotlin, which means freeing the envelope is not enough: if the
+ * result carried a live object — a connection, an incoming, a stream — that object has to be
+ * released too, or every cancelled-just-too-late operation strands one. `Iroh4kResult` carries no
+ * destructor (Kotlin never needs one on the happy path), so the producing call site supplies it
+ * via [PendingOp.freeHandle].
+ *
+ * The sibling case — a cancel *beating* the completion — is handled in Rust by
+ * `ops::OpResult::discard`.
  */
 internal val completion =
     staticCFunction<CValue<Iroh4kPtr>, CPointer<Iroh4kResult>?, Unit> { ptr, result ->
-        val ref = ptr.useContents { this.ptr }!!
-            .asStableRef<CancellableContinuation<CPointer<Iroh4kResult>?>>()
-        val continuation = ref.get()
+        val ref = ptr.useContents { this.ptr }!!.asStableRef<PendingOp>()
+        val pending = ref.get()
         ref.dispose()
-        continuation.resume(result) { _, discarded, _ -> iroh4k_free_result(discarded) }
+        pending.continuation.resume(result) { _, discarded, _ ->
+            // Object first, then the envelope that pointed at it.
+            discarded?.pointed?.handle?.let { handle -> pending.freeHandle?.invoke(handle) }
+            iroh4k_free_result(discarded)
+        }
     }

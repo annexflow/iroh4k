@@ -98,7 +98,8 @@ pub extern "C" fn iroh4k_smoke_async_error(callback: *mut c_void, fun: Completio
 }
 
 /// Smoke test for cancellation: a long operation that must abort promptly when the coroutine is
-/// cancelled. Stands in for `accept`/stream reads until M4/M5.
+/// cancelled. Exercises cancellation in isolation, where `accept` and stream reads exercise it
+/// as a side effect of doing real work.
 #[no_mangle]
 pub extern "C" fn iroh4k_smoke_async_sleep(
     millis: i64,

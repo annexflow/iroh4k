@@ -1,0 +1,30 @@
+# Cross-compilation linkers for the iroh4k Rust crate.
+#
+# Copy (or merge) this into ~/.cargo/config.toml. Plain `cargo build --target <triple>` is all the
+# Gradle build ever invokes — there is no `cross` and no `cargo zigbuild` — so cargo has to be told
+# which linker to use for each non-host target here.
+#
+# Apple targets need nothing: the host toolchain links them.
+#
+# NOTE ON THE ANDROID NDK VERSION. Kotlin/Native links its Android output against NDK r21's
+# sysroot, so the Rust side must target the same API level or the two objects disagree at link
+# time. That is why the linkers below are the `*21-clang` ones and not simply the newest available.
+# See kotlin-native/konan/konan.properties in the Kotlin repository for the version Konan pins.
+
+[target.aarch64-linux-android]
+linker = "/opt/homebrew/share/android-ndk/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android21-clang"
+ar = "/opt/homebrew/share/android-ndk/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar"
+
+[target.x86_64-linux-android]
+linker = "/opt/homebrew/share/android-ndk/toolchains/llvm/prebuilt/darwin-x86_64/bin/x86_64-linux-android21-clang"
+ar = "/opt/homebrew/share/android-ndk/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar"
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-unknown-linux-gnu-gcc"
+
+[target.x86_64-unknown-linux-gnu]
+linker = "x86_64-unknown-linux-gnu-gcc"
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar = "x86_64-w64-mingw32-ar"

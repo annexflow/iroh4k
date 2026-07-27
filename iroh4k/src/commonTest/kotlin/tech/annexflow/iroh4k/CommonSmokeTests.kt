@@ -19,7 +19,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 
 /**
  * Test bodies shared by every target, so the FFI (Kotlin/Native) and JNI (JVM/Android) facades
@@ -79,7 +78,12 @@ class CommonSmokeTests {
     }
 
     fun `cancelling a pending operation returns promptly and drains the registry`() = runTest {
-        val baseline = Iroh4k.liveOpCount
+        // `settle()` before the baseline, and a ceiling rather than an equality afterwards: the op
+        // registry is process-global, so both halves of that are what keep this from being a flake
+        // rather than a leak detector. `LiveCounter` documents the three races involved.
+        val ops = LiveCounters.operations
+        LiveCounters.settle()
+        val baseline = ops.value
         val started = CompletableDeferred<Unit>()
         val job = launch(Dispatchers.Default) {
             started.complete(Unit)
@@ -88,16 +92,18 @@ class CommonSmokeTests {
             Iroh4k.smokeSleep(60_000)
         }
         started.await()
-        // Wait for the operation to actually register in Rust before cancelling.
-        awaitUntil { Iroh4k.liveOpCount > baseline }
+        // `started` only proves the coroutine ran; the registry entry appears inside the FFI call
+        // after that. Cancelling before it exists would abort nothing and pass regardless.
+        ops.awaitAtLeast(baseline + 1)
 
         val elapsed = measureTime { job.cancelAndJoin() }
 
         assertThat(job.isCancelled).isEqualTo(true)
         // Cancellation must not wait out the 60s sleep.
         assertThat(elapsed < 5.seconds).isEqualTo(true)
-        awaitUntil { Iroh4k.liveOpCount == baseline }
-        assertThat(Iroh4k.liveOpCount).isEqualTo(baseline)
+        // Still catches the leak this test exists for: a cancel that failed to remove its entry
+        // leaves the count one above the baseline, permanently, and this fails by timeout.
+        ops.awaitAtMost(baseline)
     }
 
     fun `cancelling a pending operation aborts the Rust task`() = runTest {
@@ -106,11 +112,15 @@ class CommonSmokeTests {
         // incremented only *past* the sleep, so it must never move for a cancelled operation
         // even after the sleep duration has elapsed.
         val completionsBefore = Iroh4k.smokeSleepCompletions
-        val baseline = Iroh4k.liveOpCount
+        val ops = LiveCounters.operations
+        LiveCounters.settle()
+        val baseline = ops.value
         val sleepMillis = 500L
 
         val job = launch(Dispatchers.Default) { Iroh4k.smokeSleep(sleepMillis) }
-        awaitUntil { Iroh4k.liveOpCount > baseline }
+        // The whole test rests on this: cancelling before the operation registered would abort
+        // nothing, and `smokeSleepCompletions` would stay put for the trivial reason.
+        ops.awaitAtLeast(baseline + 1)
         job.cancelAndJoin()
 
         // Wait well past when the sleep would have finished had it not been aborted.
@@ -124,12 +134,15 @@ class CommonSmokeTests {
     }
 
     fun `completed operations do not accumulate in the registry`() = runTest {
-        val baseline = Iroh4k.liveOpCount
+        val ops = LiveCounters.operations
+        LiveCounters.settle()
+        val baseline = ops.value
         repeat(50) { assertThat(Iroh4k.smokeEcho(it.toLong())).isEqualTo(it.toLong()) }
         // Also covers the failure path, which takes a different branch out of the registry.
         repeat(10) { assertFailsWith<IrohError> { Iroh4k.smokeError() } }
-        awaitUntil { Iroh4k.liveOpCount == baseline }
-        assertThat(Iroh4k.liveOpCount).isEqualTo(baseline)
+        // Sixty entries came and went. A branch that forgot to remove one would leave the count
+        // above the settled baseline and stay there, which is what this fails on.
+        ops.awaitAtMost(baseline)
     }
 
     fun `a short sleep still completes normally`() = runTest {
@@ -137,16 +150,7 @@ class CommonSmokeTests {
         assertThat(Iroh4k.smokeSleep(50)).isEqualTo(50L)
     }
 
-    /** Polls [condition] on a real clock, since `runTest` would otherwise skip the delays. */
-    private suspend fun awaitUntil(condition: () -> Boolean) {
-        withContext(Dispatchers.Default) {
-            withTimeout(10.seconds) {
-                while (!condition()) delay(10)
-            }
-        }
-    }
-
-    /** Delays on a real clock, for the same reason as [awaitUntil]. */
+    /** Delays on a real clock, since `runTest` would otherwise skip the delay entirely. */
     private suspend fun realDelay(millis: Long) {
         withContext(Dispatchers.Default) { delay(millis) }
     }
