@@ -10,8 +10,13 @@ on:
 
 # No cancel-in-progress: two tags pushed close together must publish one after the other, not race.
 # A cancelled publish can leave a deployment open in the Portal.
+#
+# The group is a constant rather than anything derived from github.ref, because for a tag push
+# github.ref is refs/tags/v0.2.0 — unique per tag, so every release would get a group to itself and
+# serialize against nothing. One name for the whole workflow is what actually queues a second
+# release behind the first, and it queues the dispatch rehearsal behind a live release too.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
 
 permissions:
   contents: read
@@ -30,6 +35,7 @@ jobs:
         include:
           - os: macos-latest
             triples: aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim
+            header: true
           - os: ubuntu-latest
             triples: x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-linux-android x86_64-linux-android
             android: true
@@ -78,6 +84,24 @@ jobs:
             done
           done
           find rust-artifacts -type f | sort
+
+      # The cinterop .def files declare `headers = iroh4k.h` against `-I./src/rust/target`, and that
+      # header is not in the repository: build.rs runs cbindgen and writes it to target/iroh4k.h, and
+      # it is gitignored. Prebuilt mode disables every cargo task on the publish host, so build.rs
+      # never runs there and nothing regenerates it — it has to travel with the libraries or every
+      # cinterop task dies with "'iroh4k.h' file not found".
+      #
+      # It sits one level above target/<triple>/release/, so the Collect loop above cannot pick it
+      # up, and only one leg may upload it: the publish job merges the three artifacts with
+      # merge-multiple, where the same path from two legs is a collision. One copy is enough because
+      # the header is target-independent — src/ffi.rs contains no cfg( at all, so all three legs
+      # generate the same bytes. macOS is the arbitrary but fixed choice.
+      - name: Collect the generated header
+        if: matrix.header
+        shell: bash
+        run: |
+          cp iroh4k/src/rust/target/iroh4k.h rust-artifacts/
+          ls -l rust-artifacts/iroh4k.h
 
       - uses: actions/upload-artifact@v7
         with:
@@ -168,12 +192,17 @@ jobs:
           name: android-jnilibs
           path: iroh4k/src/androidMain/jniLibs
 
+      # The copy reproduces the layout cinterop and the cargo tasks expect: the per-triple libraries
+      # land back under target/<triple>/release/, and the cbindgen header the macOS leg uploaded at
+      # the root of its artifact lands at target/iroh4k.h, which is exactly where the .def files'
+      # `-I./src/rust/target` looks for it. It is listed in the find below because a header that
+      # failed to arrive is otherwise invisible until cinterop fails, several minutes later.
       - name: Restore the Rust libraries
         run: |
           mkdir -p iroh4k/src/rust/target
           cp -R rust-artifacts/. iroh4k/src/rust/target/
           find iroh4k/src/rust/target -type f \
-            \( -name 'libiroh4k.*' -o -name 'iroh4k.dll' \) | sort
+            \( -name 'libiroh4k.*' -o -name 'iroh4k.dll' -o -name 'iroh4k.h' \) | sort
           find iroh4k/src/androidMain/jniLibs -type f | sort
 
       - name: Verify the prebuilt libraries
@@ -181,12 +210,20 @@ jobs:
 
       # Staged locally first. This is where a root module missing a platform is caught, which is the
       # failure the whole design is arranged around and the one a green build will not show.
+      #
+      # The version is passed so the check can confirm that what Gradle actually wrote to disk is
+      # the version being released. check-release-version.sh compares the tag to Cargo.toml; nothing
+      # else compares the tag to the staged output, and the gap is not theoretical — if
+      # -Piroh4kVersion ever stopped reaching the module the version would stay 0.1.0-SNAPSHOT,
+      # publishAndReleaseToMavenCentral would route it to the snapshot repository, release nothing
+      # at the Portal and exit 0, and the tag would report a successful release of nothing. On the
+      # dispatch path the argument is empty, which the script treats as "no version to assert".
       - name: Stage the release
         run: |
           ./gradlew :iroh4k:publishAllPublicationsToLocalStagingRepository \
             -Ptargets=all -Prust.prebuilt=true \
             ${{ steps.version.outputs.version_arg }}
-          scripts/check-staged-release.sh iroh4k/build/localStaging
+          scripts/check-staged-release.sh iroh4k/build/localStaging "${{ steps.version.outputs.version }}"
         env:
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_IN_MEMORY_KEY }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_IN_MEMORY_KEY_PASSWORD }}
