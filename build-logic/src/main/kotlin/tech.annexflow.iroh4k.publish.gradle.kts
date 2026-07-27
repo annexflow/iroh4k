@@ -60,7 +60,13 @@ extensions.configure<MavenPublishBaseExtension> {
 
     // Credentials come from the plugin's standard Gradle properties or environment variables —
     // ORG_GRADLE_PROJECT_mavenCentralUsername / …Password / …signingInMemoryKey — so nothing
-    // secret is committed here, and a publish without them fails rather than publishing unsigned.
+    // secret is committed here.
+    //
+    // signAllPublications() does not make signing mandatory: with no key configured the sign tasks
+    // are simply SKIPPED, and the build succeeds having produced a complete, entirely unsigned set
+    // of artifacts. Maven Central then rejects the deployment, but only after it has been uploaded.
+    // `scripts/check-staged-release.sh` is what actually refuses an unsigned release, on the local
+    // staging copy, before anything leaves the machine.
     publishToMavenCentral()
     signAllPublications()
 }
