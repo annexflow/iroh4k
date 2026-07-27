@@ -24,9 +24,19 @@ object Utils {
     /** The Kotlin target matching the build host, e.g. `macosArm64`. */
     private val defaultTarget = "$osString$archString"
 
-    /** Every target iroh4k can be built for. */
+    /**
+     * Every target iroh4k can be built for.
+     *
+     * `android` is the odd one out: it is the Android *library* (AAR) target, added by the
+     * Android Gradle plugin rather than by `multiplatform.lib`'s target map, so the library
+     * module reads this token itself and nothing here acts on it. It is listed because `all` has
+     * to mean all — a publish runs with `-Ptargets=all`, and leaving the token out would drop the
+     * AAR from Maven Central without any build failing. It is distinct from `androidNativeArm64`
+     * and `androidNativeX64`, which are Kotlin/Native targets using the cinterop path.
+     */
     val allTargets = listOf(
         "jvm",
+        "android",
         "iosArm64",
         "iosSimulatorArm64",
         "androidNativeX64",
@@ -42,6 +52,8 @@ object Utils {
      *
      *  - `-Ptargets=all` — every supported target (needs the full cross toolchain).
      *  - `-Ptargets=macosArm64,linuxX64` — an explicit subset.
+     *  - `-Ptargets=jvm,android` — the AAR, which needs an Android SDK, an NDK and `cargo ndk`
+     *    but no Kotlin/Native Android toolchain.
      *  - absent — the JVM plus the build host only, so local development needs no cross
      *    toolchain.
      */
