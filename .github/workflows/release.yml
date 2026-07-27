@@ -1,0 +1,248 @@
+name: Release
+
+# A tag publishes; the dispatch publishes a snapshot. The two share every step but the version and
+# the final Gradle task, so the dispatch is a real rehearsal of the release path rather than a
+# second code path that can rot. Debug the workflow with the dispatch before pushing a tag.
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+# No cancel-in-progress: two tags pushed close together must publish one after the other, not race.
+# A cancelled publish can leave a deployment open in the Portal.
+#
+# The group is a constant rather than anything derived from github.ref, because for a tag push
+# github.ref is refs/tags/v0.2.0 — unique per tag, so every release would get a group to itself and
+# serialize against nothing. One name for the whole workflow is what actually queues a second
+# release behind the first, and it queues the dispatch rehearsal behind a live release too.
+concurrency:
+  group: release
+
+permissions:
+  contents: read
+
+jobs:
+  # Rust only. Every target is built on the host that can build it: Apple targets cannot be
+  # cross-compiled off macOS, and the Linux and Windows toolchains are not on macOS. `crate-type =
+  # ["staticlib", "cdylib"]` means one cargo invocation produces both the libiroh4k.a that cinterop
+  # embeds in a klib and the .dylib/.so/.dll the JVM jar carries, so eight triples serve both.
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            triples: aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim
+            header: true
+          - os: ubuntu-latest
+            triples: x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-linux-android x86_64-linux-android
+            android: true
+          - os: windows-latest
+            triples: x86_64-pc-windows-gnu
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        shell: bash
+        run: rustup show
+
+      - uses: ./.github/actions/rust-target
+        with:
+          triples: ${{ matrix.triples }}
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            iroh4k/src/rust/target
+          key: ${{ matrix.os }}-release-${{ hashFiles('iroh4k/src/rust/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-release-
+
+      - name: Build
+        shell: bash
+        run: |
+          for triple in ${{ matrix.triples }}; do
+            cargo build --manifest-path iroh4k/src/rust/Cargo.toml --release --target "$triple"
+          done
+
+      # Copied out of the cargo target directory rather than uploaded from it: that directory is
+      # gigabytes of intermediate objects, and only these files cross between jobs.
+      - name: Collect
+        shell: bash
+        run: |
+          for triple in ${{ matrix.triples }}; do
+            src="iroh4k/src/rust/target/$triple/release"
+            dst="rust-artifacts/$triple/release"
+            mkdir -p "$dst"
+            for lib in libiroh4k.a libiroh4k.dylib libiroh4k.so iroh4k.dll; do
+              if [ -f "$src/$lib" ]; then cp "$src/$lib" "$dst/"; fi
+            done
+          done
+          find rust-artifacts -type f | sort
+
+      # The cinterop .def files declare `headers = iroh4k.h` against `-I./src/rust/target`, and that
+      # header is not in the repository: build.rs runs cbindgen and writes it to target/iroh4k.h, and
+      # it is gitignored. Prebuilt mode disables every cargo task on the publish host, so build.rs
+      # never runs there and nothing regenerates it — it has to travel with the libraries or every
+      # cinterop task dies with "'iroh4k.h' file not found".
+      #
+      # It sits one level above target/<triple>/release/, so the Collect loop above cannot pick it
+      # up, and only one leg may upload it: the publish job merges the three artifacts with
+      # merge-multiple, where the same path from two legs is a collision. One copy is enough because
+      # the header is target-independent — src/ffi.rs contains no cfg( at all, so all three legs
+      # generate the same bytes. macOS is the arbitrary but fixed choice.
+      - name: Collect the generated header
+        if: matrix.header
+        shell: bash
+        run: |
+          cp iroh4k/src/rust/target/iroh4k.h rust-artifacts/
+          ls -l rust-artifacts/iroh4k.h
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rust-${{ matrix.os }}
+          path: rust-artifacts
+          if-no-files-found: error
+
+      # The AAR's per-ABI .so is a different output path and a different tool. Driven through the
+      # Gradle task rather than cargo-ndk directly so the ABI list and the pinned --platform 21 stay
+      # defined in one place.
+      - uses: actions/setup-java@v5
+        if: matrix.android
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install cargo-ndk
+        if: matrix.android
+        shell: bash
+        run: command -v cargo-ndk || cargo install cargo-ndk --locked
+
+      - uses: gradle/actions/setup-gradle@v6
+        if: matrix.android
+
+      - name: Build Android JNI libraries
+        if: matrix.android
+        run: ./gradlew :iroh4k:buildRustAndroid -Ptargets=jvm,android
+
+      - uses: actions/upload-artifact@v7
+        if: matrix.android
+        with:
+          name: android-jnilibs
+          path: iroh4k/src/androidMain/jniLibs
+          if-no-files-found: error
+
+  # macOS is not a preference. It is the only host on which no Kotlin target is disabled, and
+  # kotlin.native.ignoreDisabledTargets=true means a disabled target is dropped from the root module
+  # rather than failing the build — so a publisher anywhere else ships a root module missing
+  # platforms, silently.
+  publish:
+    name: Publish
+    needs: rust
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install Rust
+        run: rustup show
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      # The AAR needs an Android SDK to configure and package, and the publisher cannot move off
+      # macOS to find one.
+      - uses: android-actions/setup-android@v3
+
+      - name: Resolve the version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            echo "version_arg=-Piroh4kVersion=$version" >> "$GITHUB_OUTPUT"
+          else
+            # An empty version_arg leaves build.gradle.kts's own default in force.
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "version=" >> "$GITHUB_OUTPUT"
+            echo "version_arg=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check the version matches the crate
+        if: steps.version.outputs.release == 'true'
+        run: scripts/check-release-version.sh "${{ steps.version.outputs.version }}"
+
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: rust-*
+          merge-multiple: true
+          path: rust-artifacts
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: android-jnilibs
+          path: iroh4k/src/androidMain/jniLibs
+
+      # The copy reproduces the layout cinterop and the cargo tasks expect: the per-triple libraries
+      # land back under target/<triple>/release/, and the cbindgen header the macOS leg uploaded at
+      # the root of its artifact lands at target/iroh4k.h, which is exactly where the .def files'
+      # `-I./src/rust/target` looks for it. It is listed in the find below because a header that
+      # failed to arrive is otherwise invisible until cinterop fails, several minutes later.
+      - name: Restore the Rust libraries
+        run: |
+          mkdir -p iroh4k/src/rust/target
+          cp -R rust-artifacts/. iroh4k/src/rust/target/
+          find iroh4k/src/rust/target -type f \
+            \( -name 'libiroh4k.*' -o -name 'iroh4k.dll' -o -name 'iroh4k.h' \) | sort
+          find iroh4k/src/androidMain/jniLibs -type f | sort
+
+      - name: Verify the prebuilt libraries
+        run: ./gradlew :iroh4k:checkRustPrebuilt -Ptargets=all -Prust.prebuilt=true
+
+      # Staged locally first. This is where a root module missing a platform is caught, which is the
+      # failure the whole design is arranged around and the one a green build will not show.
+      #
+      # The version is passed so the check can confirm that what Gradle actually wrote to disk is
+      # the version being released. check-release-version.sh compares the tag to Cargo.toml; nothing
+      # else compares the tag to the staged output, and the gap is not theoretical — if
+      # -Piroh4kVersion ever stopped reaching the module the version would stay 0.1.0-SNAPSHOT,
+      # publishAndReleaseToMavenCentral would route it to the snapshot repository, release nothing
+      # at the Portal and exit 0, and the tag would report a successful release of nothing. On the
+      # dispatch path the argument is empty, which the script treats as "no version to assert".
+      - name: Stage the release
+        run: |
+          ./gradlew :iroh4k:publishAllPublicationsToLocalStagingRepository \
+            -Ptargets=all -Prust.prebuilt=true \
+            ${{ steps.version.outputs.version_arg }}
+          scripts/check-staged-release.sh iroh4k/build/localStaging "${{ steps.version.outputs.version }}"
+        env:
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_IN_MEMORY_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_IN_MEMORY_KEY_PASSWORD }}
+
+      - name: Publish
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_IN_MEMORY_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_IN_MEMORY_KEY_PASSWORD }}
+        run: |
+          if [ "${{ steps.version.outputs.release }}" = "true" ]; then
+            # Uploads one deployment and releases it once the Portal has validated it.
+            ./gradlew :iroh4k:publishAndReleaseToMavenCentral \
+              -Ptargets=all -Prust.prebuilt=true \
+              ${{ steps.version.outputs.version_arg }}
+          else
+            # The plugin routes a -SNAPSHOT version to the snapshot repository and performs no
+            # Portal release, so this is the same path minus the irreversible step.
+            ./gradlew :iroh4k:publishAllPublicationsToMavenCentralRepository \
+              -Ptargets=all -Prust.prebuilt=true
+          fi

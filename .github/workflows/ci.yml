@@ -223,37 +223,9 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - name: Add Rust target
-        run: rustup target add ${{ matrix.rust }}
-
-      - name: Install Linux cross toolchain
-        if: matrix.target == 'linuxArm64'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          mkdir -p ~/.cargo
-          printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' >> ~/.cargo/config.toml
-
-      # The same entries scripts/config.toml documents, with the runner's NDK path filled in. The
-      # `[env]` half is not optional: crates in the tree build C sources through cc-rs, which
-      # looks for a compiler named exactly `<triple>-clang`, while the NDK only ships the
-      # API-suffixed `<triple>21-clang`. Without it the build fails inside a build script rather
-      # than at link time.
-      - name: Configure Android NDK toolchain
-        if: startsWith(matrix.target, 'androidNative')
-        run: |
-          bin="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          triple='${{ matrix.rust }}'
-          env_triple=$(echo "$triple" | tr - _)
-          mkdir -p ~/.cargo
-          {
-            printf '[target.%s]\n' "$triple"
-            printf 'linker = "%s/%s21-clang"\n' "$bin" "$triple"
-            printf 'ar = "%s/llvm-ar"\n' "$bin"
-            printf '[env]\n'
-            printf 'CC_%s = "%s/%s21-clang"\n' "$env_triple" "$bin" "$triple"
-            printf 'AR_%s = "%s/llvm-ar"\n' "$env_triple" "$bin"
-          } >> ~/.cargo/config.toml
+      - uses: ./.github/actions/rust-target
+        with:
+          triples: ${{ matrix.rust }}
 
       - name: Cache cargo and konan
         uses: actions/cache@v6

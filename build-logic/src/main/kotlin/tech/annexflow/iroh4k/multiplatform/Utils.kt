@@ -64,4 +64,20 @@ object Utils {
                 else -> it.split(",").map { t -> t.trim() }
             }
         } ?: listOf("jvm", defaultTarget)
+
+    /**
+     * Whether the Rust libraries are already on disk, so cargo must not run.
+     *
+     * Set with `-Prust.prebuilt=true` by the release workflow. Apple targets cannot be
+     * cross-compiled off macOS and Linux ones cannot be built on it, so a release builds each
+     * triple on the host that can build it, restores the outputs into
+     * `src/rust/target/<triple>/release`, and runs one publish here with cargo disabled.
+     *
+     * A missing library would otherwise surface as a cinterop or packaging failure deep in a long
+     * build; `checkRustPrebuilt` turns it into a named error before any of that starts.
+     */
+    fun rustPrebuilt(project: Project): Boolean =
+        project.providers.gradleProperty("rust.prebuilt")
+            .map(String::toBoolean)
+            .getOrElse(false)
 }

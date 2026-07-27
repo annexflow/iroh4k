@@ -1,0 +1,55 @@
+name: Rust target setup
+description: >
+  Installs Rust targets and the cross toolchains they need. One definition, used by both the CI
+  build matrix and the release workflow, so a toolchain fix cannot land in one and miss the other.
+
+inputs:
+  triples:
+    description: Space-separated Rust target triples, e.g. "aarch64-linux-android x86_64-linux-android".
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Add Rust targets
+      shell: bash
+      run: rustup target add ${{ inputs.triples }}
+
+    - name: Install Linux cross toolchain
+      if: contains(inputs.triples, 'aarch64-unknown-linux-gnu')
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-aarch64-linux-gnu
+        mkdir -p ~/.cargo
+        printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' \
+          >> ~/.cargo/config.toml
+
+    # The same entries scripts/config.toml documents, with the runner's NDK path filled in. The
+    # `[env]` half is not optional: crates in the tree build C sources through cc-rs, which looks
+    # for a compiler named exactly `<triple>-clang`, while the NDK only ships the API-suffixed
+    # `<triple>21-clang`. Without it the build fails inside a build script rather than at link time.
+    #
+    # Every `[target.*]` block is written before the single `[env]` block, because TOML forbids a
+    # table being defined twice and this action may be handed both Android triples at once.
+    - name: Configure Android NDK toolchain
+      if: contains(inputs.triples, '-linux-android')
+      shell: bash
+      run: |
+        bin="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        mkdir -p ~/.cargo
+        {
+          for triple in ${{ inputs.triples }}; do
+            case "$triple" in *-linux-android) ;; *) continue ;; esac
+            printf '[target.%s]\n' "$triple"
+            printf 'linker = "%s/%s21-clang"\n' "$bin" "$triple"
+            printf 'ar = "%s/llvm-ar"\n' "$bin"
+          done
+          printf '[env]\n'
+          for triple in ${{ inputs.triples }}; do
+            case "$triple" in *-linux-android) ;; *) continue ;; esac
+            env_triple=$(echo "$triple" | tr - _)
+            printf 'CC_%s = "%s/%s21-clang"\n' "$env_triple" "$bin" "$triple"
+            printf 'AR_%s = "%s/llvm-ar"\n' "$env_triple" "$bin"
+          done
+        } >> ~/.cargo/config.toml

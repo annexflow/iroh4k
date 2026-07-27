@@ -303,3 +303,27 @@ Other build facts worth knowing:
   `RUSTFLAGS="--print=native-static-libs" cargo build --release --target <triple>`.
 - Never enable iroh's `tls-aws-lc-rs` feature: it needs cmake and a C toolchain and cross-compiles
   poorly to iOS, Android and mingw. `tls-ring` is the default and stays.
+
+## Releasing
+
+A `v*` tag publishes every target to Maven Central. The version comes from the tag and nowhere
+else, and `scripts/check-release-version.sh` refuses a tag that disagrees with `[package].version`
+in `iroh4k/src/rust/Cargo.toml` — `Iroh4k.version` is built from `CARGO_PKG_VERSION`, so the two
+have to be bumped together, along with the assertions in `CommonSmokeTests` and `DeviceSmokeTests`
+that hardcode it.
+
+Rehearse with the snapshot path first. It is the same workflow, the same jobs and the same Gradle
+invocation, missing only the irreversible step:
+
+    gh workflow run Release
+
+Then push the tag:
+
+    git tag v0.2.0 && git push origin v0.2.0
+
+The release is not built where you might expect. Rust is cross-compiled on three runners because no
+host has every toolchain, and everything else happens once on macOS with those libraries restored —
+`-Prust.prebuilt=true` turns cargo off for that run. macOS is not a preference: it is the only host
+on which no Kotlin target is disabled, and a disabled target is *dropped from the root module*
+rather than failing the build. `scripts/check-staged-release.sh` asserts the root module references
+all ten targets before anything is uploaded, because nothing downstream would.

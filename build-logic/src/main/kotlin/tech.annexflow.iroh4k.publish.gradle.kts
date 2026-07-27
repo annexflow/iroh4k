@@ -60,7 +60,33 @@ extensions.configure<MavenPublishBaseExtension> {
 
     // Credentials come from the plugin's standard Gradle properties or environment variables —
     // ORG_GRADLE_PROJECT_mavenCentralUsername / …Password / …signingInMemoryKey — so nothing
-    // secret is committed here, and a publish without them fails rather than publishing unsigned.
+    // secret is committed here.
+    //
+    // signAllPublications() does not make signing mandatory: with no key configured the sign tasks
+    // are simply SKIPPED, and the build succeeds having produced a complete, entirely unsigned set
+    // of artifacts. Maven Central then rejects the deployment, but only after it has been uploaded.
+    // `scripts/check-staged-release.sh` is what actually refuses an unsigned release, on the local
+    // staging copy, before anything leaves the machine.
     publishToMavenCentral()
     signAllPublications()
+}
+
+/**
+ * A local Maven repository the release workflow publishes to before it publishes to Central.
+ *
+ * Publishing here is file copying with no network, so it costs almost nothing, and it buys the two
+ * things a release needs and Maven Central will not tell you: what the release weighs, and whether
+ * the root module actually references every target. The second is the failure this project's
+ * publishing design exists to prevent — `kotlin.native.ignoreDisabledTargets` drops a target the
+ * host cannot build rather than failing, so a publish from the wrong host produces a root module
+ * that is structurally valid and missing platforms. `scripts/check-staged-release.sh` reads what
+ * lands here and refuses that.
+ */
+publishing {
+    repositories {
+        maven {
+            name = "localStaging"
+            url = layout.buildDirectory.dir("localStaging").get().asFile.toURI()
+        }
+    }
 }

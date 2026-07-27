@@ -61,6 +61,9 @@ extensions.configure<KotlinMultiplatformExtension> {
  */
 fun KotlinNativeTarget.rust(target: String) {
     val tasks = project.tasks
+    // Read once, at configuration time: capturing `project` inside `onlyIf` would break the
+    // configuration cache, which this build has enabled.
+    val prebuilt = Utils.rustPrebuilt(project)
     fun file(path: String) = project.projectDir.resolve(path)
 
     compilations["main"].cinterops {
@@ -100,6 +103,7 @@ fun KotlinNativeTarget.rust(target: String) {
                     "--target=$target",
                     "--release"
                 )
+                onlyIf { !prebuilt }
             }
             tasks.getByName(interopProcessingTaskName) { dependsOn(cargoTask) }
         }

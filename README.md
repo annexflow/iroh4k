@@ -209,7 +209,8 @@ entries above instead of `cargo ndk`.
 ## Status and limitations
 
 Version `0.1.0-SNAPSHOT`, targeting **iroh 1.0.3**. Published as
-`tech.annexflow.iroh4k:iroh4k`, dual licensed Apache-2.0 or MIT — the same terms as iroh itself, so
+`tech.annexflow.iroh4k:iroh4k` from a `v*` tag by `.github/workflows/release.yml`, dual licensed
+Apache-2.0 or MIT — the same terms as iroh itself, so
 a consumer picks up nothing stricter than upstream. The version string reports both halves:
 `Iroh4k.version` is `"0.1.0+iroh1.0.3"`.
 
