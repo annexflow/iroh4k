@@ -114,4 +114,12 @@ fi
 
 [ "$status" -eq 0 ] || exit "$status"
 
-echo "Staged release: $(du -sh "$staging" | cut -f1), $(find "$staging" -type f | wc -l | tr -d ' ') files, $modules modules."
+# Counted without sha256/sha512, because this staging repository is plain `maven-publish` output
+# and the deployment is not. The publish plugin's `Checksum.DEFAULT` is `[MD5, SHA1]`, so those two
+# extensions are all that reaches Maven Central — 48 of the 120 files a three-module staging
+# produces here never leave the runner. Since the only reason to print this line is Central's
+# release-size budget, counting files it will never see would defeat it.
+shipped="$(find "$staging" -type f ! -name '*.sha256' ! -name '*.sha512' | wc -l | tr -d ' ')"
+bytes="$(find "$staging" -type f ! -name '*.sha256' ! -name '*.sha512' -exec du -k {} + | awk '{s += $1} END {printf "%.1f", s / 1024}')"
+
+echo "Staged release: ${bytes}M, $shipped files, $modules modules."
