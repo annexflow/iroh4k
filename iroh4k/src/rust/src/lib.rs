@@ -29,6 +29,11 @@ mod ops;
 #[cfg(not(target_os = "ios"))]
 mod jni;
 
+// Android needs the process's JavaVM and Context installed before iroh touches the platform's
+// DNS or interface list. Android-only: nothing else has an `ndk_context` to install into.
+#[cfg(target_os = "android")]
+mod android;
+
 // Domain modules. Each owns its shared logic *and* both facades' exports for it, so the
 // modules stay independently editable — the same reason iroh-ffi splits into key.rs, net.rs,
 // relay.rs and ticket.rs rather than one flat FFI surface.

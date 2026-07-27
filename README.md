@@ -50,6 +50,12 @@ Three consequences worth stating plainly:
   `Router` is fifty lines of Kotlin over `Endpoint.acceptNext()`, so the Rust side never calls into
   Kotlin at all. `grep -r JNI_OnLoad` finds nothing but the comments explaining its absence.
 
+  One honest exception, on Android only: `Iroh4kAndroid` hands the process's `JavaVM` and
+  application `Context` to `ndk_context`, because the crates that read the system DNS servers and
+  the interface list have no other way to reach them. That is a stored `JavaVM` — but it is used by
+  dependencies to call *Android framework* APIs, never to call back into application code, and it
+  still needs no `JNI_OnLoad`. It is initialised automatically; see [Android](#android) below.
+
 The thing iroh4k does *not* have is upstream's blessing or upstream's release cadence. It is
 hand-written, which is why it is honest about coverage below.
 
@@ -119,7 +125,7 @@ the second is legal and leaves the peer to work it out from a timeout.
 | Target | Status |
 | --- | --- |
 | `macosArm64`, `jvm` | Tested. 410 test bodies, 205 per facade, run on every change |
-| `android` (AAR) | Tested on the host under Robolectric: the same 205 bodies `jvmTest` runs. Never executed on a device or emulator |
+| `android` (AAR) | Tested on the host under Robolectric — the same 205 bodies `jvmTest` runs — plus 5 instrumented tests on an emulator, which are the only ones that exercise the packaged `.so` |
 | `iosArm64`, `iosSimulatorArm64` | Compiles and links; cinterop verified in CI |
 | `linuxX64` | Test suite is configured in CI on `ubuntu-latest`; not verified locally |
 | `linuxArm64`, `mingwX64` | Cross-compiled and assembled in CI; never executed |
@@ -134,9 +140,25 @@ story to go with it, and its `minSdk` is 26, which a consuming app has to meet. 
 tests in `src/androidHostTest` run the shared `Common*Tests` bodies against that facade on the build
 machine's own JVM, loading the host library rather than the packaged `.so`.
 
+Two things the AAR does for a consuming app, both of which it would otherwise crash without.
+
+It **initialises itself**. Crates underneath iroh reach Android's DNS servers and interface list
+through `ndk_context`, which must be handed the process's `JavaVM` and `Context` before the first
+`Endpoint.bind` — otherwise the process dies with a native `SIGABRT` and the abort message
+`android context was not initialized`, which no Kotlin code can catch. `Iroh4kInitializer` does it
+at process start through `androidx.startup`, so an app that just adds the dependency is already
+initialised. An app that removes the startup provider must call `Iroh4kAndroid.install(context)`
+before creating any endpoint.
+
+It also **declares the permissions it needs** — `INTERNET` and `ACCESS_NETWORK_STATE` — because
+Android gates socket creation on the first at the kernel level, and a bind without it fails as
+`could not bind an endpoint: Failed to bind sockets` with nothing naming the cause. Both are
+install-time permissions with no runtime prompt.
+
 `androidNativeArm64`/`androidNativeX64` are **Kotlin/Native** targets on the cinterop path, for
-Kotlin/Native binaries that happen to run on Android. An app consuming the AAR does not use them, and
-neither selection implies the other.
+Kotlin/Native binaries that happen to run on Android. They have no `JavaVM` to install, so anything
+that needs the platform's DNS or interface list is not available to them. An app consuming the AAR
+does not use them, and neither selection implies the other.
 
 `Endpoint.networkChange()` is there for Android specifically: the OS reports interface changes to
 Java and not to native code, so an app should call it from its own `ConnectivityManager` callback.
@@ -169,8 +191,9 @@ Kotlin/Native links its Android output against an API 21 sysroot, and the two ha
 ### Android
 
 ```bash
-./gradlew :iroh4k:assemble -Ptargets=jvm,android          # the AAR, both ABIs
-./gradlew :iroh4k:testAndroidHostTest -Ptargets=jvm,android
+./gradlew :iroh4k:assemble -Ptargets=jvm,android              # the AAR, both ABIs
+./gradlew :iroh4k:testAndroidHostTest -Ptargets=jvm,android   # Robolectric, host library
+./gradlew :iroh4k:connectedAndroidDeviceTest -Ptargets=jvm,android   # needs a device or emulator
 ```
 
 That needs, beyond the Rust toolchain: an Android SDK, an NDK, `cargo install cargo-ndk`, and

@@ -15,6 +15,8 @@
 //! `ERROR_CANCELLED`.
 //!
 //! No `JNI_OnLoad` or class caching is needed because the Rust side never calls back into Java.
+//! The one place a `JavaVM` is retained at all is [`crate::android`], which hands it to
+//! `ndk_context` for iroh's platform lookups — still not a callback into application code.
 //!
 //! Symbol names match the Kotlin object `tech.annexflow.iroh4k.Iroh4kJni`. Results are returned
 //! as a single byte buffer produced by [`crate::core::serialize_result`] and decoded by Kotlin.

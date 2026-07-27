@@ -32,7 +32,9 @@ iroh4k/src/commonTest/.../Common<Domain>Tests.kt  + native/jvm/androidHostTest d
 ```
 
 `jniMain` has no `androidMain` counterpart to write: the JNI actuals are shared by the JVM and
-Android targets, and the only thing `androidMain` holds is the native-library loader.
+Android targets. `androidMain` holds only what is Android and not JNI — the native-library loader,
+and the `Iroh4kAndroid`/`Iroh4kInitializer` pair that installs the Android context (paired with
+`src/rust/src/android.rs`, the one Android-only Rust module).
 
 `expect` names are prefixed with the domain (`nativeAddrTicketFromAddr`, `nativeEndpointBind`) so
 they stay distinct inside the one shared package.
@@ -176,9 +178,19 @@ Rust never calls into Kotlin except through the one-shot completion callback on 
 Watchers are pull-based (`next()`), and `Router` is fifty lines of pure Kotlin over
 `Endpoint.acceptNext()` with no `router.rs` and no `expect fun` behind it.
 
-That is why there is no `JNI_OnLoad`, no cached `JavaVM` and no `AttachCurrentThread` anywhere —
-`grep -rn JNI_OnLoad` finds only the comments explaining its absence. Keep it that way: a reverse
-callback is the riskiest thing in a hand-written binding, and nothing here needs one.
+That is why there is no `JNI_OnLoad` and no `AttachCurrentThread` anywhere — `grep -rn JNI_OnLoad`
+finds only the comments explaining its absence. Keep it that way: a reverse callback is the riskiest
+thing in a hand-written binding, and nothing here needs one.
+
+**The one JavaVM in the codebase is `android.rs`, and it is not a reverse callback.** Android's
+`ndk_context` must be handed the process's `JavaVM` and application `Context` before iroh touches
+the platform, because `hickory-resolver` reads the DNS servers off `LinkProperties` and `netdev`
+enumerates interfaces through it; its accessor is an `expect`, so without the install the first
+`Endpoint::bind` aborts the process with `android context was not initialized`. The stored pointers
+are used by *dependencies* to call **Android framework** APIs — never to call into Kotlin. Two rules
+follow: the install runs exactly once (`ndk_context::initialize_android_context` asserts it was not
+set before, so a second call aborts just like a missing one), and nothing in this crate may grow a
+callback into application code on the back of that VM being available.
 
 ## Tests
 
@@ -194,6 +206,15 @@ callback is the riskiest thing in a hand-written binding, and nothing here needs
   one) would need. Keep it on new delegators; nothing will fail loudly if you don't.
   (`BinaryReaderTests` is the one exception: pure-Kotlin decoder tests with no facade, so they
   carry `@Test` directly in `commonTest` and are picked up by every compilation.)
+- **`androidDeviceTest` is deliberately not a fourth delegator.** It runs on a device or emulator
+  (`./gradlew :iroh4k:connectedAndroidDeviceTest -Ptargets=jvm,android`) and covers only what a
+  host cannot: `System.loadLibrary` on the packaged `.so`, ART instead of HotSpot, the manifest's
+  permissions, and `androidx.startup` having installed the Android context. It cannot run the
+  shared bodies at all — Kotlin turns a suspend lambda inside ``fun `a name with spaces`()`` into a
+  class whose name contains spaces, which DEX rejects below version 040, i.e. below `minSdk 35`.
+  That is why its methods are named without backticks and why the compilation is left out of the
+  `test` source-set tree. Everything these tests found was invisible to all 615 host tests: a
+  process-aborting missing init, and a missing `INTERNET` permission.
 - **Robolectric gives each test class its own sandbox classloader**, so under `androidHostTest`
   every class loads its *own copy* of the host `libiroh4k.so` — the loader in `androidMain`
   copies to a unique temp file precisely so the second class does not hit "native library already
@@ -239,6 +260,13 @@ A fifth for anything in `commonMain`, `commonTest` or `jniMain`, which Android s
 
 It needs an Android SDK, so it is not in the standard four — but it is the only gate that runs the
 shared bodies through the Android loader, and CI runs it on every change.
+
+Anything touching `src/androidMain`, `src/rust/src/android.rs` or the Android manifest also wants a
+device or emulator, because none of what that code does is observable on a host:
+
+```bash
+./gradlew :iroh4k:connectedAndroidDeviceTest -Ptargets=jvm,android
+```
 
 **Run the two test tasks as separate Gradle invocations.** Sharing one has been observed to let a
 Rust rebuild swap the JNI shared library out from under a running test JVM, producing

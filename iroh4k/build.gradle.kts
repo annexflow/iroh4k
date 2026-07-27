@@ -86,6 +86,31 @@ kotlin {
             // `Common*Tests` runners those tests delegate to come from there.
             withHostTestBuilder {}
 
+            // On-device tests, compiled from `src/androidDeviceTest`. They exist for one branch
+            // the host tests structurally cannot reach: `System.loadLibrary`, and with it the
+            // `.so` the platform unpacked from the APK, ART's JNI rather than HotSpot's, and a
+            // real Android kernel under the UDP sockets.
+            //
+            // These deliberately do *not* run the shared `Common*Tests` bodies, which is the one
+            // place Android's coverage differs from the JVM's. Those bodies are named in the
+            // project's backtick style, and Kotlin compiles a suspend lambda inside
+            // `fun \`notifying a network change is harmless\`()` into a class literally called
+            // `CommonEndpointTests$notifying a network change is harmless$1`. A space in a class
+            // name needs DEX version 040, which R8 emits only from `minSdk 35`:
+            //
+            //     Space characters in SimpleName '…$notifying a network change is harmless$1'
+            //     are not allowed prior to DEX version 040
+            //
+            // Raising `minSdk` to 35 to run tests would cost every consumer nine API levels, and
+            // renaming 205 shared bodies would bend the whole suite around one facade. So the
+            // compilation keeps its default `sourceSetTreeName` of null — no `commonTest` — and
+            // `src/androidDeviceTest` holds a focused suite over the public API instead. The host
+            // tests already prove the shared bodies pass through the JNI facade; what only a
+            // device can prove is the rest of `DeviceSmokeTests`' list.
+            withDeviceTestBuilder {}.configure {
+                instrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+            }
+
             packaging {
                 // `cargo ndk` copies *every* `.so` cargo produced for the ABI into `jniLibs`, and
                 // several of iroh4k's dependencies (`iroh`, `iroh-relay`, `irpc`, `irpc-iroh`)
@@ -126,6 +151,8 @@ kotlin {
     if (androidEnabled) {
         sourceSets.getByName("androidMain").dependsOn(jniMain)
         sourceSets.getByName("androidHostTest").dependsOn(jniTest)
+        // `androidDeviceTest` is deliberately left out of this wiring — see the comment on
+        // `withDeviceTestBuilder` above. It compiles against `androidMain` alone.
     }
 
     sourceSets {
@@ -141,6 +168,15 @@ kotlin {
             implementation(libs.kotlinx.coroutines.test)
         }
         if (androidEnabled) {
+            // `api`, not `implementation`: `Iroh4kInitializer` implements `Initializer` from this
+            // artifact, so the type is part of the AAR's public surface. It is also what makes
+            // the manifest's startup provider work in a consuming app — see `Iroh4kAndroid` for
+            // what happens to an app that has neither the provider nor an explicit install call.
+            getByName("androidMain").dependencies {
+                api(libs.androidx.startup.runtime)
+            }
+        }
+        if (androidEnabled) {
             // Robolectric is the only thing these tests need beyond `commonTest`: it supplies the
             // Android framework the host JVM does not have. The test bodies themselves are the
             // shared `Common*Tests` and touch no Android API, so there is no `androidx.test`
@@ -148,6 +184,16 @@ kotlin {
             // is a test-only compilation.
             getByName("androidHostTest").dependencies {
                 implementation(libs.robolectric)
+            }
+            // The instrumentation runner that executes on the device, plus the `AndroidJUnit4`
+            // runner the test classes name. `kotlin.test` and the coroutines artifacts are named
+            // explicitly here because this compilation is in no source-set tree, so it inherits
+            // nothing from `commonTest`. Test-only, like the Robolectric dependency above.
+            getByName("androidDeviceTest").dependencies {
+                implementation(libs.kotlin.test)
+                implementation(libs.kotlinx.coroutines.core)
+                implementation(libs.androidx.test.runner)
+                implementation(libs.androidx.test.ext.junit)
             }
         }
     }

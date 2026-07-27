@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Registers Iroh4kInitializer with androidx.startup, so a consuming app has the process's
+    JavaVM and Context installed before it can reach Endpoint.bind. Without it the first bind ends
+    the process with a native SIGABRT ("android context was not initialized") that no Kotlin code
+    can catch — see Iroh4kAndroid.
+
+    `tools:node="merge"` so this contributes to the app's existing InitializationProvider rather
+    than competing with it; the authority is the app's own, filled in by the manifest merger.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+        Declared by the library rather than left to the app, because iroh4k cannot do anything at
+        all without them and the failure is opaque: Android gates socket creation on INTERNET at
+        the kernel level, so without it even a loopback bind comes back as
+
+            IrohError: [Bind] :: could not bind an endpoint: Failed to bind sockets
+
+        with nothing naming the permission. ACCESS_NETWORK_STATE is what lets the DNS resolver read
+        LinkProperties and what an app needs to observe the network changes Endpoint.networkChange()
+        is fed from. Both are install-time permissions with no runtime prompt, so a consumer gains
+        nothing to review and loses the whole library by omission.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <application>
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="tech.annexflow.iroh4k.Iroh4kInitializer"
+                android:value="androidx.startup" />
+        </provider>
+    </application>
+
+</manifest>

@@ -3,6 +3,9 @@ name = "iroh4k"
 version = "0.1.0"
 edition = "2021"
 publish = false
+# Same terms as the Kotlin artifact and as iroh itself. The crate is never published — the license
+# is here so a vendored or audited copy of this source tree carries its terms with it.
+license = "MIT OR Apache-2.0"
 
 [lib]
 # staticlib -> linked into Kotlin/Native targets via cinterop (FFI).
@@ -54,6 +57,14 @@ tracing-subscriber = "0.3"
 # Only needed for the JNI (JVM/Android) path. iOS uses the FFI/cinterop path exclusively.
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 jni = { version = "0.21.1" }
+
+# https://crates.io/crates/ndk-context
+# Already in the tree transitively — hickory-resolver reads Android's DNS servers through it and
+# netdev enumerates interfaces through it — but nothing initializes it, and its accessor is an
+# `expect`. Depending on it directly is what lets `src/android.rs` install the JavaVM and Context
+# before iroh does, instead of the process aborting inside `Endpoint::bind`.
+[target.'cfg(target_os = "android")'.dependencies]
+ndk-context = { version = "0.1.1" }
 
 [build-dependencies]
 # https://crates.io/crates/cbindgen

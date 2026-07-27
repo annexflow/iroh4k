@@ -70,11 +70,17 @@ jobs:
             iroh4k/build/test-results/**/*.xml
             iroh4k/**/hs_err_pid*.log
 
-  # Android, which is two facades in one job. The host tests are the JNI facade under Robolectric
-  # on the runner's own JVM — the same `Common*Tests` bodies as jvmTest, so a break here is a
-  # break in the shared code or in the Android loader. The assemble is the part the host tests
-  # cannot reach: cargo-ndk cross-compiling the real per-ABI `.so` and AGP packaging them into the
-  # AAR. Neither needs a device or an emulator.
+  # Android, in three passes over one expensive Rust build. The host tests are the JNI facade under
+  # Robolectric on the runner's own JVM — the same `Common*Tests` bodies as jvmTest, so a break
+  # there is a break in the shared code or in the Android loader. The assemble cross-compiles the
+  # real per-ABI `.so` with cargo-ndk and packages the AAR. The emulator run is the only pass that
+  # exercises what a host cannot: `System.loadLibrary` on the packaged `.so`, ART, the manifest's
+  # permissions, and `androidx.startup` having installed the Android context. Both of the Android
+  # defects this project has had were invisible to every host test and fatal on a device, which is
+  # why the emulator is worth its minutes.
+  #
+  # All three share one job because the cargo-ndk build dominates the cost; splitting them would
+  # pay for it twice.
   android:
     name: Android
     runs-on: ubuntu-latest
@@ -124,6 +130,50 @@ jobs:
       - name: Assemble AAR
         run: ./gradlew :iroh4k:assemble -Ptargets=jvm,android
 
+      # The emulator is unusably slow without hardware acceleration, and the runner image ships
+      # /dev/kvm but not the permissions to use it.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # Booting an AVD from cold costs minutes; a cached snapshot makes the run below start from a
+      # booted system. Keyed on the API level alone, since nothing else about the AVD varies.
+      - name: Cache AVD
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-34-x86_64
+
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          force-avd-creation: false
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          script: echo "Generated AVD snapshot for caching."
+
+      # x86_64 because that is the runner's architecture, and it is one of the two ABIs the AAR
+      # ships — so this runs the same `.so` a consumer on an x86_64 device would get. API 34 is
+      # comfortably above the library's minSdk of 26.
+      - name: Device tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: ./gradlew :iroh4k:connectedAndroidDeviceTest -Ptargets=jvm,android
+
       - name: Upload test results
         if: failure()
         uses: actions/upload-artifact@v4
@@ -131,6 +181,7 @@ jobs:
           name: test-results-android
           path: |
             iroh4k/build/test-results/**/*.xml
+            iroh4k/build/outputs/androidTest-results/**/*.xml
             iroh4k/**/hs_err_pid*.log
 
   # Targets that cannot run tests here (no device, no emulator, or no runner) but must still
