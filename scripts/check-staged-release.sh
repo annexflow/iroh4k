@@ -21,7 +21,7 @@ staging="${1:?usage: check-staged-release.sh <staging-repo-dir>}/tech/annexflow/
 
 targets="jvm android iosarm64 iossimulatorarm64 macosarm64 linuxx64 linuxarm64 mingwx64 androidnativearm64 androidnativex64"
 
-root="$(find "$staging/iroh4k" -name 'iroh4k-*.module' | head -1)"
+root="$(find "$staging/iroh4k" -name 'iroh4k-*.module' 2>/dev/null | head -1 || true)"
 [ -n "$root" ] || { echo "No root .module under $staging/iroh4k" >&2; exit 1; }
 
 status=0
