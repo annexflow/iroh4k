@@ -1,0 +1,61 @@
+version: 2
+
+updates:
+  # The workflow actions in .github/workflows. All of them move slowly and independently, so a
+  # single grouped PR per week is less noise than one PR per action.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: [ "*" ]
+
+  # The Gradle side. `directory: /` covers the root build plus gradle/libs.versions.toml, which is
+  # where every version in this build actually lives — build-logic has no catalog of its own, it
+  # reads ../gradle/libs.versions.toml, so bumps there land through this entry too.
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # Kotlin and Dokka are coupled: Dokka is built against a specific Kotlin, and the Kotlin
+      # version drives both the plugin and kotlin-test. Keeping them in one PR means CI validates
+      # the combination rather than each half against the other's old version.
+      kotlin:
+        patterns:
+          - "org.jetbrains.kotlin:*"
+          - "org.jetbrains.kotlin.*"
+          - "org.jetbrains.dokka*"
+      # AGP and the androidx test/startup artifacts are only exercised by the Android job, so a
+      # failure here is localized. Grouped for the same reason.
+      android:
+        patterns:
+          - "com.android.*"
+          - "androidx.*"
+          - "org.robolectric:*"
+      # Everything else — coroutines, kotlinx-io, assertk, the publish plugin — batched at the
+      # non-major level. Majors come through as individual PRs, which is what you want for a
+      # library whose public API surface depends on them.
+      minor-and-patch:
+        update-types: [ minor, patch ]
+
+  # The Rust core. Note that Dependabot updates Cargo.lock as part of these PRs, which is what the
+  # CI cache keys on, so a merged bump costs one cold Rust build per runner.
+  - package-ecosystem: cargo
+    directory: /iroh4k/src/rust
+    schedule:
+      interval: weekly
+    groups:
+      # The iroh crates and the n0-* support crates are released in lockstep and expect matching
+      # versions of each other. Bumping one at a time produces PRs that cannot compile.
+      iroh:
+        patterns:
+          - "iroh"
+          - "iroh-*"
+          - "n0-*"
+      # tokio, tracing, jni, cbindgen and ndk-context batched at the non-major level. Majors arrive
+      # as individual PRs — a major on jni or cbindgen is an FFI migration, not a routine bump, and
+      # it deserves its own branch for the build matrix to fail against.
+      rust-minor-and-patch:
+        update-types: [ minor, patch ]
