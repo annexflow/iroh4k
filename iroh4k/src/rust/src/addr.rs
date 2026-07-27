@@ -366,7 +366,7 @@ pub unsafe extern "C" fn iroh4k_addr_ticket_from_string(text: *const c_char) -> 
 #[allow(non_snake_case)]
 mod jni_facade {
     use super::*;
-    use jni::JNIEnv;
+    use jni::EnvUnowned;
     use jni::objects::{JByteArray, JClass, JString};
     use jni::sys::jbyteArray;
 
@@ -378,17 +378,21 @@ mod jni_facade {
     /// An unreadable or absent array becomes empty, which the payload reader then rejects as a
     /// malformed address. That is deliberate: the FFI boundary must never unwind, so a missing
     /// argument is reported like any other malformed one.
-    fn arg(env: &mut JNIEnv, array: &JByteArray) -> Vec<u8> {
-        env.convert_byte_array(array).unwrap_or_default()
+    fn arg(env: &mut EnvUnowned, array: &JByteArray) -> Vec<u8> {
+        crate::jni::with_env(env, |env| env.convert_byte_array(array)).unwrap_or_default()
     }
 
     /// Reads a Java `String` argument, or reports why it could not be read under `code`.
     ///
-    /// `String::from(JavaStr)` decodes Java's modified UTF-8 and is infallible (it falls back to
-    /// lossy decoding), so the only failure left is not being handed a string at all.
-    fn text(env: &mut JNIEnv, value: &JString, code: c_int) -> Result<String, *mut Iroh4kResult> {
-        match env.get_string(value) {
-            Ok(java_str) => Ok(String::from(java_str)),
+    /// `String::from(MUTF8Chars)` decodes Java's modified UTF-8 and is infallible (it falls back
+    /// to lossy decoding), so the only failure left is not being handed a string at all.
+    fn text(
+        env: &mut EnvUnowned,
+        value: &JString,
+        code: c_int,
+    ) -> Result<String, *mut Iroh4kResult> {
+        match crate::jni::with_env(env, |env| value.try_to_string(env)) {
+            Ok(text) => Ok(text),
             Err(error) => Err(error_result(
                 code,
                 format!("could not read the string argument: {error}"),
@@ -398,7 +402,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_AddrJni_socketParse(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         addr: JString,
     ) -> jbyteArray {
@@ -414,7 +418,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_AddrJni_ticketFromAddr(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         payload: JByteArray,
     ) -> jbyteArray {
@@ -425,7 +429,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_AddrJni_ticketFromString(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         ticket: JString,
     ) -> jbyteArray {

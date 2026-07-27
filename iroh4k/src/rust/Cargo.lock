@@ -1780,7 +1780,7 @@ dependencies = [
  "iroh-relay",
  "iroh-services",
  "iroh-tickets",
- "jni 0.21.1",
+ "jni 0.22.4",
  "n0-error",
  "n0-future",
  "n0-watcher",

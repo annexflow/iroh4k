@@ -1605,7 +1605,7 @@ pub unsafe extern "C" fn iroh4k_connection_read_datagram(
 #[allow(non_snake_case)]
 mod jni_facade {
     use super::*;
-    use jni::JNIEnv;
+    use jni::EnvUnowned;
     use jni::objects::{JByteArray, JClass};
     use jni::sys::{jbyteArray, jlong};
 
@@ -1626,13 +1626,13 @@ mod jni_facade {
     /// An unreadable or absent array becomes empty, which the payload reader then rejects as
     /// malformed. That is deliberate: the FFI boundary must never unwind, so a missing argument is
     /// reported like any other malformed one.
-    fn arg(env: &mut JNIEnv, array: &JByteArray) -> Vec<u8> {
-        env.convert_byte_array(array).unwrap_or_default()
+    fn arg(env: &mut EnvUnowned, array: &JByteArray) -> Vec<u8> {
+        crate::jni::with_env(env, |env| env.convert_byte_array(array)).unwrap_or_default()
     }
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_liveHandleCount(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
     ) -> jlong {
         LIVE_HANDLES.load(Ordering::Relaxed)
@@ -1642,7 +1642,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_freeIncoming(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) {
@@ -1651,7 +1651,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_freeAccepting(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) {
@@ -1660,7 +1660,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_freeConnecting(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) {
@@ -1669,7 +1669,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_freeConnection(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) {
@@ -1680,7 +1680,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_incomingAccept(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1691,7 +1691,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_incomingRefuse(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1702,7 +1702,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_incomingRetry(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1713,7 +1713,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_incomingIgnore(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1724,7 +1724,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_incomingLocalAddr(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1736,7 +1736,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_incomingRemoteAddr(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1748,7 +1748,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_incomingRemoteAddrValidated(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1764,7 +1764,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectingRemoteId(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1778,7 +1778,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionAlpn(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1792,7 +1792,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionRemoteId(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1806,7 +1806,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionStableId(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1820,7 +1820,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionCloseReason(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1834,7 +1834,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionClose(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
         error_code: jlong,
@@ -1851,7 +1851,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionSide(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1865,7 +1865,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionRtt(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1879,7 +1879,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionStats(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1893,7 +1893,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionPaths(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1907,7 +1907,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionMaxDatagramSize(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1921,7 +1921,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionDatagramSendBufferSpace(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1935,7 +1935,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionSendDatagram(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
         payload: JByteArray,
@@ -1951,7 +1951,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionSetMaxConcurrentBiStreams(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
         count: jlong,
@@ -1971,7 +1971,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionSetMaxConcurrentUniStreams(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
         count: jlong,
@@ -1991,7 +1991,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionSetReceiveWindow(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
         bytes: jlong,
@@ -2013,7 +2013,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_acceptNextStart(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         endpoint: jlong,
     ) -> jlong {
@@ -2023,7 +2023,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_startConnectStart(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         endpoint: jlong,
         addr: JByteArray,
@@ -2037,7 +2037,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_acceptingConnectStart(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jlong {
@@ -2047,7 +2047,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_acceptingAlpnStart(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jlong {
@@ -2057,7 +2057,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectingConnectStart(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jlong {
@@ -2067,7 +2067,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectingAlpnStart(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jlong {
@@ -2077,7 +2077,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectStart(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         endpoint: jlong,
         addr: JByteArray,
@@ -2091,7 +2091,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionClosedStart(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jlong {
@@ -2101,7 +2101,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionSendDatagramWaitStart(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
         payload: JByteArray,
@@ -2113,7 +2113,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionReadDatagramStart(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jlong {

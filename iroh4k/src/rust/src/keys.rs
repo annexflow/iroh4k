@@ -385,7 +385,7 @@ pub unsafe extern "C" fn iroh4k_keys_signature_from_bytes(
 #[allow(non_snake_case)]
 mod jni_facade {
     use super::*;
-    use jni::JNIEnv;
+    use jni::EnvUnowned;
     use jni::objects::{JByteArray, JClass, JString};
     use jni::sys::jbyteArray;
 
@@ -401,13 +401,13 @@ mod jni_facade {
     /// An unreadable or absent array becomes empty, which the length checks then reject as an
     /// `ERROR_KEY`. That is deliberate: the FFI boundary must never unwind, so a missing argument
     /// is reported like any other malformed one.
-    fn arg(env: &mut JNIEnv, array: &JByteArray) -> Vec<u8> {
-        env.convert_byte_array(array).unwrap_or_default()
+    fn arg(env: &mut EnvUnowned, array: &JByteArray) -> Vec<u8> {
+        crate::jni::with_env(env, |env| env.convert_byte_array(array)).unwrap_or_default()
     }
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_secretGenerate(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
     ) -> jbyteArray {
         finish(&mut env, bytes_result(secret_generate()))
@@ -415,7 +415,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_secretFromBytes(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         secret: JByteArray,
     ) -> jbyteArray {
@@ -426,7 +426,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_secretPublic(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         secret: JByteArray,
     ) -> jbyteArray {
@@ -437,7 +437,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_secretSign(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         secret: JByteArray,
         message: JByteArray,
@@ -450,7 +450,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_endpointIdFromBytes(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         id: JByteArray,
     ) -> jbyteArray {
@@ -461,15 +461,15 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_endpointIdFromString(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         text: JString,
     ) -> jbyteArray {
-        // `String::from(JavaStr)` decodes Java's modified UTF-8 and is infallible (it falls back
-        // to lossy decoding), so the only failure left is not being handed a string at all —
+        // `String::from(MUTF8Chars)` decodes Java's modified UTF-8 and is infallible (it falls
+        // back to lossy decoding), so the only failure left is not being handed a string at all —
         // which is reported rather than panicked on, since the FFI boundary must never unwind.
-        let result = match env.get_string(&text) {
-            Ok(java_str) => bytes_or_error(endpoint_id_from_string(&String::from(java_str))),
+        let result = match crate::jni::with_env(&mut env, |env| text.try_to_string(env)) {
+            Ok(text) => bytes_or_error(endpoint_id_from_string(&text)),
             Err(error) => error_result(
                 ERROR_KEY,
                 format!("could not read the endpoint id argument: {error}"),
@@ -480,7 +480,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_endpointIdToString(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         id: JByteArray,
     ) -> jbyteArray {
@@ -491,7 +491,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_endpointIdToZ32(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         id: JByteArray,
     ) -> jbyteArray {
@@ -502,20 +502,20 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_endpointIdFromZ32(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         text: JString,
     ) -> jbyteArray {
-        let result = match env.get_string(&text) {
+        let result = match crate::jni::with_env(&mut env, |env| text.try_to_string(env)) {
             Err(_) => error_result(ERROR_KEY, "endpoint id string was not valid UTF-16"),
-            Ok(java_str) => bytes_or_error(endpoint_id_from_z32(&String::from(java_str))),
+            Ok(text) => bytes_or_error(endpoint_id_from_z32(&text)),
         };
         finish(&mut env, result)
     }
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_endpointIdFmtShort(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         id: JByteArray,
     ) -> jbyteArray {
@@ -526,7 +526,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_endpointIdVerify(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         id: JByteArray,
         message: JByteArray,
@@ -541,7 +541,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_signatureFromBytes(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         signature: JByteArray,
     ) -> jbyteArray {

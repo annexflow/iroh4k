@@ -1086,7 +1086,7 @@ pub unsafe extern "C" fn iroh4k_endpoint_network_change(
 #[allow(non_snake_case)]
 mod jni_facade {
     use super::*;
-    use jni::JNIEnv;
+    use jni::EnvUnowned;
     use jni::objects::{JByteArray, JClass, JString};
     use jni::sys::{jbyteArray, jlong};
 
@@ -1107,19 +1107,19 @@ mod jni_facade {
     /// An unreadable or absent array becomes empty, which the payload reader then rejects as
     /// malformed. That is deliberate: the FFI boundary must never unwind, so a missing argument is
     /// reported like any other malformed one.
-    fn arg(env: &mut JNIEnv, array: &JByteArray) -> Vec<u8> {
-        env.convert_byte_array(array).unwrap_or_default()
+    fn arg(env: &mut EnvUnowned, array: &JByteArray) -> Vec<u8> {
+        crate::jni::with_env(env, |env| env.convert_byte_array(array)).unwrap_or_default()
     }
 
     /// Reads a Java `String` argument. An unreadable one becomes `""`, which then fails to parse —
     /// again, reported rather than panicked on.
-    fn text(env: &mut JNIEnv, value: &JString) -> String {
-        env.get_string(value).map(String::from).unwrap_or_default()
+    fn text(env: &mut EnvUnowned, value: &JString) -> String {
+        crate::jni::with_env(env, |env| value.try_to_string(env)).unwrap_or_default()
     }
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_newHandle(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
     ) -> jlong {
         iroh4k_endpoint_new() as usize as jlong
@@ -1127,7 +1127,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_liveHandleCount(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
     ) -> jlong {
         LIVE_HANDLES.load(Ordering::Relaxed)
@@ -1135,7 +1135,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_freeHandle(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) {
@@ -1144,7 +1144,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_bindStart(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
         payload: JByteArray,
@@ -1156,7 +1156,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_id(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1170,7 +1170,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_addr(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1184,7 +1184,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_secretKey(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1198,7 +1198,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_setAlpns(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
         payload: JByteArray,
@@ -1217,7 +1217,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_boundSockets(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1231,7 +1231,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_isClosed(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1245,7 +1245,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_stats(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jbyteArray {
@@ -1259,7 +1259,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_shutdownStart(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jlong {
@@ -1277,7 +1277,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_onlineStart(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jlong {
@@ -1295,7 +1295,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_remoteAddrStart(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
         id: JByteArray,
@@ -1315,7 +1315,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_addExternalAddrStart(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
         addr: JString,
@@ -1338,7 +1338,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_removeExternalAddrStart(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
         addr: JString,
@@ -1360,7 +1360,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_insertRelayStart(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
         payload: JByteArray,
@@ -1389,7 +1389,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_removeRelayStart(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
         url: JString,
@@ -1411,7 +1411,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_networkChangeStart(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jlong {

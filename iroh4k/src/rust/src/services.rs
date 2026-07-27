@@ -1027,7 +1027,7 @@ pub unsafe extern "C" fn iroh4k_services_net_diagnostics(
 #[allow(non_snake_case)]
 mod jni_facade {
     use super::*;
-    use jni::JNIEnv;
+    use jni::EnvUnowned;
     use jni::objects::{JByteArray, JClass};
     use jni::sys::{jboolean, jbyteArray, jlong};
 
@@ -1048,13 +1048,13 @@ mod jni_facade {
     /// An unreadable or absent array becomes empty, which the payload reader then rejects as
     /// malformed. That is deliberate: the FFI boundary must never unwind, so a missing argument is
     /// reported like any other malformed one.
-    fn arg(env: &mut JNIEnv, array: &JByteArray) -> Vec<u8> {
-        env.convert_byte_array(array).unwrap_or_default()
+    fn arg(env: &mut EnvUnowned, array: &JByteArray) -> Vec<u8> {
+        crate::jni::with_env(env, |env| env.convert_byte_array(array)).unwrap_or_default()
     }
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_newHandle(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
     ) -> jlong {
         iroh4k_services_new() as usize as jlong
@@ -1062,7 +1062,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_liveHandleCount(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
     ) -> jlong {
         LIVE_HANDLES.load(Ordering::Relaxed)
@@ -1070,7 +1070,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_freeHandle(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) {
@@ -1079,7 +1079,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_buildStart(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
         endpoint: jlong,
@@ -1093,7 +1093,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_nameStart(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jlong {
@@ -1110,7 +1110,7 @@ mod jni_facade {
     /// UTF-8 bytes, and so the byte length upstream validates is the one Kotlin encoded.
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_setNameStart(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
         name_bytes: JByteArray,
@@ -1133,7 +1133,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_pingStart(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jlong {
@@ -1148,7 +1148,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_pushMetricsStart(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jlong {
@@ -1163,7 +1163,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_grantCapabilityStart(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         handle: jlong,
         payload: JByteArray,
@@ -1183,13 +1183,12 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_netDiagnosticsStart(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
         send: jboolean,
     ) -> jlong {
         let slot = unsafe { slot(as_handle(handle)) };
-        let send = send != 0;
         ops::spawn_channel(async move {
             OpResult::new(match built(&slot) {
                 Ok(client) => net_diagnostics(client, send).await,
@@ -1202,7 +1201,7 @@ mod jni_facade {
     /// so is asynchronous, but the capability vocabulary is a compile-time property of this build.
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_capabilityNames(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
     ) -> jbyteArray {
         finish(&mut env, bytes_result(capability_names()))

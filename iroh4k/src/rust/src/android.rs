@@ -26,7 +26,7 @@
 //!
 //! The approach mirrors upstream's own `iroh-ffi`, which installs the context the same way.
 
-use jni::JNIEnv;
+use jni::EnvUnowned;
 use jni::objects::{JClass, JObject};
 use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean};
 use std::sync::Once;
@@ -53,32 +53,36 @@ static INSTALLED: AtomicBool = AtomicBool::new(false);
 /// from the abort this function exists to prevent.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_tech_annexflow_iroh4k_Iroh4kAndroidJni_installContext(
-    env: JNIEnv,
+    mut env: EnvUnowned,
     _class: JClass,
     context: JObject,
 ) -> jboolean {
     INIT.call_once(|| {
-        let Ok(vm) = env.get_java_vm() else { return };
-        let Ok(global) = env.new_global_ref(&context) else {
-            return;
-        };
+        let installed = crate::jni::with_env(&mut env, |env| {
+            let vm = env.get_java_vm()?;
+            let global = env.new_global_ref(&context)?;
 
-        // SAFETY: both pointers come from live JNI handles. The `JavaVM` is process-wide, and the
-        // global reference keeps the `Context` alive; `ndk_context` stores the raw pointers and
-        // never takes ownership, so both must outlive every use — which is the process.
-        unsafe {
-            ndk_context::initialize_android_context(
-                vm.get_java_vm_pointer() as *mut std::ffi::c_void,
-                global.as_obj().as_raw() as *mut std::ffi::c_void,
-            );
+            // SAFETY: both pointers come from live JNI handles. The `JavaVM` is process-wide, and
+            // the global reference keeps the `Context` alive; `ndk_context` stores the raw
+            // pointers and never takes ownership, so both must outlive every use — the process.
+            unsafe {
+                ndk_context::initialize_android_context(
+                    vm.get_raw() as *mut std::ffi::c_void,
+                    global.as_obj().as_raw() as *mut std::ffi::c_void,
+                );
+            }
+
+            // Deliberate: dropping the `Global` would delete the JNI global reference while
+            // `ndk_context` still hands out the raw pointer. It is one reference held for the
+            // lifetime of the process, which is what every consumer of `ndk_context` does.
+            std::mem::forget(global);
+
+            Ok(())
+        });
+
+        if installed.is_ok() {
+            INSTALLED.store(true, Ordering::Release);
         }
-
-        // Deliberate: dropping the `GlobalRef` would delete the JNI global reference while
-        // `ndk_context` still hands out the raw pointer. It is one reference held for the lifetime
-        // of the process, which is what every consumer of `ndk_context` does.
-        std::mem::forget(global);
-
-        INSTALLED.store(true, Ordering::Release);
     });
 
     if INSTALLED.load(Ordering::Acquire) {

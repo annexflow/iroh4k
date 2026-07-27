@@ -200,7 +200,7 @@ pub extern "C" fn iroh4k_set_log_level(level: c_int) -> *mut Iroh4kResult {
 #[allow(non_snake_case)]
 mod jni_facade {
     use super::*;
-    use jni::JNIEnv;
+    use jni::EnvUnowned;
     use jni::objects::{JClass, JString};
     use jni::sys::{jbyteArray, jint};
 
@@ -209,21 +209,18 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_RelayJni_relayUrlParse(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         url: JString,
     ) -> jbyteArray {
-        // `String::from(JavaStr)` decodes Java's modified UTF-8 and is infallible (it falls back
-        // to lossy decoding), so the only failure left is not being handed a string at all —
+        // `String::from(MUTF8Chars)` decodes Java's modified UTF-8 and is infallible (it falls
+        // back to lossy decoding), so the only failure left is not being handed a string at all —
         // which is reported rather than panicked on, since the FFI boundary must never unwind.
-        let result = match env.get_string(&url) {
-            Ok(java_str) => {
-                let input = String::from(java_str);
-                match relay_url_parse(&input) {
-                    Ok(canonical) => bytes_result(canonical.into_bytes()),
-                    Err(message) => error_result(ERROR_RELAY, message),
-                }
-            }
+        let result = match crate::jni::with_env(&mut env, |env| url.try_to_string(env)) {
+            Ok(input) => match relay_url_parse(&input) {
+                Ok(canonical) => bytes_result(canonical.into_bytes()),
+                Err(message) => error_result(ERROR_RELAY, message),
+            },
             Err(error) => error_result(
                 ERROR_RELAY,
                 format!("could not read the relay URL argument: {error}"),
@@ -234,7 +231,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_RelayJni_relayDefaultUrls(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
     ) -> jbyteArray {
         finish(&mut env, bytes_result(relay_default_urls()))
@@ -242,7 +239,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_RelayJni_relayStagingUrls(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
     ) -> jbyteArray {
         finish(&mut env, bytes_result(relay_staging_urls()))
@@ -250,7 +247,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_RelayJni_setLogLevel(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         level: jint,
     ) -> jbyteArray {

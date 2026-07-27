@@ -642,7 +642,7 @@ pub unsafe extern "C" fn iroh4k_watch_next(
 #[allow(non_snake_case)]
 mod jni_facade {
     use super::*;
-    use jni::JNIEnv;
+    use jni::EnvUnowned;
     use jni::objects::JClass;
     use jni::sys::{jbyteArray, jlong};
 
@@ -659,7 +659,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_WatchJni_liveHandleCount(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
     ) -> jlong {
         LIVE_HANDLES.load(Ordering::Relaxed)
@@ -667,7 +667,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_WatchJni_free(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) {
@@ -676,7 +676,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_WatchJni_endpointWatchAddr(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         endpoint: jlong,
     ) -> jbyteArray {
@@ -689,7 +689,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_WatchJni_endpointWatchHomeRelay(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         endpoint: jlong,
     ) -> jbyteArray {
@@ -702,7 +702,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_WatchJni_connectionWatchPaths(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         connection: jlong,
     ) -> jbyteArray {
@@ -715,7 +715,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_WatchJni_connectionWatchPathEvents(
-        mut env: JNIEnv,
+        mut env: EnvUnowned,
         _class: JClass,
         connection: jlong,
     ) -> jbyteArray {
@@ -728,7 +728,7 @@ mod jni_facade {
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_WatchJni_nextStart(
-        _env: JNIEnv,
+        _env: EnvUnowned,
         _class: JClass,
         handle: jlong,
     ) -> jlong {
