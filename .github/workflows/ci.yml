@@ -27,9 +27,9 @@ jobs:
             targets: linuxX64,jvm
             tasks: ":iroh4k:linuxX64Test :iroh4k:jvmTest"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
@@ -40,7 +40,7 @@ jobs:
       # Keyed on Cargo.lock: the crate takes minutes to build from cold, and ~/.konan is a large
       # download. Both are pure function of their inputs, so caching them is safe.
       - name: Cache cargo and konan
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -50,7 +50,7 @@ jobs:
           key: ${{ matrix.os }}-iroh4k-${{ hashFiles('iroh4k/src/rust/Cargo.lock') }}
           restore-keys: ${{ matrix.os }}-iroh4k-
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
 
       # Run the two test tasks in separate invocations. Sharing one invocation has been observed
       # to let a Rust rebuild swap the JNI shared library out from under a running test JVM,
@@ -63,7 +63,7 @@ jobs:
 
       - name: Upload test results
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-${{ matrix.os }}
           path: |
@@ -85,9 +85,9 @@ jobs:
     name: Android
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
@@ -98,7 +98,7 @@ jobs:
       # ~/.cargo/bin holds the cargo-ndk binary, which takes about a minute to build from source
       # and changes only when its version does. The rest is the usual cargo/konan cache.
       - name: Cache cargo and konan
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -115,7 +115,7 @@ jobs:
       - name: Install cargo-ndk
         run: command -v cargo-ndk || cargo install cargo-ndk --locked
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
 
       # The runner image exports ANDROID_NDK_HOME, which is where `rustJni` looks first; on a
       # machine without it the plugin falls back to ndk.dir/sdk.dir in local.properties.
@@ -142,7 +142,7 @@ jobs:
       # Booting an AVD from cold costs minutes; a cached snapshot makes the run below start from a
       # booted system. Keyed on the API level alone, since nothing else about the AVD varies.
       - name: Cache AVD
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         id: avd-cache
         with:
           path: |
@@ -176,7 +176,7 @@ jobs:
 
       - name: Upload test results
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-android
           path: |
@@ -216,9 +216,9 @@ jobs:
             target: androidNativeX64
             rust: x86_64-linux-android
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
@@ -256,7 +256,7 @@ jobs:
           } >> ~/.cargo/config.toml
 
       - name: Cache cargo and konan
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -266,7 +266,7 @@ jobs:
           key: ${{ matrix.os }}-${{ matrix.target }}-${{ hashFiles('iroh4k/src/rust/Cargo.lock') }}
           restore-keys: ${{ matrix.os }}-${{ matrix.target }}-
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
 
       - name: Assemble
         run: ./gradlew :iroh4k:assemble -Ptargets=${{ matrix.target }}
@@ -275,7 +275,7 @@ jobs:
     name: Rust lint
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup component add clippy rustfmt
       - name: Format
         run: cargo fmt --manifest-path iroh4k/src/rust/Cargo.toml -- --check
