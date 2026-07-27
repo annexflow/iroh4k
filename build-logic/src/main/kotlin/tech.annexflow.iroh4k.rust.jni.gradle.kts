@@ -253,38 +253,52 @@ afterEvaluate {
     }
 
     // ── Prebuilt verification ────────────────────────────────────────────────────────────────
-    // With -Prust.prebuilt the cargo tasks above are skipped and the libraries are expected to be
-    // on disk already, put there by the release workflow from its per-host build jobs. A library
-    // that failed to arrive would otherwise surface far downstream — as a cinterop error, or as an
-    // AAR quietly missing an ABI. This names the file instead.
+    // With -Prust.prebuilt the cargo tasks above are skipped and everything cargo would have
+    // produced is expected to be on disk already, put there by the release workflow from its
+    // per-host build jobs. A file that failed to arrive would otherwise surface far downstream —
+    // as a cinterop error, or as an AAR quietly missing an ABI. This names the file instead.
     //
     // The expected paths are the cargo tasks' own declared outputs rather than a second list, so a
     // target added to `Utils.allTargets` is covered here without anybody remembering to.
-    val expectedRustOutputs: List<File> =
-        tasks.matching {
-            it.name.startsWith("cargo-") || it.name.startsWith("buildRustJvm_")
-        }.flatMap { it.outputs.files.files } +
-                androidAbis.map { jniLibsDir.file("$it/lib$crateName.so").asFile }
+    //
+    // All of it — the list and the task — is behind `if (prebuilt)`, because `tasks.matching { }`
+    // on a name predicate is a live TaskCollection: reading it forces every registered task in
+    // `:iroh4k` to be realized, in every configuration, including a plain `./gradlew jvmTest` that
+    // has no interest in any of this. Prebuilt mode is the only mode in which the answer is ever
+    // used, and `.github/workflows/release.yml` only ever invokes checkRustPrebuilt with
+    // `-Prust.prebuilt=true`, so the task not existing otherwise costs nothing.
+    if (prebuilt) {
+        val expectedRustOutputs: List<File> =
+            tasks.matching {
+                it.name.startsWith("cargo-") || it.name.startsWith("buildRustJvm_")
+            }.flatMap { it.outputs.files.files } +
+                    androidAbis.map { jniLibsDir.file("$it/lib$crateName.so").asFile } +
+                    // The cbindgen header, which is not a library and not any task's declared
+                    // output: build.rs writes it during a cargo build, and prebuilt mode is
+                    // precisely the mode in which no cargo build runs. It is gitignored, so on the
+                    // publish host it exists only if the release workflow transported it. Every
+                    // cinterop task consumes it via the .def files' `-I./src/rust/target`, so
+                    // without this it is missed here and rediscovered much later as
+                    // "'iroh4k.h' file not found" in the middle of the publish.
+                    rustDir.file("target/$crateName.h").asFile
 
-    tasks.register("checkRustPrebuilt") {
-        group = "rust"
-        description = "Fails when -Prust.prebuilt is set and an expected Rust library is missing."
-        val prebuiltMode = prebuilt
-        val expected = expectedRustOutputs
-        doLast {
-            if (!prebuiltMode) {
-                logger.lifecycle("checkRustPrebuilt: -Prust.prebuilt is not set, nothing to check.")
-                return@doLast
+        tasks.register("checkRustPrebuilt") {
+            group = "rust"
+            description =
+                "Fails when -Prust.prebuilt is set and an expected Rust output is missing."
+            val expected = expectedRustOutputs
+            doLast {
+                val missing = expected.filterNot { it.isFile }
+                if (missing.isNotEmpty()) {
+                    error(
+                        "Prebuilt Rust outputs are missing:\n" +
+                                missing.joinToString("\n") { "  $it" } +
+                                "\nThe release workflow restores these from the `rust` job's " +
+                                "artifacts."
+                    )
+                }
+                logger.lifecycle("checkRustPrebuilt: ${expected.size} files present.")
             }
-            val missing = expected.filterNot { it.isFile }
-            if (missing.isNotEmpty()) {
-                error(
-                    "Prebuilt Rust libraries are missing:\n" +
-                            missing.joinToString("\n") { "  $it" } +
-                            "\nThe release workflow restores these from the `rust` job's artifacts."
-                )
-            }
-            logger.lifecycle("checkRustPrebuilt: ${expected.size} libraries present.")
         }
     }
 }
