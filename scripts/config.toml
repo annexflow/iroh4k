@@ -1,15 +1,28 @@
 # Cross-compilation linkers for the iroh4k Rust crate.
 #
 # Copy (or merge) this into ~/.cargo/config.toml. Plain `cargo build --target <triple>` is all the
-# Gradle build ever invokes — there is no `cross` and no `cargo zigbuild` — so cargo has to be told
-# which linker to use for each non-host target here.
+# Gradle build ever invokes for the Kotlin/Native targets — there is no `cross` and no
+# `cargo zigbuild` — so cargo has to be told which linker to use for each non-host target here.
+#
+# The Android AAR is the one exception: `buildRustAndroid` shells out to `cargo ndk`, which sets
+# its own linker and compiler through environment variables that override everything below. So a
+# build that only produces the AAR needs none of this — but the `androidNative*` Kotlin/Native
+# targets, which go through cinterop and plain cargo, need all of it.
 #
 # Apple targets need nothing: the host toolchain links them.
 #
-# NOTE ON THE ANDROID NDK VERSION. Kotlin/Native links its Android output against NDK r21's
-# sysroot, so the Rust side must target the same API level or the two objects disagree at link
-# time. That is why the linkers below are the `*21-clang` ones and not simply the newest available.
-# See kotlin-native/konan/konan.properties in the Kotlin repository for the version Konan pins.
+# THE ANDROID NDK PATH BELOW IS AN EXAMPLE. It is a Homebrew `android-ndk` install on an Apple
+# Silicon Mac. An NDK installed through Android Studio lives at
+# `$ANDROID_HOME/ndk/<version>/toolchains/llvm/prebuilt/darwin-x86_64/bin` instead (`linux-x86_64`
+# on Linux), and the `prebuilt` directory is named for the *toolchain* host, so it stays
+# `darwin-x86_64` on an arm64 Mac. Substitute your own path in all six places.
+#
+# NOTE ON THE ANDROID API LEVEL. Kotlin/Native links its Android output against NDK r21's sysroot,
+# so the Rust side must target the same API level or the two objects disagree at link time. That is
+# why the wrappers below are the `*21-clang` ones and not simply the newest available. See
+# kotlin-native/konan/konan.properties in the Kotlin repository for the version Konan pins. Any
+# reasonably recent NDK ships the `*21-clang` wrappers, so the NDK's own version does not have to
+# be r21 — only the API level in the wrapper name matters.
 
 [target.aarch64-linux-android]
 linker = "/opt/homebrew/share/android-ndk/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android21-clang"
@@ -28,3 +41,18 @@ linker = "x86_64-unknown-linux-gnu-gcc"
 [target.x86_64-pc-windows-gnu]
 linker = "x86_64-w64-mingw32-gcc"
 ar = "x86_64-w64-mingw32-ar"
+
+# The linkers above are enough for the Rust code, and not enough for the C code underneath it.
+# Several crates in the tree build C sources through `cc-rs`, which looks for a compiler named
+# exactly `<triple>-clang` — a name the NDK does not ship, since its wrappers carry the API level
+# (`aarch64-linux-android21-clang`). Without these four variables an Android Kotlin/Native build
+# fails in a build script, not at link time:
+#
+#     error occurred in cc-rs: failed to find tool "aarch64-linux-android-clang"
+#
+# `cargo ndk` injects the same variables itself, which is why the AAR builds without them.
+[env]
+CC_aarch64_linux_android = "/opt/homebrew/share/android-ndk/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android21-clang"
+AR_aarch64_linux_android = "/opt/homebrew/share/android-ndk/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar"
+CC_x86_64_linux_android = "/opt/homebrew/share/android-ndk/toolchains/llvm/prebuilt/darwin-x86_64/bin/x86_64-linux-android21-clang"
+AR_x86_64_linux_android = "/opt/homebrew/share/android-ndk/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar"
