@@ -31,10 +31,18 @@ extensions.configure<MavenPublishBaseExtension> {
                 "public key, on JVM, Android, iOS, macOS, Linux and Windows."
         )
         url.set(projectUrl)
+        // Dual licensed, as iroh and iroh-ffi are: a consumer takes whichever of the two suits
+        // them, and picks up nothing stricter than upstream. Two `license` entries with no
+        // `distribution` set is how Maven expresses "or", which is what the POM schema gives us —
+        // the authoritative statement is the SPDX expression `Apache-2.0 OR MIT` in the README.
         licenses {
             license {
+                name.set("The Apache License, Version 2.0")
+                url.set("$projectUrl/blob/main/LICENSE-APACHE")
+            }
+            license {
                 name.set("MIT License")
-                url.set("$projectUrl/blob/main/LICENSE")
+                url.set("$projectUrl/blob/main/LICENSE-MIT")
             }
         }
         developers {

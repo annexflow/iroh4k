@@ -186,7 +186,8 @@ entries above instead of `cargo ndk`.
 ## Status and limitations
 
 Version `0.1.0-SNAPSHOT`, targeting **iroh 1.0.3**. Published as
-`tech.annexflow.iroh4k:iroh4k`, MIT licensed. The version string reports both halves:
+`tech.annexflow.iroh4k:iroh4k`, dual licensed Apache-2.0 or MIT — the same terms as iroh itself, so
+a consumer picks up nothing stricter than upstream. The version string reports both halves:
 `Iroh4k.version` is `"0.1.0+iroh1.0.3"`.
 
 What is honestly incomplete:
@@ -211,3 +212,20 @@ What is honestly incomplete:
 - **No logger of its own.** `setLogLevel()` configures Rust's `tracing` subscriber. On the Kotlin
   side, `RouterBuilder.onFailure` is where the router's survivable failures go, and its default is
   silence.
+
+## License
+
+This project is licensed under either of
+
+ * Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or
+   http://www.apache.org/licenses/LICENSE-2.0)
+ * MIT license ([LICENSE-MIT](LICENSE-MIT) or
+   http://opensource.org/licenses/MIT)
+
+at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this project by you, as defined in the Apache-2.0 license,
+shall be dual licensed as above, without any additional terms or conditions.
