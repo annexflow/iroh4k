@@ -1,0 +1,110 @@
+package tech.annexflow.iroh4k
+
+import kotlin.test.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+
+/**
+ * Exercises the endpoint surface from the Android target: the same shared
+ * `CommonEndpointTests` bodies as `JvmEndpointTests`, run under Robolectric on the host JVM
+ * against `androidMain`'s loader. The endpoints bind real UDP sockets — that traffic never
+ * reaches an Android API, so Robolectric neither shadows nor constrains it.
+ */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
+class AndroidEndpointTests {
+    private val runner = CommonEndpointTests()
+
+    @Test
+    fun `an endpoint binds with the identity it was given`() =
+        runner.`an endpoint binds with the identity it was given`()
+
+    @Test
+    fun `an endpoint without a secret key gets a fresh identity`() =
+        runner.`an endpoint without a secret key gets a fresh identity`()
+
+    @Test
+    fun `two endpoints bind to distinct real ports`() =
+        runner.`two endpoints bind to distinct real ports`()
+
+    @Test
+    fun `binding on a port already in use raises a Bind error`() =
+        runner.`binding on a port already in use raises a Bind error`()
+
+    @Test
+    fun `the Empty preset cannot bind`() =
+        runner.`the Empty preset cannot bind`()
+
+    @Test
+    fun `an external address given at bind time is accepted`() =
+        runner.`an external address given at bind time is accepted`()
+
+    @Test
+    fun `alpns are configurable at bind time and replaceable afterwards`() =
+        runner.`alpns are configurable at bind time and replaceable afterwards`()
+
+    @Test
+    fun `an endpoint config copies its alpns`() =
+        runner.`an endpoint config copies its alpns`()
+
+    @Test
+    fun `stats reports iroh's own metrics`() =
+        runner.`stats reports iroh's own metrics`()
+
+    @Test
+    fun `relay configurations can be inserted and removed`() =
+        runner.`relay configurations can be inserted and removed`()
+
+    @Test
+    fun `a relay configuration with an impossible quic port is rejected`() =
+        runner.`a relay configuration with an impossible quic port is rejected`()
+
+    @Test
+    fun `external addresses can be added and removed at runtime`() =
+        runner.`external addresses can be added and removed at runtime`()
+
+    @Test
+    fun `notifying a network change is harmless`() =
+        runner.`notifying a network change is harmless`()
+
+    @Test
+    fun `an unknown remote has no address`() =
+        runner.`an unknown remote has no address`()
+
+    @Test
+    fun `shutdown closes the endpoint and is safe to repeat`() =
+        runner.`shutdown closes the endpoint and is safe to repeat`()
+
+    @Test
+    fun `a shut down endpoint reports iroh's own no-op answers`() =
+        runner.`a shut down endpoint reports iroh's own no-op answers`()
+
+    @Test
+    fun `using a released endpoint raises Closed rather than crashing`() =
+        runner.`using a released endpoint raises Closed rather than crashing`()
+
+    @Test
+    fun `an endpoint works as an AutoCloseable resource`() =
+        runner.`an endpoint works as an AutoCloseable resource`()
+
+    @Test
+    fun `cancelling online returns promptly and drains the op registry`() =
+        runner.`cancelling online returns promptly and drains the op registry`()
+
+    @Test
+    fun `online can be bounded by a timeout`() =
+        runner.`online can be bounded by a timeout`()
+
+    @Test
+    fun `repeated bind and shutdown cycles leak neither handles nor operations`() =
+        runner.`repeated bind and shutdown cycles leak neither handles nor operations`()
+
+    @Test
+    fun `closing an endpoint while a call is in flight is safe`() =
+        runner.`closing an endpoint while a call is in flight is safe`()
+
+    @Test
+    fun `relay config is a value and hides its token`() =
+        runner.`relay config is a value and hides its token`()
+}
