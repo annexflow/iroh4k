@@ -16,7 +16,7 @@ call the same core.
 Infrastructure is `codec.rs`, `core.rs`, `handle.rs`, `ops.rs`, plus the two facade entry points
 `ffi.rs` and `jni.rs`. Everything else is a **domain**: `keys`, `relay`, `addr`, `endpoint`,
 `connection`, `stream`, `watch`, `services`. A domain owns its Rust module *and* both facades'
-exports for it — the `#[no_mangle] extern "C"` functions and the
+exports for it — the `#[unsafe(no_mangle)] extern "C"` functions and the
 `#[cfg(not(target_os = "ios"))] mod jni_facade` with the `Java_*` symbols live in the same file as
 the shared logic, so a domain stays independently editable.
 

@@ -19,12 +19,12 @@ type Completion = extern "C" fn(Iroh4kPtr, *mut Iroh4kResult);
 // These no-op exports force cbindgen to emit the `#[repr(C)]` types (and everything they
 // reference) into the generated C header — cbindgen only emits types that appear in an
 // exported function signature.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn auto_generated_for_struct_iroh4k_ptr(_: Iroh4kPtr) {}
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn auto_generated_for_struct_iroh4k_result(_: Iroh4kResult) {}
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_free_result(ptr: *mut Iroh4kResult) {
     free_result(ptr);
 }
@@ -37,19 +37,19 @@ pub extern "C" fn iroh4k_free_result(ptr: *mut Iroh4kResult) {
 ///
 /// Safe to call at any time: an id that already completed is simply unknown, and the
 /// deliver-once guard means a cancel racing a completion cannot resume twice.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_op_cancel(op: i64) {
     ops::cancel_op(op);
 }
 
 /// Number of operations still registered. Test hook for asserting the registry drains.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_live_op_count() -> i64 {
     ops::live_op_count()
 }
 
 /// Sleeps that ran to completion. Test hook proving a cancelled task was really aborted.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_smoke_sleep_completions() -> i64 {
     smoke_sleep_completions()
 }
@@ -59,13 +59,13 @@ pub extern "C" fn iroh4k_smoke_sleep_completions() -> i64 {
 // ============================================================================
 
 /// `"<iroh4k version>+iroh<iroh version>"` as UTF-8 bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_version() -> *mut Iroh4kResult {
     bytes_result(version())
 }
 
 /// A codec payload exercising every primitive, for cross-language round-trip testing.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_smoke_record() -> *mut Iroh4kResult {
     bytes_result(smoke_record())
 }
@@ -76,7 +76,7 @@ pub extern "C" fn iroh4k_smoke_record() -> *mut Iroh4kResult {
 
 /// Smoke test for the async bridge: resumes the continuation with `value` after a tokio
 /// round-trip. Verifies `StableRef` + `staticCFunction` resumption on a tokio worker thread.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_smoke_async_echo(
     value: i64,
     callback: *mut c_void,
@@ -90,7 +90,7 @@ pub extern "C" fn iroh4k_smoke_async_echo(
 
 /// Smoke test for the error path: resumes with `ERROR_INVALID_ARGUMENT` and a message, covering
 /// `throwIfError()` and the ordinal decoding of `IrohError.Code`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_smoke_async_error(callback: *mut c_void, fun: Completion) -> i64 {
     ops::spawn_callback(callback, fun, async move {
         OpResult::new(error_result(ERROR_INVALID_ARGUMENT, "smoke test failure"))
@@ -100,7 +100,7 @@ pub extern "C" fn iroh4k_smoke_async_error(callback: *mut c_void, fun: Completio
 /// Smoke test for cancellation: a long operation that must abort promptly when the coroutine is
 /// cancelled. Exercises cancellation in isolation, where `accept` and stream reads exercise it
 /// as a side effect of doing real work.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_smoke_async_sleep(
     millis: i64,
     callback: *mut c_void,

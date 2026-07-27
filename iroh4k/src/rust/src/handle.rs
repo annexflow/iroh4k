@@ -67,7 +67,7 @@ pub fn arc_into_handle<T: 'static>(value: Arc<Tagged<T>>) -> *mut c_void {
 /// # Safety
 /// `handle` must be null or a handle produced by [`into_handle`] for *some* type.
 unsafe fn is<T: 'static>(handle: *mut c_void) -> bool {
-    !handle.is_null() && (*(handle as *const Tagged<T>)).tag == TypeId::of::<T>()
+    unsafe { !handle.is_null() && (*(handle as *const Tagged<T>)).tag == TypeId::of::<T>() }
 }
 
 /// Borrows the value behind a handle without affecting its refcount.
@@ -79,10 +79,12 @@ unsafe fn is<T: 'static>(handle: *mut c_void) -> bool {
 /// `handle` must be null or a live handle produced by [`into_handle`]/[`arc_into_handle`] for
 /// *some* type.
 pub unsafe fn borrow<'a, T: 'static>(handle: *mut c_void) -> Option<&'a T> {
-    if !is::<T>(handle) {
-        return None;
+    unsafe {
+        if !is::<T>(handle) {
+            return None;
+        }
+        Some(&(*(handle as *const Tagged<T>)).value)
     }
-    Some(&(*(handle as *const Tagged<T>)).value)
 }
 
 /// Clones the `Arc` behind a handle, for moving ownership into a spawned task.
@@ -94,11 +96,13 @@ pub unsafe fn borrow<'a, T: 'static>(handle: *mut c_void) -> Option<&'a T> {
 /// # Safety
 /// As [`borrow`].
 pub unsafe fn clone_arc<T: 'static>(handle: *mut c_void) -> Option<Arc<Tagged<T>>> {
-    if !is::<T>(handle) {
-        return None;
+    unsafe {
+        if !is::<T>(handle) {
+            return None;
+        }
+        Arc::increment_strong_count(handle as *const Tagged<T>);
+        Some(Arc::from_raw(handle as *const Tagged<T>))
     }
-    Arc::increment_strong_count(handle as *const Tagged<T>);
-    Some(Arc::from_raw(handle as *const Tagged<T>))
 }
 
 /// Releases a handle, dropping the value if this was the last reference.
@@ -112,10 +116,12 @@ pub unsafe fn clone_arc<T: 'static>(handle: *mut c_void) -> Option<Arc<Tagged<T>
 /// `handle` must be null, or a handle produced by [`into_handle`]/[`arc_into_handle`] for *some*
 /// type that has not already been freed.
 pub unsafe fn free<T: 'static>(handle: *mut c_void) {
-    if !is::<T>(handle) {
-        return;
+    unsafe {
+        if !is::<T>(handle) {
+            return;
+        }
+        drop(Arc::from_raw(handle as *const Tagged<T>));
     }
-    drop(Arc::from_raw(handle as *const Tagged<T>));
 }
 
 /// A handle to a value that is **consumed** by the operation that uses it.

@@ -1,7 +1,7 @@
 //! The iroh services client: node naming, liveness, metrics push and network diagnostics.
 //!
 //! Owned by the services domain. Contains the shared logic plus both facades' exports for it:
-//! `#[no_mangle] extern "C"` for cinterop and `#[cfg(not(target_os = "ios"))] Java_*` for JNI.
+//! `#[unsafe(no_mangle)] extern "C"` for cinterop, `#[cfg(not(target_os = "ios"))] Java_*` for JNI.
 //!
 //! This domain wraps `iroh_services::Client`, which talks to n0's hosted service at
 //! services.iroh.computer over an iroh endpoint. It is therefore the first domain in iroh4k whose
@@ -122,27 +122,27 @@ use std::{
     ffi::{c_int, c_void},
     str::FromStr,
     sync::{
-        atomic::{AtomicI64, Ordering},
         Arc, OnceLock,
+        atomic::{AtomicI64, Ordering},
     },
     time::Duration,
 };
 
 use iroh::{
-    unstable_net_report::{NetReport, Probe},
     Endpoint, EndpointAddr, EndpointId, RelayUrl,
+    unstable_net_report::{NetReport, Probe},
 };
 use iroh_services::{
+    Client, ClientBuilder,
     caps::Cap,
     net_diagnostics::{DiagnosticsReport, PortMapProbe},
-    Client, ClientBuilder,
 };
 
 use crate::addr::read_endpoint_addr;
 use crate::codec::{Reader, Writer};
 use crate::core::{
-    bytes_result, error_result, ok_result, owned_bytes, Iroh4kPtr, Iroh4kResult, ERROR_ADDR,
-    ERROR_CLOSED, ERROR_KEY, ERROR_SERVICES,
+    ERROR_ADDR, ERROR_CLOSED, ERROR_KEY, ERROR_SERVICES, Iroh4kPtr, Iroh4kResult, bytes_result,
+    error_result, ok_result, owned_bytes,
 };
 use crate::handle::{self, Tagged};
 use crate::ops::{self, OpResult};
@@ -304,7 +304,7 @@ fn read_client_config(payload: &[u8]) -> Outcome<ClientConfig> {
             return fail(
                 ERROR_SERVICES,
                 format!("malformed services payload: unknown credential tag {other}"),
-            )
+            );
         }
     };
 
@@ -317,7 +317,7 @@ fn read_client_config(payload: &[u8]) -> Outcome<ClientConfig> {
             return fail(
                 ERROR_ADDR,
                 format!("malformed services payload: unknown optional-remote tag {other}"),
-            )
+            );
         }
     };
 
@@ -341,7 +341,7 @@ fn read_client_config(payload: &[u8]) -> Outcome<ClientConfig> {
             return fail(
                 ERROR_SERVICES,
                 format!("malformed services payload: unknown metrics-push tag {other}"),
-            )
+            );
         }
     };
 
@@ -477,10 +477,12 @@ impl Drop for ClientSlot {
 /// Kotlin's guard guarantees both: the handle is created before any operation can reference it, and
 /// it is released only once every in-flight operation has returned.
 unsafe fn slot(handle: *mut c_void) -> Option<ClientShared> {
-    if handle.is_null() {
-        return None;
+    unsafe {
+        if handle.is_null() {
+            return None;
+        }
+        handle::clone_arc::<ClientSlot>(handle)
     }
-    handle::clone_arc::<ClientSlot>(handle)
 }
 
 /// Resolves the client inside a slot from within an asynchronous operation.
@@ -533,7 +535,7 @@ async fn build(
             return error_result(
                 ERROR_SERVICES,
                 format!("could not create a services client: {error}"),
-            )
+            );
         }
     };
 
@@ -801,7 +803,7 @@ fn capability_names() -> Vec<u8> {
 ///
 /// The only synchronous export in this domain: every services *operation* talks to a remote, but the
 /// capability vocabulary is a compile-time property of the linked build.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_services_capability_names() -> *mut Iroh4kResult {
     bytes_result(capability_names())
 }
@@ -811,13 +813,13 @@ pub extern "C" fn iroh4k_services_capability_names() -> *mut Iroh4kResult {
 /// Never fails, so it returns the handle rather than a result. Kotlin owns it from here and must
 /// hand it back to [`iroh4k_services_free`] — including when the build fails or is cancelled, which
 /// is the whole reason the handle is created first (see [`ClientSlot`]).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_services_new() -> *mut c_void {
     handle::into_handle(ClientSlot::new())
 }
 
 /// Client slots still alive. Test hook for asserting handles do not leak.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_services_live_handle_count() -> i64 {
     LIVE_HANDLES.load(Ordering::Relaxed)
 }
@@ -828,9 +830,11 @@ pub extern "C" fn iroh4k_services_live_handle_count() -> i64 {
 ///
 /// # Safety
 /// `handle` must be null, or a handle from [`iroh4k_services_new`] that has not been freed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_services_free(handle: *mut c_void) {
-    handle::free::<ClientSlot>(handle);
+    unsafe {
+        handle::free::<ClientSlot>(handle);
+    }
 }
 
 /// Builds the client described by the configuration payload into `handle`. Asynchronous.
@@ -841,7 +845,7 @@ pub unsafe extern "C" fn iroh4k_services_free(handle: *mut c_void) {
 /// cannot be freed before the clone is taken. `payload`/`payload_len` must be null/0 or describe at
 /// least `payload_len` readable bytes; they are **copied** before the future is spawned, so the
 /// caller may free the buffer as soon as this returns.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_services_build(
     handle: *mut c_void,
     endpoint: *mut c_void,
@@ -850,33 +854,37 @@ pub unsafe extern "C" fn iroh4k_services_build(
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = slot(handle);
-    // Cloned here, on the calling thread, because a raw handle pointer is not `Send` and the future
-    // below runs on a tokio worker.
-    let endpoint = crate::endpoint::endpoint_clone(endpoint);
-    let payload = owned_bytes(payload, payload_len);
-    ops::spawn_callback(callback, fun, async move {
-        OpResult::new(build(slot, endpoint, payload).await)
-    })
+    unsafe {
+        let slot = slot(handle);
+        // Cloned here, on the calling thread, because a raw handle pointer is not `Send` and the
+        // future below runs on a tokio worker.
+        let endpoint = crate::endpoint::endpoint_clone(endpoint);
+        let payload = owned_bytes(payload, payload_len);
+        ops::spawn_callback(callback, fun, async move {
+            OpResult::new(build(slot, endpoint, payload).await)
+        })
+    }
 }
 
 /// The name the client last saw for its endpoint, as an optional string payload. Asynchronous.
 ///
 /// # Safety
 /// `handle` must satisfy [`slot`]'s contract.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_services_name(
     handle: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = slot(handle);
-    ops::spawn_callback(callback, fun, async move {
-        OpResult::new(match built(&slot) {
-            Ok(client) => name(client).await,
-            Err(result) => result,
+    unsafe {
+        let slot = slot(handle);
+        ops::spawn_callback(callback, fun, async move {
+            OpResult::new(match built(&slot) {
+                Ok(client) => name(client).await,
+                Err(result) => result,
+            })
         })
-    })
+    }
 }
 
 /// Names the endpoint service-side. Asynchronous.
@@ -885,7 +893,7 @@ pub unsafe extern "C" fn iroh4k_services_name(
 /// `handle` must satisfy [`slot`]'s contract. `name`/`name_len` are copied before the future is
 /// spawned. The name is taken as a length-counted buffer rather than a C string because it is
 /// arbitrary UTF-8 whose *byte* length is what upstream validates.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_services_set_name(
     handle: *mut c_void,
     name: *const u8,
@@ -893,58 +901,64 @@ pub unsafe extern "C" fn iroh4k_services_set_name(
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = slot(handle);
-    let bytes = owned_bytes(name, name_len);
-    ops::spawn_callback(callback, fun, async move {
-        OpResult::new(match String::from_utf8(bytes) {
-            Err(error) => error_result(
-                ERROR_SERVICES,
-                format!("an endpoint name must be valid UTF-8: {error}"),
-            ),
-            Ok(text) => match built(&slot) {
-                Ok(client) => set_name(client, text).await,
-                Err(result) => result,
-            },
+    unsafe {
+        let slot = slot(handle);
+        let bytes = owned_bytes(name, name_len);
+        ops::spawn_callback(callback, fun, async move {
+            OpResult::new(match String::from_utf8(bytes) {
+                Err(error) => error_result(
+                    ERROR_SERVICES,
+                    format!("an endpoint name must be valid UTF-8: {error}"),
+                ),
+                Ok(text) => match built(&slot) {
+                    Ok(client) => set_name(client, text).await,
+                    Err(result) => result,
+                },
+            })
         })
-    })
+    }
 }
 
 /// Pings the service, answering with the 16 echoed request-id bytes. Asynchronous.
 ///
 /// # Safety
 /// As [`iroh4k_services_name`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_services_ping(
     handle: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = slot(handle);
-    ops::spawn_callback(callback, fun, async move {
-        OpResult::new(match built(&slot) {
-            Ok(client) => ping(client).await,
-            Err(result) => result,
+    unsafe {
+        let slot = slot(handle);
+        ops::spawn_callback(callback, fun, async move {
+            OpResult::new(match built(&slot) {
+                Ok(client) => ping(client).await,
+                Err(result) => result,
+            })
         })
-    })
+    }
 }
 
 /// Pushes a metrics snapshot immediately. Asynchronous.
 ///
 /// # Safety
 /// As [`iroh4k_services_name`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_services_push_metrics(
     handle: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = slot(handle);
-    ops::spawn_callback(callback, fun, async move {
-        OpResult::new(match built(&slot) {
-            Ok(client) => push_metrics(client).await,
-            Err(result) => result,
+    unsafe {
+        let slot = slot(handle);
+        ops::spawn_callback(callback, fun, async move {
+            OpResult::new(match built(&slot) {
+                Ok(client) => push_metrics(client).await,
+                Err(result) => result,
+            })
         })
-    })
+    }
 }
 
 /// Grants capabilities to another endpoint. Asynchronous.
@@ -952,7 +966,7 @@ pub unsafe extern "C" fn iroh4k_services_push_metrics(
 /// # Safety
 /// `handle` must satisfy [`slot`]'s contract. `payload`/`payload_len` are copied before the future
 /// is spawned.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_services_grant_capability(
     handle: *mut c_void,
     payload: *const u8,
@@ -960,38 +974,42 @@ pub unsafe extern "C" fn iroh4k_services_grant_capability(
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = slot(handle);
-    let payload = owned_bytes(payload, payload_len);
-    ops::spawn_callback(callback, fun, async move {
-        OpResult::new(match read_capabilities(&payload) {
-            Err(Failure { code, message }) => error_result(code, message),
-            Ok((grantee, caps)) => match built(&slot) {
-                Ok(client) => grant_capability(client, grantee, caps).await,
-                Err(result) => result,
-            },
+    unsafe {
+        let slot = slot(handle);
+        let payload = owned_bytes(payload, payload_len);
+        ops::spawn_callback(callback, fun, async move {
+            OpResult::new(match read_capabilities(&payload) {
+                Err(Failure { code, message }) => error_result(code, message),
+                Ok((grantee, caps)) => match built(&slot) {
+                    Ok(client) => grant_capability(client, grantee, caps).await,
+                    Err(result) => result,
+                },
+            })
         })
-    })
+    }
 }
 
 /// Runs network diagnostics, uploading the report when `send` is non-zero. Asynchronous.
 ///
 /// # Safety
 /// As [`iroh4k_services_name`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_services_net_diagnostics(
     handle: *mut c_void,
     send: c_int,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = slot(handle);
-    let send = send != 0;
-    ops::spawn_callback(callback, fun, async move {
-        OpResult::new(match built(&slot) {
-            Ok(client) => net_diagnostics(client, send).await,
-            Err(result) => result,
+    unsafe {
+        let slot = slot(handle);
+        let send = send != 0;
+        ops::spawn_callback(callback, fun, async move {
+            OpResult::new(match built(&slot) {
+                Ok(client) => net_diagnostics(client, send).await,
+                Err(result) => result,
+            })
         })
-    })
+    }
 }
 
 // ============================================================================
@@ -1009,9 +1027,9 @@ pub unsafe extern "C" fn iroh4k_services_net_diagnostics(
 #[allow(non_snake_case)]
 mod jni_facade {
     use super::*;
+    use jni::JNIEnv;
     use jni::objects::{JByteArray, JClass};
     use jni::sys::{jboolean, jbyteArray, jlong};
-    use jni::JNIEnv;
 
     // One shared envelope writer — see `crate::jni::finish`.
     use crate::jni::finish;
@@ -1034,7 +1052,7 @@ mod jni_facade {
         env.convert_byte_array(array).unwrap_or_default()
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_newHandle(
         _env: JNIEnv,
         _class: JClass,
@@ -1042,7 +1060,7 @@ mod jni_facade {
         iroh4k_services_new() as usize as jlong
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_liveHandleCount(
         _env: JNIEnv,
         _class: JClass,
@@ -1050,7 +1068,7 @@ mod jni_facade {
         LIVE_HANDLES.load(Ordering::Relaxed)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_freeHandle(
         _env: JNIEnv,
         _class: JClass,
@@ -1059,7 +1077,7 @@ mod jni_facade {
         unsafe { handle::free::<ClientSlot>(as_handle(handle)) };
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_buildStart(
         mut env: JNIEnv,
         _class: JClass,
@@ -1073,7 +1091,7 @@ mod jni_facade {
         ops::spawn_channel(async move { OpResult::new(build(slot, endpoint, payload).await) })
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_nameStart(
         _env: JNIEnv,
         _class: JClass,
@@ -1090,7 +1108,7 @@ mod jni_facade {
 
     /// The name arrives as a `byte[]` rather than a `String` so both facades hand Rust the same
     /// UTF-8 bytes, and so the byte length upstream validates is the one Kotlin encoded.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_setNameStart(
         mut env: JNIEnv,
         _class: JClass,
@@ -1113,7 +1131,7 @@ mod jni_facade {
         })
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_pingStart(
         _env: JNIEnv,
         _class: JClass,
@@ -1128,7 +1146,7 @@ mod jni_facade {
         })
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_pushMetricsStart(
         _env: JNIEnv,
         _class: JClass,
@@ -1143,7 +1161,7 @@ mod jni_facade {
         })
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_grantCapabilityStart(
         mut env: JNIEnv,
         _class: JClass,
@@ -1163,7 +1181,7 @@ mod jni_facade {
         })
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_netDiagnosticsStart(
         _env: JNIEnv,
         _class: JClass,
@@ -1182,7 +1200,7 @@ mod jni_facade {
 
     /// The only synchronous export in this domain: every services *operation* talks to a remote and
     /// so is asynchronous, but the capability vocabulary is a compile-time property of this build.
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ServicesJni_capabilityNames(
         mut env: JNIEnv,
         _class: JClass,

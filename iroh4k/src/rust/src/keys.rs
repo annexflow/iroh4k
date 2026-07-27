@@ -1,7 +1,7 @@
 //! Cryptographic identities: `SecretKey`, `EndpointId` and `Signature`.
 //!
 //! Owned by the keys domain. Contains the shared logic plus both facades' exports for it:
-//! `#[no_mangle] extern "C"` for cinterop and `#[cfg(not(target_os = "ios"))] Java_*` for JNI.
+//! `#[unsafe(no_mangle)] extern "C"` for cinterop, `#[cfg(not(target_os = "ios"))] Java_*` for JNI.
 //!
 //! Unlike iroh-ffi — which makes all three opaque `Arc`-wrapped objects with their own FFI
 //! lifetime — iroh4k keeps them as **pure Kotlin value types**. A key is 32 bytes and a
@@ -37,7 +37,7 @@ use std::{
 use iroh::{EndpointId, SecretKey, Signature};
 use std::str::FromStr;
 
-use crate::core::{bytes_result, c_str, error_result, i64_result, Iroh4kResult, ERROR_KEY};
+use crate::core::{ERROR_KEY, Iroh4kResult, bytes_result, c_str, error_result, i64_result};
 
 /// Raw byte lengths, fixed by Ed25519. Named so the error messages and the array conversions
 /// cannot drift apart.
@@ -204,14 +204,16 @@ fn bool_or_error(outcome: Result<bool, String>) -> *mut Iroh4kResult {
 /// for the lifetime `'a`. Callers must not let `'a` outlive the call they borrowed for; every use
 /// below passes the slice straight into an operation that returns before the export does.
 unsafe fn borrowed<'a>(ptr: *const u8, len: c_int) -> &'a [u8] {
-    if ptr.is_null() || len <= 0 {
-        return &[];
+    unsafe {
+        if ptr.is_null() || len <= 0 {
+            return &[];
+        }
+        slice::from_raw_parts(ptr, len as usize)
     }
-    slice::from_raw_parts(ptr, len as usize)
 }
 
 /// A freshly generated secret key's 32 raw bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_keys_secret_generate() -> *mut Iroh4kResult {
     bytes_result(secret_generate())
 }
@@ -220,24 +222,24 @@ pub extern "C" fn iroh4k_keys_secret_generate() -> *mut Iroh4kResult {
 ///
 /// # Safety
 /// `secret`/`secret_len` must satisfy [`borrowed`]'s contract.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_keys_secret_from_bytes(
     secret: *const u8,
     secret_len: c_int,
 ) -> *mut Iroh4kResult {
-    bytes_or_error(secret_from_bytes(borrowed(secret, secret_len)))
+    unsafe { bytes_or_error(secret_from_bytes(borrowed(secret, secret_len))) }
 }
 
 /// The 32 raw bytes of the endpoint id derived from a secret key.
 ///
 /// # Safety
 /// `secret`/`secret_len` must satisfy [`borrowed`]'s contract.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_keys_secret_public(
     secret: *const u8,
     secret_len: c_int,
 ) -> *mut Iroh4kResult {
-    bytes_or_error(secret_public(borrowed(secret, secret_len)))
+    unsafe { bytes_or_error(secret_public(borrowed(secret, secret_len))) }
 }
 
 /// The 64 signature bytes for `message` under `secret`.
@@ -245,17 +247,19 @@ pub unsafe extern "C" fn iroh4k_keys_secret_public(
 /// # Safety
 /// Both buffers must satisfy [`borrowed`]'s contract. An empty message is passed as a null
 /// pointer with length 0, which is explicitly allowed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_keys_secret_sign(
     secret: *const u8,
     secret_len: c_int,
     message: *const u8,
     message_len: c_int,
 ) -> *mut Iroh4kResult {
-    bytes_or_error(secret_sign(
-        borrowed(secret, secret_len),
-        borrowed(message, message_len),
-    ))
+    unsafe {
+        bytes_or_error(secret_sign(
+            borrowed(secret, secret_len),
+            borrowed(message, message_len),
+        ))
+    }
 }
 
 /// Validates an endpoint id, returning its canonical 32 raw bytes. `ERROR_KEY` if the length is
@@ -263,12 +267,12 @@ pub unsafe extern "C" fn iroh4k_keys_secret_sign(
 ///
 /// # Safety
 /// `id`/`id_len` must satisfy [`borrowed`]'s contract.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_keys_endpoint_id_from_bytes(
     id: *const u8,
     id_len: c_int,
 ) -> *mut Iroh4kResult {
-    bytes_or_error(endpoint_id_from_bytes(borrowed(id, id_len)))
+    unsafe { bytes_or_error(endpoint_id_from_bytes(borrowed(id, id_len))) }
 }
 
 /// The 32 raw bytes of the endpoint id written as `text` (hex or base32, per iroh's `FromStr`).
@@ -276,37 +280,39 @@ pub unsafe extern "C" fn iroh4k_keys_endpoint_id_from_bytes(
 /// # Safety
 /// `text` must be null or point to a valid nul-terminated UTF-8 string, read only for the
 /// duration of the call.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_keys_endpoint_id_from_string(
     text: *const c_char,
 ) -> *mut Iroh4kResult {
-    // `c_str` yields "" for a null or non-UTF-8 pointer, which then fails to parse as a key —
-    // an `ERROR_KEY` rather than undefined behaviour or a panic.
-    bytes_or_error(endpoint_id_from_string(c_str(text)))
+    unsafe {
+        // `c_str` yields "" for a null or non-UTF-8 pointer, which then fails to parse as a key —
+        // an `ERROR_KEY` rather than undefined behaviour or a panic.
+        bytes_or_error(endpoint_id_from_string(c_str(text)))
+    }
 }
 
 /// The textual (hex) form of an endpoint id, as UTF-8 bytes — iroh's `Display`.
 ///
 /// # Safety
 /// `id`/`id_len` must satisfy [`borrowed`]'s contract.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_keys_endpoint_id_to_string(
     id: *const u8,
     id_len: c_int,
 ) -> *mut Iroh4kResult {
-    bytes_or_error(endpoint_id_to_string(borrowed(id, id_len)))
+    unsafe { bytes_or_error(endpoint_id_to_string(borrowed(id, id_len))) }
 }
 
 /// The z-base-32 (DNS) form of an endpoint id, as UTF-8 bytes.
 ///
 /// # Safety
 /// `id`/`id_len` must satisfy [`borrowed`]'s contract.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_keys_endpoint_id_to_z32(
     id: *const u8,
     id_len: c_int,
 ) -> *mut Iroh4kResult {
-    bytes_or_error(endpoint_id_to_z32(borrowed(id, id_len)))
+    unsafe { bytes_or_error(endpoint_id_to_z32(borrowed(id, id_len))) }
 }
 
 /// The 32 raw bytes of the endpoint id written in z-base-32 as `text`.
@@ -314,23 +320,23 @@ pub unsafe extern "C" fn iroh4k_keys_endpoint_id_to_z32(
 /// # Safety
 /// `text` must be null or point to a valid nul-terminated UTF-8 string, read only for the
 /// duration of the call.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_keys_endpoint_id_from_z32(
     text: *const c_char,
 ) -> *mut Iroh4kResult {
-    bytes_or_error(endpoint_id_from_z32(c_str(text)))
+    unsafe { bytes_or_error(endpoint_id_from_z32(c_str(text))) }
 }
 
 /// iroh's short form of an endpoint id, as UTF-8 bytes.
 ///
 /// # Safety
 /// `id`/`id_len` must satisfy [`borrowed`]'s contract.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_keys_endpoint_id_fmt_short(
     id: *const u8,
     id_len: c_int,
 ) -> *mut Iroh4kResult {
-    bytes_or_error(endpoint_id_fmt_short(borrowed(id, id_len)))
+    unsafe { bytes_or_error(endpoint_id_fmt_short(borrowed(id, id_len))) }
 }
 
 /// `1` in `i64_val` if the signature verifies, `0` if it does not. `ERROR_KEY` only for input
@@ -338,7 +344,7 @@ pub unsafe extern "C" fn iroh4k_keys_endpoint_id_fmt_short(
 ///
 /// # Safety
 /// All three buffers must satisfy [`borrowed`]'s contract.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_keys_endpoint_id_verify(
     id: *const u8,
     id_len: c_int,
@@ -347,23 +353,25 @@ pub unsafe extern "C" fn iroh4k_keys_endpoint_id_verify(
     signature: *const u8,
     signature_len: c_int,
 ) -> *mut Iroh4kResult {
-    bool_or_error(endpoint_id_verify(
-        borrowed(id, id_len),
-        borrowed(message, message_len),
-        borrowed(signature, signature_len),
-    ))
+    unsafe {
+        bool_or_error(endpoint_id_verify(
+            borrowed(id, id_len),
+            borrowed(message, message_len),
+            borrowed(signature, signature_len),
+        ))
+    }
 }
 
 /// Validates a signature, returning its 64 raw bytes. `ERROR_KEY` if the length is wrong.
 ///
 /// # Safety
 /// `signature`/`signature_len` must satisfy [`borrowed`]'s contract.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_keys_signature_from_bytes(
     signature: *const u8,
     signature_len: c_int,
 ) -> *mut Iroh4kResult {
-    bytes_or_error(signature_from_bytes(borrowed(signature, signature_len)))
+    unsafe { bytes_or_error(signature_from_bytes(borrowed(signature, signature_len))) }
 }
 
 // ============================================================================
@@ -377,9 +385,9 @@ pub unsafe extern "C" fn iroh4k_keys_signature_from_bytes(
 #[allow(non_snake_case)]
 mod jni_facade {
     use super::*;
+    use jni::JNIEnv;
     use jni::objects::{JByteArray, JClass, JString};
     use jni::sys::jbyteArray;
-    use jni::JNIEnv;
 
     // One shared envelope writer — see `crate::jni::finish`.
     use crate::jni::finish;
@@ -397,7 +405,7 @@ mod jni_facade {
         env.convert_byte_array(array).unwrap_or_default()
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_secretGenerate(
         mut env: JNIEnv,
         _class: JClass,
@@ -405,7 +413,7 @@ mod jni_facade {
         finish(&mut env, bytes_result(secret_generate()))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_secretFromBytes(
         mut env: JNIEnv,
         _class: JClass,
@@ -416,7 +424,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_secretPublic(
         mut env: JNIEnv,
         _class: JClass,
@@ -427,7 +435,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_secretSign(
         mut env: JNIEnv,
         _class: JClass,
@@ -440,7 +448,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_endpointIdFromBytes(
         mut env: JNIEnv,
         _class: JClass,
@@ -451,7 +459,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_endpointIdFromString(
         mut env: JNIEnv,
         _class: JClass,
@@ -470,7 +478,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_endpointIdToString(
         mut env: JNIEnv,
         _class: JClass,
@@ -481,7 +489,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_endpointIdToZ32(
         mut env: JNIEnv,
         _class: JClass,
@@ -492,7 +500,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_endpointIdFromZ32(
         mut env: JNIEnv,
         _class: JClass,
@@ -505,7 +513,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_endpointIdFmtShort(
         mut env: JNIEnv,
         _class: JClass,
@@ -516,7 +524,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_endpointIdVerify(
         mut env: JNIEnv,
         _class: JClass,
@@ -531,7 +539,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_KeysJni_signatureFromBytes(
         mut env: JNIEnv,
         _class: JClass,

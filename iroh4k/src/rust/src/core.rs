@@ -10,7 +10,7 @@
 #![allow(dead_code)]
 
 use std::{
-    ffi::{c_char, c_int, c_void, CStr, CString},
+    ffi::{CStr, CString, c_char, c_int, c_void},
     ptr::null_mut,
     slice,
     sync::OnceLock,
@@ -217,10 +217,12 @@ pub fn free_result(ptr: *mut Iroh4kResult) {
 /// # Safety
 /// `ptr` must be null or point to a valid nul-terminated UTF-8 string.
 pub unsafe fn c_str(ptr: *const c_char) -> &'static str {
-    if ptr.is_null() {
-        return "";
+    unsafe {
+        if ptr.is_null() {
+            return "";
+        }
+        CStr::from_ptr(ptr).to_str().unwrap_or("")
     }
-    CStr::from_ptr(ptr).to_str().unwrap_or("")
 }
 
 /// Copies a caller-owned byte buffer into an owned `Vec`.
@@ -231,10 +233,12 @@ pub unsafe fn c_str(ptr: *const c_char) -> &'static str {
 /// # Safety
 /// `ptr` must be null or point to at least `len` readable bytes.
 pub unsafe fn owned_bytes(ptr: *const u8, len: c_int) -> Vec<u8> {
-    if ptr.is_null() || len <= 0 {
-        return Vec::new();
+    unsafe {
+        if ptr.is_null() || len <= 0 {
+            return Vec::new();
+        }
+        slice::from_raw_parts(ptr, len as usize).to_vec()
     }
-    slice::from_raw_parts(ptr, len as usize).to_vec()
 }
 
 // ============================================================================

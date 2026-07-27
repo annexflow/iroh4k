@@ -1,7 +1,7 @@
 //! The accept side: `Incoming`, `Accepting`, `Connecting`, and the `Connection` handle.
 //!
 //! Owned by the connection domain. Contains the shared logic plus both facades' exports for it:
-//! `#[no_mangle] extern "C"` for cinterop and `#[cfg(not(target_os = "ios"))] Java_*` for JNI.
+//! `#[unsafe(no_mangle)] extern "C"` for cinterop, `#[cfg(not(target_os = "ios"))] Java_*` for JNI.
 //!
 //! This domain introduces the *consumed-once* handle. Unlike `Endpoint`, which is shared and
 //! long-lived, `Incoming` and the two connecting futures are each used exactly once — see
@@ -133,26 +133,26 @@ use std::{
     ops::Deref,
     ptr::null_mut,
     sync::{
-        atomic::{AtomicI64, Ordering},
         Arc,
+        atomic::{AtomicI64, Ordering},
     },
 };
 
 use iroh::{
+    Endpoint, EndpointId,
     endpoint::{
         Accepting, ConnectOptions, Connecting, ConnectingError, Connection, ConnectionStats,
         Incoming, IncomingAddr, LocalTransportAddr, Path, SendDatagramError, UdpStats, VarInt,
     },
-    Endpoint, EndpointId,
 };
 
 use crate::addr::{
-    decode_endpoint_addr, write_transport_addr, TAG_CUSTOM, TAG_IP, TAG_RELAY, TAG_UNKNOWN,
+    TAG_CUSTOM, TAG_IP, TAG_RELAY, TAG_UNKNOWN, decode_endpoint_addr, write_transport_addr,
 };
 use crate::codec::Writer;
 use crate::core::{
-    bytes_result, error_result, handle_result, i64_result, ok_result, owned_bytes, Iroh4kPtr,
-    Iroh4kResult, ERROR_ACCEPT, ERROR_CLOSED, ERROR_CONNECT, ERROR_INVALID_ARGUMENT, ERROR_WRITE,
+    ERROR_ACCEPT, ERROR_CLOSED, ERROR_CONNECT, ERROR_INVALID_ARGUMENT, ERROR_WRITE, Iroh4kPtr,
+    Iroh4kResult, bytes_result, error_result, handle_result, i64_result, ok_result, owned_bytes,
 };
 use crate::handle::{self, Consumed, Tagged};
 use crate::ops::{self, OpResult};
@@ -338,10 +338,12 @@ fn tracked<T>(value: T) -> Tracked<T> {
 /// not yet freed. Kotlin's guard guarantees the second part: it releases a handle only once every
 /// call inside it has returned.
 pub(crate) unsafe fn peek<'a, T: 'static>(handle: *mut c_void) -> Option<&'a Tracked<T>> {
-    if handle.is_null() {
-        return None;
+    unsafe {
+        if handle.is_null() {
+            return None;
+        }
+        handle::borrow::<Tracked<T>>(handle)
     }
-    handle::borrow::<Tracked<T>>(handle)
 }
 
 /// Clones the `Arc` behind a handle so it can be moved into a spawned future.
@@ -349,7 +351,7 @@ pub(crate) unsafe fn peek<'a, T: 'static>(handle: *mut c_void) -> Option<&'a Tra
 /// # Safety
 /// As [`peek`].
 pub(crate) unsafe fn share<T: 'static>(handle: *mut c_void) -> Option<Arc<Tagged<Tracked<T>>>> {
-    handle::clone_arc::<Tracked<T>>(handle)
+    unsafe { handle::clone_arc::<Tracked<T>>(handle) }
 }
 
 /// Runs `f` against the payload behind `handle`, or answers [`ERROR_CLOSED`].
@@ -360,9 +362,11 @@ pub(crate) unsafe fn with<T: 'static>(
     handle: *mut c_void,
     f: impl FnOnce(&Tracked<T>) -> *mut Iroh4kResult,
 ) -> *mut Iroh4kResult {
-    match peek::<T>(handle) {
-        Some(payload) => f(payload),
-        None => released(),
+    unsafe {
+        match peek::<T>(handle) {
+            Some(payload) => f(payload),
+            None => released(),
+        }
     }
 }
 
@@ -378,7 +382,7 @@ pub(crate) unsafe fn with<T: 'static>(
 /// # Safety
 /// As [`peek`], for a `Connection` handle.
 pub(crate) unsafe fn connection_clone(handle: *mut c_void) -> Option<Connection> {
-    peek::<Connection>(handle).map(|payload| (**payload).clone())
+    unsafe { peek::<Connection>(handle).map(|payload| (**payload).clone()) }
 }
 
 /// Runs `f` inside the shared tokio runtime's context.
@@ -1000,14 +1004,16 @@ async fn connect(endpoint: Option<Endpoint>, addr: Vec<u8>, alpn: Vec<u8>) -> Op
 /// `ptr` must be null, or point to at least `len` initialised bytes that stay valid and unmutated
 /// for the lifetime `'a`, and `'a` must not outlive the call.
 unsafe fn borrowed<'a>(ptr: *const u8, len: c_int) -> &'a [u8] {
-    if ptr.is_null() || len <= 0 {
-        return &[];
+    unsafe {
+        if ptr.is_null() || len <= 0 {
+            return &[];
+        }
+        std::slice::from_raw_parts(ptr, len as usize)
     }
-    std::slice::from_raw_parts(ptr, len as usize)
 }
 
 /// Connection-domain handles still alive. Test hook for asserting handles do not leak.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_connection_live_handle_count() -> i64 {
     LIVE_HANDLES.load(Ordering::Relaxed)
 }
@@ -1026,27 +1032,33 @@ pub extern "C" fn iroh4k_connection_live_handle_count() -> i64 {
 ///
 /// # Safety
 /// `handle` must be null, or an `Incoming` handle from this module that has not been freed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_incoming_free(handle: *mut c_void) {
-    handle::free::<IncomingHandle>(handle);
+    unsafe {
+        handle::free::<IncomingHandle>(handle);
+    }
 }
 
 /// Releases an `Accepting` handle, abandoning the handshake if it was never awaited.
 ///
 /// # Safety
 /// As [`iroh4k_incoming_free`], for an `Accepting` handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_accepting_free(handle: *mut c_void) {
-    handle::free::<AcceptingHandle>(handle);
+    unsafe {
+        handle::free::<AcceptingHandle>(handle);
+    }
 }
 
 /// Releases a `Connecting` handle, abandoning the attempt if it was never awaited.
 ///
 /// # Safety
 /// As [`iroh4k_incoming_free`], for a `Connecting` handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connecting_free(handle: *mut c_void) {
-    handle::free::<ConnectingHandle>(handle);
+    unsafe {
+        handle::free::<ConnectingHandle>(handle);
+    }
 }
 
 /// Releases a `Connection` handle.
@@ -1056,9 +1068,11 @@ pub unsafe extern "C" fn iroh4k_connecting_free(handle: *mut c_void) {
 ///
 /// # Safety
 /// As [`iroh4k_incoming_free`], for a `Connection` handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_free(handle: *mut c_void) {
-    handle::free::<ConnectionHandle>(handle);
+    unsafe {
+        handle::free::<ConnectionHandle>(handle);
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -1069,65 +1083,65 @@ pub unsafe extern "C" fn iroh4k_connection_free(handle: *mut c_void) {
 ///
 /// # Safety
 /// `handle` must satisfy [`peek`]'s contract for an `Incoming` handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_incoming_accept(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<Consumed<Incoming>>(handle, |slot| incoming_accept(slot))
+    unsafe { with::<Consumed<Incoming>>(handle, |slot| incoming_accept(slot)) }
 }
 
 /// Rejects an incoming connection.
 ///
 /// # Safety
 /// As [`iroh4k_incoming_accept`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_incoming_refuse(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<Consumed<Incoming>>(handle, |slot| incoming_refuse(slot))
+    unsafe { with::<Consumed<Incoming>>(handle, |slot| incoming_refuse(slot)) }
 }
 
 /// Asks the peer to retry with address validation.
 ///
 /// # Safety
 /// As [`iroh4k_incoming_accept`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_incoming_retry(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<Consumed<Incoming>>(handle, |slot| incoming_retry(slot))
+    unsafe { with::<Consumed<Incoming>>(handle, |slot| incoming_retry(slot)) }
 }
 
 /// Drops an incoming connection without answering it.
 ///
 /// # Safety
 /// As [`iroh4k_incoming_accept`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_incoming_ignore(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<Consumed<Incoming>>(handle, |slot| incoming_ignore(slot))
+    unsafe { with::<Consumed<Incoming>>(handle, |slot| incoming_ignore(slot)) }
 }
 
 /// The local address that received the connection, as a codec payload.
 ///
 /// # Safety
 /// As [`iroh4k_incoming_accept`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_incoming_local_addr(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<Consumed<Incoming>>(handle, |slot| incoming_local_addr(slot))
+    unsafe { with::<Consumed<Incoming>>(handle, |slot| incoming_local_addr(slot)) }
 }
 
 /// The address the connection arrived from, as a codec payload.
 ///
 /// # Safety
 /// As [`iroh4k_incoming_accept`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_incoming_remote_addr(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<Consumed<Incoming>>(handle, |slot| incoming_remote_addr(slot))
+    unsafe { with::<Consumed<Incoming>>(handle, |slot| incoming_remote_addr(slot)) }
 }
 
 /// `1` in `i64_val` if the peer's address has been validated.
 ///
 /// # Safety
 /// As [`iroh4k_incoming_accept`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_incoming_remote_addr_validated(
     handle: *mut c_void,
 ) -> *mut Iroh4kResult {
-    with::<Consumed<Incoming>>(handle, |slot| incoming_remote_addr_validated(slot))
+    unsafe { with::<Consumed<Incoming>>(handle, |slot| incoming_remote_addr_validated(slot)) }
 }
 
 // ----------------------------------------------------------------------------
@@ -1141,11 +1155,13 @@ pub unsafe extern "C" fn iroh4k_incoming_remote_addr_validated(
 ///
 /// # Safety
 /// `handle` must satisfy [`peek`]'s contract for a `Connecting` handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connecting_remote_id(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<ConnectingSlot>(handle, |slot| {
-        bytes_result(slot.remote_id.as_bytes().to_vec())
-    })
+    unsafe {
+        with::<ConnectingSlot>(handle, |slot| {
+            bytes_result(slot.remote_id.as_bytes().to_vec())
+        })
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -1156,44 +1172,52 @@ pub unsafe extern "C" fn iroh4k_connecting_remote_id(handle: *mut c_void) -> *mu
 ///
 /// # Safety
 /// `handle` must satisfy [`peek`]'s contract for a `Connection` handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_alpn(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<Connection>(handle, |connection| {
-        bytes_result(connection_alpn(connection))
-    })
+    unsafe {
+        with::<Connection>(handle, |connection| {
+            bytes_result(connection_alpn(connection))
+        })
+    }
 }
 
 /// The 32 raw bytes of the remote's endpoint id.
 ///
 /// # Safety
 /// As [`iroh4k_connection_alpn`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_remote_id(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<Connection>(handle, |connection| {
-        bytes_result(connection_remote_id(connection))
-    })
+    unsafe {
+        with::<Connection>(handle, |connection| {
+            bytes_result(connection_remote_id(connection))
+        })
+    }
 }
 
 /// A stable identifier for the connection, in `i64_val`.
 ///
 /// # Safety
 /// As [`iroh4k_connection_alpn`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_stable_id(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<Connection>(handle, |connection| {
-        i64_result(connection_stable_id(connection))
-    })
+    unsafe {
+        with::<Connection>(handle, |connection| {
+            i64_result(connection_stable_id(connection))
+        })
+    }
 }
 
 /// Why the connection closed, as an optional string payload.
 ///
 /// # Safety
 /// As [`iroh4k_connection_alpn`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_close_reason(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<Connection>(handle, |connection| {
-        bytes_result(connection_close_reason(connection))
-    })
+    unsafe {
+        with::<Connection>(handle, |connection| {
+            bytes_result(connection_close_reason(connection))
+        })
+    }
 }
 
 /// Closes the connection immediately with `error_code` and `reason`.
@@ -1201,83 +1225,93 @@ pub unsafe extern "C" fn iroh4k_connection_close_reason(handle: *mut c_void) -> 
 /// # Safety
 /// `handle` must satisfy [`peek`]'s contract for a `Connection` handle, and `reason`/`reason_len`
 /// must satisfy [`borrowed`]'s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_close(
     handle: *mut c_void,
     error_code: i64,
     reason: *const u8,
     reason_len: c_int,
 ) -> *mut Iroh4kResult {
-    let reason = borrowed(reason, reason_len);
-    with::<Connection>(handle, |connection| {
-        connection_close(connection, error_code, reason)
-    })
+    unsafe {
+        let reason = borrowed(reason, reason_len);
+        with::<Connection>(handle, |connection| {
+            connection_close(connection, error_code, reason)
+        })
+    }
 }
 
 /// `0` if this side dialled, `1` if it accepted, in `i64_val`.
 ///
 /// # Safety
 /// As [`iroh4k_connection_alpn`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_side(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<Connection>(handle, |connection| i64_result(connection_side(connection)))
+    unsafe { with::<Connection>(handle, |connection| i64_result(connection_side(connection))) }
 }
 
 /// The selected path's round-trip time in microseconds, or `-1`, in `i64_val`.
 ///
 /// # Safety
 /// As [`iroh4k_connection_alpn`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_rtt(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<Connection>(handle, |connection| i64_result(connection_rtt(connection)))
+    unsafe { with::<Connection>(handle, |connection| i64_result(connection_rtt(connection))) }
 }
 
 /// Connection-wide statistics, as a codec payload.
 ///
 /// # Safety
 /// As [`iroh4k_connection_alpn`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_stats(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<Connection>(handle, |connection| {
-        bytes_result(connection_stats(connection))
-    })
+    unsafe {
+        with::<Connection>(handle, |connection| {
+            bytes_result(connection_stats(connection))
+        })
+    }
 }
 
 /// A snapshot of the open network paths, as a codec payload.
 ///
 /// # Safety
 /// As [`iroh4k_connection_alpn`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_paths(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<Connection>(handle, |connection| {
-        bytes_result(connection_paths(connection))
-    })
+    unsafe {
+        with::<Connection>(handle, |connection| {
+            bytes_result(connection_paths(connection))
+        })
+    }
 }
 
 /// The largest datagram the connection can currently carry, or `-1`, in `i64_val`.
 ///
 /// # Safety
 /// As [`iroh4k_connection_alpn`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_max_datagram_size(
     handle: *mut c_void,
 ) -> *mut Iroh4kResult {
-    with::<Connection>(handle, |connection| {
-        i64_result(connection_max_datagram_size(connection))
-    })
+    unsafe {
+        with::<Connection>(handle, |connection| {
+            i64_result(connection_max_datagram_size(connection))
+        })
+    }
 }
 
 /// Bytes free in the outgoing datagram buffer, in `i64_val`.
 ///
 /// # Safety
 /// As [`iroh4k_connection_alpn`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_datagram_send_buffer_space(
     handle: *mut c_void,
 ) -> *mut Iroh4kResult {
-    with::<Connection>(handle, |connection| {
-        i64_result(width(connection.datagram_send_buffer_space()))
-    })
+    unsafe {
+        with::<Connection>(handle, |connection| {
+            i64_result(width(connection.datagram_send_buffer_space()))
+        })
+    }
 }
 
 /// Sends an unreliable datagram, failing rather than waiting for buffer space.
@@ -1285,73 +1319,81 @@ pub unsafe extern "C" fn iroh4k_connection_datagram_send_buffer_space(
 /// # Safety
 /// `handle` must satisfy [`peek`]'s contract for a `Connection` handle, and `payload`/`payload_len`
 /// must satisfy [`borrowed`]'s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_send_datagram(
     handle: *mut c_void,
     payload: *const u8,
     payload_len: c_int,
 ) -> *mut Iroh4kResult {
-    let payload = borrowed(payload, payload_len);
-    with::<Connection>(handle, |connection| {
-        connection_send_datagram(connection, payload)
-    })
+    unsafe {
+        let payload = borrowed(payload, payload_len);
+        with::<Connection>(handle, |connection| {
+            connection_send_datagram(connection, payload)
+        })
+    }
 }
 
 /// Sets how many bidirectional streams the peer may have open at once.
 ///
 /// # Safety
 /// As [`iroh4k_connection_alpn`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_set_max_concurrent_bi_streams(
     handle: *mut c_void,
     count: i64,
 ) -> *mut Iroh4kResult {
-    with::<Connection>(handle, |connection| {
-        connection_set_limit(
-            connection,
-            count,
-            "a maximum concurrent bidirectional stream count",
-            |connection, count| connection.set_max_concurrent_bi_streams(count),
-        )
-    })
+    unsafe {
+        with::<Connection>(handle, |connection| {
+            connection_set_limit(
+                connection,
+                count,
+                "a maximum concurrent bidirectional stream count",
+                |connection, count| connection.set_max_concurrent_bi_streams(count),
+            )
+        })
+    }
 }
 
 /// Sets how many unidirectional streams the peer may have open at once.
 ///
 /// # Safety
 /// As [`iroh4k_connection_alpn`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_set_max_concurrent_uni_streams(
     handle: *mut c_void,
     count: i64,
 ) -> *mut Iroh4kResult {
-    with::<Connection>(handle, |connection| {
-        connection_set_limit(
-            connection,
-            count,
-            "a maximum concurrent unidirectional stream count",
-            |connection, count| connection.set_max_concurrent_uni_streams(count),
-        )
-    })
+    unsafe {
+        with::<Connection>(handle, |connection| {
+            connection_set_limit(
+                connection,
+                count,
+                "a maximum concurrent unidirectional stream count",
+                |connection, count| connection.set_max_concurrent_uni_streams(count),
+            )
+        })
+    }
 }
 
 /// Sets the connection-level flow-control receive window, in bytes.
 ///
 /// # Safety
 /// As [`iroh4k_connection_alpn`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_set_receive_window(
     handle: *mut c_void,
     bytes: i64,
 ) -> *mut Iroh4kResult {
-    with::<Connection>(handle, |connection| {
-        connection_set_limit(
-            connection,
-            bytes,
-            "a receive window",
-            |connection, bytes| connection.set_receive_window(bytes),
-        )
-    })
+    unsafe {
+        with::<Connection>(handle, |connection| {
+            connection_set_limit(
+                connection,
+                bytes,
+                "a receive window",
+                |connection, bytes| connection.set_receive_window(bytes),
+            )
+        })
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -1369,14 +1411,16 @@ pub unsafe extern "C" fn iroh4k_connection_set_receive_window(
 /// # Safety
 /// `endpoint` must be null, or a live endpoint handle from `iroh4k_endpoint_new` that has not been
 /// freed. Kotlin's guard on `Endpoint` guarantees the second part.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_accept_next(
     endpoint: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let endpoint = crate::endpoint::endpoint_clone(endpoint);
-    ops::spawn_callback(callback, fun, accept_next(endpoint))
+    unsafe {
+        let endpoint = crate::endpoint::endpoint_clone(endpoint);
+        ops::spawn_callback(callback, fun, accept_next(endpoint))
+    }
 }
 
 /// Starts an outbound connection attempt; the result carries a `Connecting` handle. Asynchronous.
@@ -1385,7 +1429,7 @@ pub unsafe extern "C" fn iroh4k_endpoint_accept_next(
 /// `endpoint` must satisfy [`iroh4k_endpoint_accept_next`]'s contract. `addr`/`addr_len` and
 /// `alpn`/`alpn_len` must be null/0 or describe that many readable bytes; both are **copied** before
 /// the future is spawned, so the caller may free them as soon as this returns.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_start_connect(
     endpoint: *mut c_void,
     addr: *const u8,
@@ -1395,73 +1439,83 @@ pub unsafe extern "C" fn iroh4k_endpoint_start_connect(
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let endpoint = crate::endpoint::endpoint_clone(endpoint);
-    let addr = owned_bytes(addr, addr_len);
-    let alpn = owned_bytes(alpn, alpn_len);
-    ops::spawn_callback(callback, fun, start_connect(endpoint, addr, alpn))
+    unsafe {
+        let endpoint = crate::endpoint::endpoint_clone(endpoint);
+        let addr = owned_bytes(addr, addr_len);
+        let alpn = owned_bytes(alpn, alpn_len);
+        ops::spawn_callback(callback, fun, start_connect(endpoint, addr, alpn))
+    }
 }
 
 /// Completes an accepted handshake; the result carries a `Connection` handle. Asynchronous.
 ///
 /// # Safety
 /// `handle` must satisfy [`share`]'s contract for an `Accepting` handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_accepting_connect(
     handle: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = share::<Once<Accepting>>(handle);
-    ops::spawn_callback(callback, fun, accepting_connect(slot))
+    unsafe {
+        let slot = share::<Once<Accepting>>(handle);
+        ops::spawn_callback(callback, fun, accepting_connect(slot))
+    }
 }
 
 /// The ALPN negotiated for an accepted handshake, as raw bytes. Asynchronous.
 ///
 /// # Safety
 /// As [`iroh4k_accepting_connect`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_accepting_alpn(
     handle: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = share::<Once<Accepting>>(handle);
-    ops::spawn_callback(callback, fun, accepting_alpn(slot))
+    unsafe {
+        let slot = share::<Once<Accepting>>(handle);
+        ops::spawn_callback(callback, fun, accepting_alpn(slot))
+    }
 }
 
 /// Completes an outbound handshake; the result carries a `Connection` handle. Asynchronous.
 ///
 /// # Safety
 /// `handle` must satisfy [`share`]'s contract for a `Connecting` handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connecting_connect(
     handle: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = share::<ConnectingSlot>(handle);
-    ops::spawn_callback(callback, fun, connecting_connect(slot))
+    unsafe {
+        let slot = share::<ConnectingSlot>(handle);
+        ops::spawn_callback(callback, fun, connecting_connect(slot))
+    }
 }
 
 /// The ALPN negotiated for an outbound handshake, as raw bytes. Asynchronous.
 ///
 /// # Safety
 /// As [`iroh4k_connecting_connect`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connecting_alpn(
     handle: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = share::<ConnectingSlot>(handle);
-    ops::spawn_callback(callback, fun, connecting_alpn(slot))
+    unsafe {
+        let slot = share::<ConnectingSlot>(handle);
+        ops::spawn_callback(callback, fun, connecting_alpn(slot))
+    }
 }
 
 /// Dials `addr` and completes the handshake; the result carries a `Connection` handle. Asynchronous.
 ///
 /// # Safety
 /// As [`iroh4k_endpoint_start_connect`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_connect(
     endpoint: *mut c_void,
     addr: *const u8,
@@ -1471,24 +1525,28 @@ pub unsafe extern "C" fn iroh4k_endpoint_connect(
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let endpoint = crate::endpoint::endpoint_clone(endpoint);
-    let addr = owned_bytes(addr, addr_len);
-    let alpn = owned_bytes(alpn, alpn_len);
-    ops::spawn_callback(callback, fun, connect(endpoint, addr, alpn))
+    unsafe {
+        let endpoint = crate::endpoint::endpoint_clone(endpoint);
+        let addr = owned_bytes(addr, addr_len);
+        let alpn = owned_bytes(alpn, alpn_len);
+        ops::spawn_callback(callback, fun, connect(endpoint, addr, alpn))
+    }
 }
 
 /// Suspends until the connection closes, then answers with iroh's reason text. Asynchronous.
 ///
 /// # Safety
 /// `handle` must satisfy [`peek`]'s contract for a `Connection` handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_closed(
     handle: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let connection = connection_clone(handle);
-    ops::spawn_callback(callback, fun, connection_closed(connection))
+    unsafe {
+        let connection = connection_clone(handle);
+        ops::spawn_callback(callback, fun, connection_closed(connection))
+    }
 }
 
 /// Sends a datagram, waiting for buffer space if there is none. Asynchronous.
@@ -1497,7 +1555,7 @@ pub unsafe extern "C" fn iroh4k_connection_closed(
 /// `handle` must satisfy [`peek`]'s contract for a `Connection` handle. `payload`/`payload_len` must
 /// be null/0 or describe that many readable bytes; the buffer is **copied** before the future is
 /// spawned, so the caller may free it as soon as this returns.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_send_datagram_wait(
     handle: *mut c_void,
     payload: *const u8,
@@ -1505,27 +1563,31 @@ pub unsafe extern "C" fn iroh4k_connection_send_datagram_wait(
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let connection = connection_clone(handle);
-    let payload = owned_bytes(payload, payload_len);
-    ops::spawn_callback(
-        callback,
-        fun,
-        connection_send_datagram_wait(connection, payload),
-    )
+    unsafe {
+        let connection = connection_clone(handle);
+        let payload = owned_bytes(payload, payload_len);
+        ops::spawn_callback(
+            callback,
+            fun,
+            connection_send_datagram_wait(connection, payload),
+        )
+    }
 }
 
 /// Suspends until a datagram arrives, and answers with its bytes. Asynchronous.
 ///
 /// # Safety
 /// As [`iroh4k_connection_closed`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_read_datagram(
     handle: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let connection = connection_clone(handle);
-    ops::spawn_callback(callback, fun, connection_read_datagram(connection))
+    unsafe {
+        let connection = connection_clone(handle);
+        ops::spawn_callback(callback, fun, connection_read_datagram(connection))
+    }
 }
 
 // ============================================================================
@@ -1543,9 +1605,9 @@ pub unsafe extern "C" fn iroh4k_connection_read_datagram(
 #[allow(non_snake_case)]
 mod jni_facade {
     use super::*;
+    use jni::JNIEnv;
     use jni::objects::{JByteArray, JClass};
     use jni::sys::{jbyteArray, jlong};
-    use jni::JNIEnv;
 
     // One shared envelope writer — see `crate::jni::finish`.
     use crate::jni::finish;
@@ -1568,7 +1630,7 @@ mod jni_facade {
         env.convert_byte_array(array).unwrap_or_default()
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_liveHandleCount(
         _env: JNIEnv,
         _class: JClass,
@@ -1578,7 +1640,7 @@ mod jni_facade {
 
     // ── Handle release ───────────────────────────────────────────────────────────────────────
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_freeIncoming(
         _env: JNIEnv,
         _class: JClass,
@@ -1587,7 +1649,7 @@ mod jni_facade {
         unsafe { handle::free::<IncomingHandle>(as_handle(handle)) };
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_freeAccepting(
         _env: JNIEnv,
         _class: JClass,
@@ -1596,7 +1658,7 @@ mod jni_facade {
         unsafe { handle::free::<AcceptingHandle>(as_handle(handle)) };
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_freeConnecting(
         _env: JNIEnv,
         _class: JClass,
@@ -1605,7 +1667,7 @@ mod jni_facade {
         unsafe { handle::free::<ConnectingHandle>(as_handle(handle)) };
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_freeConnection(
         _env: JNIEnv,
         _class: JClass,
@@ -1616,7 +1678,7 @@ mod jni_facade {
 
     // ── Incoming ─────────────────────────────────────────────────────────────────────────────
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_incomingAccept(
         mut env: JNIEnv,
         _class: JClass,
@@ -1627,7 +1689,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_incomingRefuse(
         mut env: JNIEnv,
         _class: JClass,
@@ -1638,7 +1700,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_incomingRetry(
         mut env: JNIEnv,
         _class: JClass,
@@ -1649,7 +1711,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_incomingIgnore(
         mut env: JNIEnv,
         _class: JClass,
@@ -1660,7 +1722,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_incomingLocalAddr(
         mut env: JNIEnv,
         _class: JClass,
@@ -1672,7 +1734,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_incomingRemoteAddr(
         mut env: JNIEnv,
         _class: JClass,
@@ -1684,7 +1746,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_incomingRemoteAddrValidated(
         mut env: JNIEnv,
         _class: JClass,
@@ -1700,7 +1762,7 @@ mod jni_facade {
 
     // ── Connecting and Connection — synchronous ──────────────────────────────────────────────
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectingRemoteId(
         mut env: JNIEnv,
         _class: JClass,
@@ -1714,7 +1776,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionAlpn(
         mut env: JNIEnv,
         _class: JClass,
@@ -1728,7 +1790,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionRemoteId(
         mut env: JNIEnv,
         _class: JClass,
@@ -1742,7 +1804,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionStableId(
         mut env: JNIEnv,
         _class: JClass,
@@ -1756,7 +1818,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionCloseReason(
         mut env: JNIEnv,
         _class: JClass,
@@ -1770,7 +1832,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionClose(
         mut env: JNIEnv,
         _class: JClass,
@@ -1787,7 +1849,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionSide(
         mut env: JNIEnv,
         _class: JClass,
@@ -1801,7 +1863,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionRtt(
         mut env: JNIEnv,
         _class: JClass,
@@ -1815,7 +1877,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionStats(
         mut env: JNIEnv,
         _class: JClass,
@@ -1829,7 +1891,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionPaths(
         mut env: JNIEnv,
         _class: JClass,
@@ -1843,7 +1905,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionMaxDatagramSize(
         mut env: JNIEnv,
         _class: JClass,
@@ -1857,7 +1919,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionDatagramSendBufferSpace(
         mut env: JNIEnv,
         _class: JClass,
@@ -1871,7 +1933,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionSendDatagram(
         mut env: JNIEnv,
         _class: JClass,
@@ -1887,7 +1949,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionSetMaxConcurrentBiStreams(
         mut env: JNIEnv,
         _class: JClass,
@@ -1907,7 +1969,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionSetMaxConcurrentUniStreams(
         mut env: JNIEnv,
         _class: JClass,
@@ -1927,7 +1989,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionSetReceiveWindow(
         mut env: JNIEnv,
         _class: JClass,
@@ -1949,7 +2011,7 @@ mod jni_facade {
 
     // ── Asynchronous ─────────────────────────────────────────────────────────────────────────
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_acceptNextStart(
         _env: JNIEnv,
         _class: JClass,
@@ -1959,7 +2021,7 @@ mod jni_facade {
         ops::spawn_channel(accept_next(endpoint))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_startConnectStart(
         mut env: JNIEnv,
         _class: JClass,
@@ -1973,7 +2035,7 @@ mod jni_facade {
         ops::spawn_channel(start_connect(endpoint, addr, alpn))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_acceptingConnectStart(
         _env: JNIEnv,
         _class: JClass,
@@ -1983,7 +2045,7 @@ mod jni_facade {
         ops::spawn_channel(accepting_connect(slot))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_acceptingAlpnStart(
         _env: JNIEnv,
         _class: JClass,
@@ -1993,7 +2055,7 @@ mod jni_facade {
         ops::spawn_channel(accepting_alpn(slot))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectingConnectStart(
         _env: JNIEnv,
         _class: JClass,
@@ -2003,7 +2065,7 @@ mod jni_facade {
         ops::spawn_channel(connecting_connect(slot))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectingAlpnStart(
         _env: JNIEnv,
         _class: JClass,
@@ -2013,7 +2075,7 @@ mod jni_facade {
         ops::spawn_channel(connecting_alpn(slot))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectStart(
         mut env: JNIEnv,
         _class: JClass,
@@ -2027,7 +2089,7 @@ mod jni_facade {
         ops::spawn_channel(connect(endpoint, addr, alpn))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionClosedStart(
         _env: JNIEnv,
         _class: JClass,
@@ -2037,7 +2099,7 @@ mod jni_facade {
         ops::spawn_channel(connection_closed(connection))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionSendDatagramWaitStart(
         mut env: JNIEnv,
         _class: JClass,
@@ -2049,7 +2111,7 @@ mod jni_facade {
         ops::spawn_channel(connection_send_datagram_wait(connection, payload))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionReadDatagramStart(
         _env: JNIEnv,
         _class: JClass,

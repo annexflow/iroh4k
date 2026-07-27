@@ -26,11 +26,11 @@
 //!
 //! The approach mirrors upstream's own `iroh-ffi`, which installs the context the same way.
 
-use jni::objects::{JClass, JObject};
-use jni::sys::{jboolean, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
-use std::sync::atomic::{AtomicBool, Ordering};
+use jni::objects::{JClass, JObject};
+use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean};
 use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Guards the one-shot initialisation.
 ///
@@ -51,7 +51,7 @@ static INSTALLED: AtomicBool = AtomicBool::new(false);
 ///
 /// Never panics — the FFI boundary must not unwind, and a panic here would be indistinguishable
 /// from the abort this function exists to prevent.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_tech_annexflow_iroh4k_Iroh4kAndroidJni_installContext(
     env: JNIEnv,
     _class: JClass,

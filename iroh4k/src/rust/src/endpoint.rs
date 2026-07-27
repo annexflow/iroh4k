@@ -1,7 +1,7 @@
 //! The `Endpoint`: binding, configuration, outbound connections and lifecycle.
 //!
 //! Owned by the endpoint domain. Contains the shared logic plus both facades' exports for it:
-//! `#[no_mangle] extern "C"` for cinterop and `#[cfg(not(target_os = "ios"))] Java_*` for JNI.
+//! `#[unsafe(no_mangle)] extern "C"` for cinterop, `#[cfg(not(target_os = "ios"))] Java_*` for JNI.
 //!
 //! This is the first domain with a genuine *handle*: an `Endpoint` owns a socket, a tokio task
 //! tree and a QUIC state machine, so it lives in Rust behind [`crate::handle`] and Kotlin holds
@@ -88,22 +88,22 @@ use std::{
     net::SocketAddr,
     str::FromStr,
     sync::{
-        atomic::{AtomicI64, Ordering},
         Arc, OnceLock,
+        atomic::{AtomicI64, Ordering},
     },
 };
 
 use iroh::{
-    endpoint::{presets, Builder},
     Endpoint, EndpointAddr, EndpointId, RelayConfig, RelayMode, RelayUrl, SecretKey,
+    endpoint::{Builder, presets},
 };
 use iroh_relay::RelayQuicConfig;
 
 use crate::addr::write_endpoint_addr;
 use crate::codec::{Reader, Writer};
 use crate::core::{
-    bytes_result, c_str, error_result, i64_result, ok_result, owned_bytes, Iroh4kPtr, Iroh4kResult,
-    ERROR_ADDR, ERROR_BIND, ERROR_CLOSED, ERROR_KEY, ERROR_RELAY,
+    ERROR_ADDR, ERROR_BIND, ERROR_CLOSED, ERROR_KEY, ERROR_RELAY, Iroh4kPtr, Iroh4kResult,
+    bytes_result, c_str, error_result, i64_result, ok_result, owned_bytes,
 };
 use crate::handle::{self, Tagged};
 use crate::ops::{self, OpResult};
@@ -216,7 +216,7 @@ fn read_relay_config(r: &mut Reader) -> Outcome<RelayConfig> {
             return fail(
                 ERROR_RELAY,
                 format!("a relay QUIC port must be 0..=65535 or absent, got {other}"),
-            )
+            );
         }
     };
     let token = under(ERROR_RELAY, r.opt_str())?;
@@ -346,7 +346,7 @@ fn builder_for(preset: i32) -> Outcome<Builder> {
             return fail(
                 ERROR_BIND,
                 format!("unknown endpoint preset ordinal {other}"),
-            )
+            );
         }
     })
 }
@@ -447,7 +447,7 @@ impl Drop for EndpointSlot {
 /// Kotlin's guard guarantees both: the handle is created before any operation can reference it,
 /// and it is released only once every in-flight operation has returned.
 unsafe fn slot(handle: *mut c_void) -> Option<Arc<Tagged<EndpointSlot>>> {
-    handle::clone_arc::<EndpointSlot>(handle)
+    unsafe { handle::clone_arc::<EndpointSlot>(handle) }
 }
 
 /// Borrows the bound endpoint behind a handle for the duration of one synchronous call.
@@ -456,12 +456,14 @@ unsafe fn slot(handle: *mut c_void) -> Option<Arc<Tagged<EndpointSlot>>> {
 /// As [`slot`]. The returned reference must not outlive the call it was taken for; every use below
 /// passes it straight into an operation that returns before the export does.
 unsafe fn borrow_endpoint<'a>(handle: *mut c_void) -> Result<&'a Endpoint, *mut Iroh4kResult> {
-    if handle.is_null() {
-        return Err(closed());
+    unsafe {
+        if handle.is_null() {
+            return Err(closed());
+        }
+        handle::borrow::<EndpointSlot>(handle)
+            .and_then(|slot| slot.endpoint.get())
+            .ok_or_else(closed)
     }
-    handle::borrow::<EndpointSlot>(handle)
-        .and_then(|slot| slot.endpoint.get())
-        .ok_or_else(closed)
 }
 
 /// Runs `f` against the endpoint behind `handle`, or answers [`ERROR_CLOSED`].
@@ -472,9 +474,11 @@ unsafe fn with_endpoint(
     handle: *mut c_void,
     f: impl FnOnce(&Endpoint) -> *mut Iroh4kResult,
 ) -> *mut Iroh4kResult {
-    match borrow_endpoint(handle) {
-        Ok(endpoint) => f(endpoint),
-        Err(result) => result,
+    unsafe {
+        match borrow_endpoint(handle) {
+            Ok(endpoint) => f(endpoint),
+            Err(result) => result,
+        }
     }
 }
 
@@ -492,12 +496,14 @@ unsafe fn with_endpoint(
 /// # Safety
 /// As [`slot`].
 pub(crate) unsafe fn endpoint_clone(handle: *mut c_void) -> Option<Endpoint> {
-    if handle.is_null() {
-        return None;
+    unsafe {
+        if handle.is_null() {
+            return None;
+        }
+        handle::borrow::<EndpointSlot>(handle)
+            .and_then(|slot| slot.endpoint.get())
+            .cloned()
     }
-    handle::borrow::<EndpointSlot>(handle)
-        .and_then(|slot| slot.endpoint.get())
-        .cloned()
 }
 
 /// Resolves the endpoint inside a slot from within an asynchronous operation.
@@ -527,7 +533,7 @@ async fn bind(slot: Option<EndpointShared>, payload: Vec<u8>) -> *mut Iroh4kResu
     let endpoint = match builder.bind().await {
         Ok(endpoint) => endpoint,
         Err(error) => {
-            return error_result(ERROR_BIND, format!("could not bind an endpoint: {error}"))
+            return error_result(ERROR_BIND, format!("could not bind an endpoint: {error}"));
         }
     };
 
@@ -685,10 +691,12 @@ fn parse_relay_url(text: &str) -> Outcome<RelayUrl> {
 /// `ptr` must be null, or point to at least `len` initialised bytes that stay valid and unmutated
 /// for the lifetime `'a`, and `'a` must not outlive the call.
 unsafe fn borrowed<'a>(ptr: *const u8, len: c_int) -> &'a [u8] {
-    if ptr.is_null() || len <= 0 {
-        return &[];
+    unsafe {
+        if ptr.is_null() || len <= 0 {
+            return &[];
+        }
+        std::slice::from_raw_parts(ptr, len as usize)
     }
-    std::slice::from_raw_parts(ptr, len as usize)
 }
 
 /// Creates an unbound endpoint handle, which `iroh4k_endpoint_bind` fills in.
@@ -696,13 +704,13 @@ unsafe fn borrowed<'a>(ptr: *const u8, len: c_int) -> &'a [u8] {
 /// Never fails, so it returns the handle rather than a result. Kotlin owns it from here and must
 /// hand it back to [`iroh4k_endpoint_free`] — including when the bind fails or is cancelled, which
 /// is the whole reason the handle is created first (see [`EndpointSlot`]).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_endpoint_new() -> *mut c_void {
     handle::into_handle(EndpointSlot::new())
 }
 
 /// Endpoint slots still alive. Test hook for asserting handles do not leak.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_endpoint_live_handle_count() -> i64 {
     LIVE_HANDLES.load(Ordering::Relaxed)
 }
@@ -713,9 +721,11 @@ pub extern "C" fn iroh4k_endpoint_live_handle_count() -> i64 {
 ///
 /// # Safety
 /// `handle` must be null, or a handle from [`iroh4k_endpoint_new`] that has not been freed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_free(handle: *mut c_void) {
-    handle::free::<EndpointSlot>(handle);
+    unsafe {
+        handle::free::<EndpointSlot>(handle);
+    }
 }
 
 /// Binds the endpoint described by the configuration payload into `handle`. Asynchronous.
@@ -724,7 +734,7 @@ pub unsafe extern "C" fn iroh4k_endpoint_free(handle: *mut c_void) {
 /// `handle` must satisfy [`slot`]'s contract. `payload`/`payload_len` must be null/0 or describe
 /// at least `payload_len` readable bytes; they are **copied** before the future is spawned, so the
 /// caller may free the buffer as soon as this returns.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_bind(
     handle: *mut c_void,
     payload: *const u8,
@@ -732,38 +742,40 @@ pub unsafe extern "C" fn iroh4k_endpoint_bind(
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = slot(handle);
-    let payload = owned_bytes(payload, payload_len);
-    ops::spawn_callback(callback, fun, async move {
-        OpResult::new(bind(slot, payload).await)
-    })
+    unsafe {
+        let slot = slot(handle);
+        let payload = owned_bytes(payload, payload_len);
+        ops::spawn_callback(callback, fun, async move {
+            OpResult::new(bind(slot, payload).await)
+        })
+    }
 }
 
 /// The 32 raw bytes of the endpoint's id.
 ///
 /// # Safety
 /// `handle` must satisfy [`borrow_endpoint`]'s contract.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_id(handle: *mut c_void) -> *mut Iroh4kResult {
-    with_endpoint(handle, |endpoint| bytes_result(id_bytes(endpoint)))
+    unsafe { with_endpoint(handle, |endpoint| bytes_result(id_bytes(endpoint))) }
 }
 
 /// The endpoint's current `EndpointAddr`, as a codec payload.
 ///
 /// # Safety
 /// As [`iroh4k_endpoint_id`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_addr(handle: *mut c_void) -> *mut Iroh4kResult {
-    with_endpoint(handle, |endpoint| bytes_result(addr_payload(endpoint)))
+    unsafe { with_endpoint(handle, |endpoint| bytes_result(addr_payload(endpoint))) }
 }
 
 /// The 32 raw bytes of the endpoint's secret key.
 ///
 /// # Safety
 /// As [`iroh4k_endpoint_id`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_secret_key(handle: *mut c_void) -> *mut Iroh4kResult {
-    with_endpoint(handle, |endpoint| bytes_result(secret_key_bytes(endpoint)))
+    unsafe { with_endpoint(handle, |endpoint| bytes_result(secret_key_bytes(endpoint))) }
 }
 
 /// Replaces the endpoint's ALPN list from a codec sequence of byte strings.
@@ -771,48 +783,54 @@ pub unsafe extern "C" fn iroh4k_endpoint_secret_key(handle: *mut c_void) -> *mut
 /// # Safety
 /// `handle` must satisfy [`borrow_endpoint`]'s contract, and `payload`/`payload_len` must satisfy
 /// [`borrowed`]'s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_set_alpns(
     handle: *mut c_void,
     payload: *const u8,
     payload_len: c_int,
 ) -> *mut Iroh4kResult {
-    let payload = borrowed(payload, payload_len);
-    with_endpoint(handle, |endpoint| match set_alpns(endpoint, payload) {
-        Ok(()) => ok_result(),
-        Err(Failure { code, message }) => error_result(code, message),
-    })
+    unsafe {
+        let payload = borrowed(payload, payload_len);
+        with_endpoint(handle, |endpoint| match set_alpns(endpoint, payload) {
+            Ok(()) => ok_result(),
+            Err(Failure { code, message }) => error_result(code, message),
+        })
+    }
 }
 
 /// The local socket addresses the endpoint is bound to, as a codec sequence of strings.
 ///
 /// # Safety
 /// As [`iroh4k_endpoint_id`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_bound_sockets(handle: *mut c_void) -> *mut Iroh4kResult {
-    with_endpoint(handle, |endpoint| {
-        bytes_result(bound_sockets_payload(endpoint))
-    })
+    unsafe {
+        with_endpoint(handle, |endpoint| {
+            bytes_result(bound_sockets_payload(endpoint))
+        })
+    }
 }
 
 /// `1` in `i64_val` if the endpoint has been closed, `0` if it is still alive.
 ///
 /// # Safety
 /// As [`iroh4k_endpoint_id`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_is_closed(handle: *mut c_void) -> *mut Iroh4kResult {
-    with_endpoint(handle, |endpoint| {
-        i64_result(i64::from(endpoint.is_closed()))
-    })
+    unsafe {
+        with_endpoint(handle, |endpoint| {
+            i64_result(i64::from(endpoint.is_closed()))
+        })
+    }
 }
 
 /// Every endpoint metric, as a codec sequence of `(name, value, description)`.
 ///
 /// # Safety
 /// As [`iroh4k_endpoint_id`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_stats(handle: *mut c_void) -> *mut Iroh4kResult {
-    with_endpoint(handle, |endpoint| bytes_result(stats_payload(endpoint)))
+    unsafe { with_endpoint(handle, |endpoint| bytes_result(stats_payload(endpoint))) }
 }
 
 /// Closes the endpoint gracefully, notifying peers. Asynchronous.
@@ -823,22 +841,24 @@ pub unsafe extern "C" fn iroh4k_endpoint_stats(handle: *mut c_void) -> *mut Iroh
 ///
 /// # Safety
 /// `handle` must satisfy [`slot`]'s contract.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_shutdown(
     handle: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = slot(handle);
-    ops::spawn_callback(callback, fun, async move {
-        OpResult::new(match bound(&slot) {
-            Ok(endpoint) => {
-                endpoint.close().await;
-                ok_result()
-            }
-            Err(result) => result,
+    unsafe {
+        let slot = slot(handle);
+        ops::spawn_callback(callback, fun, async move {
+            OpResult::new(match bound(&slot) {
+                Ok(endpoint) => {
+                    endpoint.close().await;
+                    ok_result()
+                }
+                Err(result) => result,
+            })
         })
-    })
+    }
 }
 
 /// Resolves once the endpoint has a connected home relay. Asynchronous.
@@ -850,22 +870,24 @@ pub unsafe extern "C" fn iroh4k_endpoint_shutdown(
 ///
 /// # Safety
 /// As [`iroh4k_endpoint_shutdown`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_online(
     handle: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = slot(handle);
-    ops::spawn_callback(callback, fun, async move {
-        OpResult::new(match bound(&slot) {
-            Ok(endpoint) => {
-                endpoint.online().await;
-                ok_result()
-            }
-            Err(result) => result,
+    unsafe {
+        let slot = slot(handle);
+        ops::spawn_callback(callback, fun, async move {
+            OpResult::new(match bound(&slot) {
+                Ok(endpoint) => {
+                    endpoint.online().await;
+                    ok_result()
+                }
+                Err(result) => result,
+            })
         })
-    })
+    }
 }
 
 /// What the endpoint knows about a remote, as an optional `EndpointAddr` payload. Asynchronous.
@@ -873,7 +895,7 @@ pub unsafe extern "C" fn iroh4k_endpoint_online(
 /// # Safety
 /// `handle` must satisfy [`slot`]'s contract. `id`/`id_len` are copied before the future is
 /// spawned, so the caller may free the buffer as soon as this returns.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_remote_addr(
     handle: *mut c_void,
     id: *const u8,
@@ -881,17 +903,19 @@ pub unsafe extern "C" fn iroh4k_endpoint_remote_addr(
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = slot(handle);
-    let id = owned_bytes(id, id_len);
-    ops::spawn_callback(callback, fun, async move {
-        OpResult::new(match parse_endpoint_id(&id) {
-            Err(Failure { code, message }) => error_result(code, message),
-            Ok(id) => match bound(&slot) {
-                Ok(endpoint) => bytes_result(remote_addr(endpoint, id).await),
-                Err(result) => result,
-            },
+    unsafe {
+        let slot = slot(handle);
+        let id = owned_bytes(id, id_len);
+        ops::spawn_callback(callback, fun, async move {
+            OpResult::new(match parse_endpoint_id(&id) {
+                Err(Failure { code, message }) => error_result(code, message),
+                Ok(id) => match bound(&slot) {
+                    Ok(endpoint) => bytes_result(remote_addr(endpoint, id).await),
+                    Err(result) => result,
+                },
+            })
         })
-    })
+    }
 }
 
 /// Advertises `addr` as an address this endpoint is directly reachable on. Asynchronous.
@@ -901,27 +925,29 @@ pub unsafe extern "C" fn iroh4k_endpoint_remote_addr(
 /// # Safety
 /// `handle` must satisfy [`slot`]'s contract. `addr` must be null or point to a valid
 /// nul-terminated UTF-8 string; it is copied before the future is spawned.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_add_external_addr(
     handle: *mut c_void,
     addr: *const c_char,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = slot(handle);
-    let addr = c_str(addr).to_owned();
-    ops::spawn_callback(callback, fun, async move {
-        OpResult::new(match parse_socket_addr(&addr) {
-            Err(Failure { code, message }) => error_result(code, message),
-            Ok(addr) => match bound(&slot) {
-                Ok(endpoint) => {
-                    endpoint.add_external_addr(addr).await;
-                    ok_result()
-                }
-                Err(result) => result,
-            },
+    unsafe {
+        let slot = slot(handle);
+        let addr = c_str(addr).to_owned();
+        ops::spawn_callback(callback, fun, async move {
+            OpResult::new(match parse_socket_addr(&addr) {
+                Err(Failure { code, message }) => error_result(code, message),
+                Ok(addr) => match bound(&slot) {
+                    Ok(endpoint) => {
+                        endpoint.add_external_addr(addr).await;
+                        ok_result()
+                    }
+                    Err(result) => result,
+                },
+            })
         })
-    })
+    }
 }
 
 /// Removes a previously advertised external address; `1` in `i64_val` if one was present.
@@ -929,24 +955,28 @@ pub unsafe extern "C" fn iroh4k_endpoint_add_external_addr(
 ///
 /// # Safety
 /// As [`iroh4k_endpoint_add_external_addr`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_remove_external_addr(
     handle: *mut c_void,
     addr: *const c_char,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = slot(handle);
-    let addr = c_str(addr).to_owned();
-    ops::spawn_callback(callback, fun, async move {
-        OpResult::new(match parse_socket_addr(&addr) {
-            Err(Failure { code, message }) => error_result(code, message),
-            Ok(addr) => match bound(&slot) {
-                Ok(endpoint) => i64_result(i64::from(endpoint.remove_external_addr(&addr).await)),
-                Err(result) => result,
-            },
+    unsafe {
+        let slot = slot(handle);
+        let addr = c_str(addr).to_owned();
+        ops::spawn_callback(callback, fun, async move {
+            OpResult::new(match parse_socket_addr(&addr) {
+                Err(Failure { code, message }) => error_result(code, message),
+                Ok(addr) => match bound(&slot) {
+                    Ok(endpoint) => {
+                        i64_result(i64::from(endpoint.remove_external_addr(&addr).await))
+                    }
+                    Err(result) => result,
+                },
+            })
         })
-    })
+    }
 }
 
 /// Inserts a relay configuration, answering with the configuration it replaced (absent if there
@@ -955,7 +985,7 @@ pub unsafe extern "C" fn iroh4k_endpoint_remove_external_addr(
 /// # Safety
 /// `handle` must satisfy [`slot`]'s contract. `payload`/`payload_len` are copied before the future
 /// is spawned.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_insert_relay(
     handle: *mut c_void,
     payload: *const u8,
@@ -963,26 +993,28 @@ pub unsafe extern "C" fn iroh4k_endpoint_insert_relay(
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = slot(handle);
-    let payload = owned_bytes(payload, payload_len);
-    ops::spawn_callback(callback, fun, async move {
-        let config = {
-            let mut r = Reader::new(&payload);
-            read_relay_config(&mut r)
-                .and_then(|config| under(ERROR_RELAY, r.finish()).map(|()| config))
-        };
-        OpResult::new(match config {
-            Err(Failure { code, message }) => error_result(code, message),
-            Ok(config) => match bound(&slot) {
-                Ok(endpoint) => {
-                    let url = config.url.clone();
-                    let replaced = endpoint.insert_relay(url, Arc::new(config)).await;
-                    bytes_result(relay_config_payload(replaced))
-                }
-                Err(result) => result,
-            },
+    unsafe {
+        let slot = slot(handle);
+        let payload = owned_bytes(payload, payload_len);
+        ops::spawn_callback(callback, fun, async move {
+            let config = {
+                let mut r = Reader::new(&payload);
+                read_relay_config(&mut r)
+                    .and_then(|config| under(ERROR_RELAY, r.finish()).map(|()| config))
+            };
+            OpResult::new(match config {
+                Err(Failure { code, message }) => error_result(code, message),
+                Ok(config) => match bound(&slot) {
+                    Ok(endpoint) => {
+                        let url = config.url.clone();
+                        let replaced = endpoint.insert_relay(url, Arc::new(config)).await;
+                        bytes_result(relay_config_payload(replaced))
+                    }
+                    Err(result) => result,
+                },
+            })
         })
-    })
+    }
 }
 
 /// Removes a relay configuration, answering with the one that was removed (absent if there was
@@ -991,48 +1023,52 @@ pub unsafe extern "C" fn iroh4k_endpoint_insert_relay(
 /// # Safety
 /// `handle` must satisfy [`slot`]'s contract. `url` must be null or point to a valid
 /// nul-terminated UTF-8 string; it is copied before the future is spawned.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_remove_relay(
     handle: *mut c_void,
     url: *const c_char,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = slot(handle);
-    let url = c_str(url).to_owned();
-    ops::spawn_callback(callback, fun, async move {
-        OpResult::new(match parse_relay_url(&url) {
-            Err(Failure { code, message }) => error_result(code, message),
-            Ok(url) => match bound(&slot) {
-                Ok(endpoint) => {
-                    bytes_result(relay_config_payload(endpoint.remove_relay(&url).await))
-                }
-                Err(result) => result,
-            },
+    unsafe {
+        let slot = slot(handle);
+        let url = c_str(url).to_owned();
+        ops::spawn_callback(callback, fun, async move {
+            OpResult::new(match parse_relay_url(&url) {
+                Err(Failure { code, message }) => error_result(code, message),
+                Ok(url) => match bound(&slot) {
+                    Ok(endpoint) => {
+                        bytes_result(relay_config_payload(endpoint.remove_relay(&url).await))
+                    }
+                    Err(result) => result,
+                },
+            })
         })
-    })
+    }
 }
 
 /// Tells iroh the network may have changed. Asynchronous.
 ///
 /// # Safety
 /// As [`iroh4k_endpoint_shutdown`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_network_change(
     handle: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = slot(handle);
-    ops::spawn_callback(callback, fun, async move {
-        OpResult::new(match bound(&slot) {
-            Ok(endpoint) => {
-                endpoint.network_change().await;
-                ok_result()
-            }
-            Err(result) => result,
+    unsafe {
+        let slot = slot(handle);
+        ops::spawn_callback(callback, fun, async move {
+            OpResult::new(match bound(&slot) {
+                Ok(endpoint) => {
+                    endpoint.network_change().await;
+                    ok_result()
+                }
+                Err(result) => result,
+            })
         })
-    })
+    }
 }
 
 // ============================================================================
@@ -1050,9 +1086,9 @@ pub unsafe extern "C" fn iroh4k_endpoint_network_change(
 #[allow(non_snake_case)]
 mod jni_facade {
     use super::*;
+    use jni::JNIEnv;
     use jni::objects::{JByteArray, JClass, JString};
     use jni::sys::{jbyteArray, jlong};
-    use jni::JNIEnv;
 
     // One shared envelope writer — see `crate::jni::finish`.
     use crate::jni::finish;
@@ -1081,7 +1117,7 @@ mod jni_facade {
         env.get_string(value).map(String::from).unwrap_or_default()
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_newHandle(
         _env: JNIEnv,
         _class: JClass,
@@ -1089,7 +1125,7 @@ mod jni_facade {
         iroh4k_endpoint_new() as usize as jlong
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_liveHandleCount(
         _env: JNIEnv,
         _class: JClass,
@@ -1097,7 +1133,7 @@ mod jni_facade {
         LIVE_HANDLES.load(Ordering::Relaxed)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_freeHandle(
         _env: JNIEnv,
         _class: JClass,
@@ -1106,7 +1142,7 @@ mod jni_facade {
         unsafe { handle::free::<EndpointSlot>(as_handle(handle)) };
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_bindStart(
         mut env: JNIEnv,
         _class: JClass,
@@ -1118,7 +1154,7 @@ mod jni_facade {
         ops::spawn_channel(async move { OpResult::new(bind(slot, payload).await) })
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_id(
         mut env: JNIEnv,
         _class: JClass,
@@ -1132,7 +1168,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_addr(
         mut env: JNIEnv,
         _class: JClass,
@@ -1146,7 +1182,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_secretKey(
         mut env: JNIEnv,
         _class: JClass,
@@ -1160,7 +1196,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_setAlpns(
         mut env: JNIEnv,
         _class: JClass,
@@ -1179,7 +1215,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_boundSockets(
         mut env: JNIEnv,
         _class: JClass,
@@ -1193,7 +1229,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_isClosed(
         mut env: JNIEnv,
         _class: JClass,
@@ -1207,7 +1243,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_stats(
         mut env: JNIEnv,
         _class: JClass,
@@ -1221,7 +1257,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_shutdownStart(
         _env: JNIEnv,
         _class: JClass,
@@ -1239,7 +1275,7 @@ mod jni_facade {
         })
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_onlineStart(
         _env: JNIEnv,
         _class: JClass,
@@ -1257,7 +1293,7 @@ mod jni_facade {
         })
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_remoteAddrStart(
         mut env: JNIEnv,
         _class: JClass,
@@ -1277,7 +1313,7 @@ mod jni_facade {
         })
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_addExternalAddrStart(
         mut env: JNIEnv,
         _class: JClass,
@@ -1300,7 +1336,7 @@ mod jni_facade {
         })
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_removeExternalAddrStart(
         mut env: JNIEnv,
         _class: JClass,
@@ -1322,7 +1358,7 @@ mod jni_facade {
         })
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_insertRelayStart(
         mut env: JNIEnv,
         _class: JClass,
@@ -1351,7 +1387,7 @@ mod jni_facade {
         })
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_removeRelayStart(
         mut env: JNIEnv,
         _class: JClass,
@@ -1373,7 +1409,7 @@ mod jni_facade {
         })
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_networkChangeStart(
         _env: JNIEnv,
         _class: JClass,

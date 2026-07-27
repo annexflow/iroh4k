@@ -21,16 +21,16 @@
 //! is no `release` call for a caller to forget.
 
 use crate::core::{
-    error_result, free_result, HandleDrop, Iroh4kPtr, Iroh4kResult, ERROR_CANCELLED, ERROR_UNKNOWN,
+    ERROR_CANCELLED, ERROR_UNKNOWN, HandleDrop, Iroh4kPtr, Iroh4kResult, error_result, free_result,
 };
 use std::{
     collections::HashMap,
     ffi::c_void,
     future::Future,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{sync_channel, Receiver, SyncSender},
         Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc::{Receiver, SyncSender, sync_channel},
     },
 };
 

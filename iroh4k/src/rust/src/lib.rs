@@ -2,7 +2,7 @@
 //!
 //! A single Rust core ([`core`]) backed by the `iroh` crate is exposed two ways:
 //!
-//! - [`ffi`]: `#[no_mangle] extern "C"` functions consumed by Kotlin/Native targets via
+//! - [`ffi`]: `#[unsafe(no_mangle)] extern "C"` functions consumed by Kotlin/Native targets via
 //!   cinterop (the static library). Asynchronous: a completion callback resumes the
 //!   suspended Kotlin coroutine.
 //! - [`jni`]: JNI exports consumed by the JVM and Android (the shared library). Blocking:

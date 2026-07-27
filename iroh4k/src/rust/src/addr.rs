@@ -2,7 +2,7 @@
 //! (`EndpointTicket`).
 //!
 //! Owned by the addressing domain. Contains the shared logic plus both facades' exports for it:
-//! `#[no_mangle] extern "C"` for cinterop and `#[cfg(not(target_os = "ios"))] Java_*` for JNI.
+//! `#[unsafe(no_mangle)] extern "C"` for cinterop, `#[cfg(not(target_os = "ios"))] Java_*` for JNI.
 //!
 //! Like the keys and relay domains, nothing here is an opaque handle: an address and a ticket are
 //! inert data, so Kotlin owns the values and hands them back in on every call. What genuinely needs
@@ -80,7 +80,7 @@ use iroh_base::CustomAddr;
 use iroh_tickets::endpoint::EndpointTicket;
 
 use crate::codec::{Reader, Writer};
-use crate::core::{bytes_result, c_str, error_result, Iroh4kResult, ERROR_ADDR, ERROR_TICKET};
+use crate::core::{ERROR_ADDR, ERROR_TICKET, Iroh4kResult, bytes_result, c_str, error_result};
 
 /// Transport address discriminators. Part of the wire protocol shared with `Addr.kt`: do not
 /// renumber, append only.
@@ -305,10 +305,12 @@ fn bytes_or_error(code: c_int, outcome: Result<Vec<u8>, String>) -> *mut Iroh4kR
 /// for the lifetime `'a`. Callers must not let `'a` outlive the call they borrowed for; the one use
 /// below passes the slice straight into an operation that returns before the export does.
 unsafe fn borrowed<'a>(ptr: *const u8, len: c_int) -> &'a [u8] {
-    if ptr.is_null() || len <= 0 {
-        return &[];
+    unsafe {
+        if ptr.is_null() || len <= 0 {
+            return &[];
+        }
+        slice::from_raw_parts(ptr, len as usize)
     }
-    slice::from_raw_parts(ptr, len as usize)
 }
 
 /// The canonical form of the socket address `text`, as UTF-8 bytes. `ERROR_ADDR` if it does not
@@ -318,13 +320,15 @@ unsafe fn borrowed<'a>(ptr: *const u8, len: c_int) -> &'a [u8] {
 /// `text` must be null or point to a valid nul-terminated UTF-8 string. It is only read for the
 /// duration of the call — the canonical form is a fresh allocation owned by the returned result —
 /// so the caller may free its buffer as soon as this returns.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_addr_socket_parse(text: *const c_char) -> *mut Iroh4kResult {
-    // `c_str` yields "" for a null or non-UTF-8 pointer, which then fails to parse as an address —
-    // an `ERROR_ADDR` rather than undefined behaviour or a panic.
-    match socket_addr_parse(c_str(text)) {
-        Ok(canonical) => bytes_result(canonical.into_bytes()),
-        Err(message) => error_result(ERROR_ADDR, message),
+    unsafe {
+        // `c_str` yields "" for a null or non-UTF-8 pointer, which then fails to parse as an address —
+        // an `ERROR_ADDR` rather than undefined behaviour or a panic.
+        match socket_addr_parse(c_str(text)) {
+            Ok(canonical) => bytes_result(canonical.into_bytes()),
+            Err(message) => error_result(ERROR_ADDR, message),
+        }
     }
 }
 
@@ -333,12 +337,12 @@ pub unsafe extern "C" fn iroh4k_addr_socket_parse(text: *const c_char) -> *mut I
 ///
 /// # Safety
 /// `payload`/`payload_len` must satisfy [`borrowed`]'s contract.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_addr_ticket_from_addr(
     payload: *const u8,
     payload_len: c_int,
 ) -> *mut Iroh4kResult {
-    bytes_or_error(ERROR_ADDR, ticket_from_addr(borrowed(payload, payload_len)))
+    unsafe { bytes_or_error(ERROR_ADDR, ticket_from_addr(borrowed(payload, payload_len))) }
 }
 
 /// The ticket written as `text`, as the ticket codec payload. `ERROR_TICKET` if it does not parse.
@@ -346,9 +350,9 @@ pub unsafe extern "C" fn iroh4k_addr_ticket_from_addr(
 /// # Safety
 /// `text` must be null or point to a valid nul-terminated UTF-8 string, read only for the duration
 /// of the call.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_addr_ticket_from_string(text: *const c_char) -> *mut Iroh4kResult {
-    bytes_or_error(ERROR_TICKET, ticket_from_string(c_str(text)))
+    unsafe { bytes_or_error(ERROR_TICKET, ticket_from_string(c_str(text))) }
 }
 
 // ============================================================================
@@ -362,9 +366,9 @@ pub unsafe extern "C" fn iroh4k_addr_ticket_from_string(text: *const c_char) -> 
 #[allow(non_snake_case)]
 mod jni_facade {
     use super::*;
+    use jni::JNIEnv;
     use jni::objects::{JByteArray, JClass, JString};
     use jni::sys::jbyteArray;
-    use jni::JNIEnv;
 
     // One shared envelope writer — see `crate::jni::finish`.
     use crate::jni::finish;
@@ -392,7 +396,7 @@ mod jni_facade {
         }
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_AddrJni_socketParse(
         mut env: JNIEnv,
         _class: JClass,
@@ -408,7 +412,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_AddrJni_ticketFromAddr(
         mut env: JNIEnv,
         _class: JClass,
@@ -419,7 +423,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_AddrJni_ticketFromString(
         mut env: JNIEnv,
         _class: JClass,

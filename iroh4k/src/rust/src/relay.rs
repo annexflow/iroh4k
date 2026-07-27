@@ -1,7 +1,7 @@
 //! Relay configuration (`RelayUrl`, `RelayMap`, `RelayMode`) and log-level control.
 //!
 //! Owned by the relay domain. Contains the shared logic plus both facades' exports for it:
-//! `#[no_mangle] extern "C"` for cinterop and `#[cfg(not(target_os = "ios"))] Java_*` for JNI.
+//! `#[unsafe(no_mangle)] extern "C"` for cinterop, `#[cfg(not(target_os = "ios"))] Java_*` for JNI.
 //!
 //! Unlike iroh-ffi — which makes `RelayMap` and `RelayMode` opaque `Arc`-wrapped objects with
 //! their own FFI lifetime — iroh4k keeps both as **pure Kotlin value types**. Relay
@@ -27,11 +27,11 @@ use std::{
 };
 
 use iroh::RelayUrl;
-use tracing_subscriber::{filter::LevelFilter, reload, Registry};
+use tracing_subscriber::{Registry, filter::LevelFilter, reload};
 
 use crate::codec::Writer;
 use crate::core::{
-    bytes_result, c_str, error_result, ok_result, Iroh4kResult, ERROR_INVALID_ARGUMENT, ERROR_RELAY,
+    ERROR_INVALID_ARGUMENT, ERROR_RELAY, Iroh4kResult, bytes_result, c_str, error_result, ok_result,
 };
 
 // ============================================================================
@@ -158,28 +158,30 @@ fn install_subscriber(initial: LevelFilter) -> Option<reload::Handle<LevelFilter
 /// `url` must be null or point to a valid nul-terminated UTF-8 string. It is only read for the
 /// duration of the call — the canonical form is a fresh allocation owned by the returned result —
 /// so the caller may free its buffer as soon as this returns.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_relay_url_parse(url: *const c_char) -> *mut Iroh4kResult {
-    match relay_url_parse(c_str(url)) {
-        Ok(canonical) => bytes_result(canonical.into_bytes()),
-        Err(message) => error_result(ERROR_RELAY, message),
+    unsafe {
+        match relay_url_parse(c_str(url)) {
+            Ok(canonical) => bytes_result(canonical.into_bytes()),
+            Err(message) => error_result(ERROR_RELAY, message),
+        }
     }
 }
 
 /// The n0 production relay URLs as a codec sequence of strings.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_relay_default_urls() -> *mut Iroh4kResult {
     bytes_result(relay_default_urls())
 }
 
 /// The n0 staging relay URLs as a codec sequence of strings.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_relay_staging_urls() -> *mut Iroh4kResult {
     bytes_result(relay_staging_urls())
 }
 
 /// Sets the log level from a Kotlin `LogLevel` ordinal. Safe to call repeatedly.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_set_log_level(level: c_int) -> *mut Iroh4kResult {
     match set_log_level(level) {
         Ok(()) => ok_result(),
@@ -198,14 +200,14 @@ pub extern "C" fn iroh4k_set_log_level(level: c_int) -> *mut Iroh4kResult {
 #[allow(non_snake_case)]
 mod jni_facade {
     use super::*;
+    use jni::JNIEnv;
     use jni::objects::{JClass, JString};
     use jni::sys::{jbyteArray, jint};
-    use jni::JNIEnv;
 
     // One shared envelope writer — see `crate::jni::finish`.
     use crate::jni::finish;
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_RelayJni_relayUrlParse(
         mut env: JNIEnv,
         _class: JClass,
@@ -230,7 +232,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_RelayJni_relayDefaultUrls(
         mut env: JNIEnv,
         _class: JClass,
@@ -238,7 +240,7 @@ mod jni_facade {
         finish(&mut env, bytes_result(relay_default_urls()))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_RelayJni_relayStagingUrls(
         mut env: JNIEnv,
         _class: JClass,
@@ -246,7 +248,7 @@ mod jni_facade {
         finish(&mut env, bytes_result(relay_staging_urls()))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_RelayJni_setLogLevel(
         mut env: JNIEnv,
         _class: JClass,

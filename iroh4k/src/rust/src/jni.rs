@@ -25,9 +25,9 @@
 
 use crate::core::*;
 use crate::ops::{self, OpResult};
+use jni::JNIEnv;
 use jni::objects::JClass;
 use jni::sys::{jbyteArray, jlong};
-use jni::JNIEnv;
 
 /// Serializes the leaked result into a Java `byte[]`, then frees the native result.
 ///
@@ -46,7 +46,7 @@ pub(crate) fn finish(env: &mut JNIEnv, result: *mut Iroh4kResult) -> jbyteArray 
 // ============================================================================
 
 /// Blocks until the operation completes or is cancelled.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_tech_annexflow_iroh4k_Iroh4kJni_opAwait(
     mut env: JNIEnv,
     _class: JClass,
@@ -56,7 +56,7 @@ pub extern "system" fn Java_tech_annexflow_iroh4k_Iroh4kJni_opAwait(
     finish(&mut env, result)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_tech_annexflow_iroh4k_Iroh4kJni_opCancel(
     _env: JNIEnv,
     _class: JClass,
@@ -65,7 +65,7 @@ pub extern "system" fn Java_tech_annexflow_iroh4k_Iroh4kJni_opCancel(
     ops::cancel_op(op);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_tech_annexflow_iroh4k_Iroh4kJni_liveOpCount(
     _env: JNIEnv,
     _class: JClass,
@@ -73,7 +73,7 @@ pub extern "system" fn Java_tech_annexflow_iroh4k_Iroh4kJni_liveOpCount(
     ops::live_op_count()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_tech_annexflow_iroh4k_Iroh4kJni_smokeSleepCompletions(
     _env: JNIEnv,
     _class: JClass,
@@ -85,7 +85,7 @@ pub extern "system" fn Java_tech_annexflow_iroh4k_Iroh4kJni_smokeSleepCompletion
 // Synchronous
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_tech_annexflow_iroh4k_Iroh4kJni_version(
     mut env: JNIEnv,
     _class: JClass,
@@ -93,7 +93,7 @@ pub extern "system" fn Java_tech_annexflow_iroh4k_Iroh4kJni_version(
     finish(&mut env, bytes_result(version()))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_tech_annexflow_iroh4k_Iroh4kJni_smokeRecord(
     mut env: JNIEnv,
     _class: JClass,
@@ -105,7 +105,7 @@ pub extern "system" fn Java_tech_annexflow_iroh4k_Iroh4kJni_smokeRecord(
 // Asynchronous — each returns an operation id for opAwait/opCancel
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_tech_annexflow_iroh4k_Iroh4kJni_smokeAsyncEchoStart(
     _env: JNIEnv,
     _class: JClass,
@@ -117,7 +117,7 @@ pub extern "system" fn Java_tech_annexflow_iroh4k_Iroh4kJni_smokeAsyncEchoStart(
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_tech_annexflow_iroh4k_Iroh4kJni_smokeAsyncErrorStart(
     _env: JNIEnv,
     _class: JClass,
@@ -127,7 +127,7 @@ pub extern "system" fn Java_tech_annexflow_iroh4k_Iroh4kJni_smokeAsyncErrorStart
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_tech_annexflow_iroh4k_Iroh4kJni_smokeAsyncSleepStart(
     _env: JNIEnv,
     _class: JClass,

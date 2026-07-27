@@ -1,7 +1,10 @@
 [package]
 name = "iroh4k"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+# Edition 2024 itself needs 1.85; the floor is higher because `iroh` 1.0 declares 1.91. Edition 2024
+# also selects resolver 3, which is MSRV-aware — so this has to be stated, not inferred.
+rust-version = "1.91"
 publish = false
 # Same terms as the Kotlin artifact and as iroh itself. The crate is never published — the license
 # is here so a vendored or audited copy of this source tree carries its terms with it.

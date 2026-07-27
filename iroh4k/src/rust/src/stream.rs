@@ -65,8 +65,8 @@
 use std::{
     ffi::{c_int, c_void},
     sync::{
-        atomic::{AtomicI64, Ordering},
         Arc,
+        atomic::{AtomicI64, Ordering},
     },
 };
 
@@ -77,11 +77,11 @@ use iroh::endpoint::{
 use tokio::sync::Mutex;
 
 use crate::connection::{
-    connection_clone, in_runtime, released, share, varint, with, Completion, Tracked,
+    Completion, Tracked, connection_clone, in_runtime, released, share, varint, with,
 };
 use crate::core::{
-    bytes_result, error_result, handle_result, i64_result, ok_result, owned_bytes, Iroh4kResult,
-    ERROR_CLOSED, ERROR_INVALID_ARGUMENT, ERROR_READ, ERROR_WRITE,
+    ERROR_CLOSED, ERROR_INVALID_ARGUMENT, ERROR_READ, ERROR_WRITE, Iroh4kResult, bytes_result,
+    error_result, handle_result, i64_result, ok_result, owned_bytes,
 };
 use crate::handle::{self, Tagged};
 use crate::ops::{self, OpResult};
@@ -639,7 +639,7 @@ fn busy(code: c_int, half: &str) -> *mut Iroh4kResult {
 // ============================================================================
 
 /// Stream handles still alive. Test hook for asserting handles do not leak.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_stream_live_handle_count() -> i64 {
     LIVE_HANDLES.load(Ordering::Relaxed)
 }
@@ -654,9 +654,11 @@ pub extern "C" fn iroh4k_stream_live_handle_count() -> i64 {
 ///
 /// # Safety
 /// `handle` must be null, or a stream handle from this module that has not been freed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_stream_free(handle: *mut c_void) {
-    handle::free::<StreamHandle>(handle);
+    unsafe {
+        handle::free::<StreamHandle>(handle);
+    }
 }
 
 /// A second handle to the same stream payload, for the two halves of a bidirectional stream.
@@ -666,11 +668,13 @@ pub unsafe extern "C" fn iroh4k_stream_free(handle: *mut c_void) {
 ///
 /// # Safety
 /// As [`iroh4k_stream_free`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_stream_share(handle: *mut c_void) -> *mut c_void {
-    match share::<StreamSlot>(handle) {
-        Some(shared) => handle::arc_into_handle(shared),
-        None => std::ptr::null_mut(),
+    unsafe {
+        match share::<StreamSlot>(handle) {
+            Some(shared) => handle::arc_into_handle(shared),
+            None => std::ptr::null_mut(),
+        }
     }
 }
 
@@ -682,51 +686,51 @@ pub unsafe extern "C" fn iroh4k_stream_share(handle: *mut c_void) -> *mut c_void
 ///
 /// # Safety
 /// `handle` must satisfy `connection::peek`'s contract for a stream handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_send_stream_finish(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<StreamSlot>(handle, |slot| send_finish(slot))
+    unsafe { with::<StreamSlot>(handle, |slot| send_finish(slot)) }
 }
 
 /// Abandons this stream with `error_code`.
 ///
 /// # Safety
 /// As [`iroh4k_send_stream_finish`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_send_stream_reset(
     handle: *mut c_void,
     error_code: i64,
 ) -> *mut Iroh4kResult {
-    with::<StreamSlot>(handle, |slot| send_reset(slot, error_code))
+    unsafe { with::<StreamSlot>(handle, |slot| send_reset(slot, error_code)) }
 }
 
 /// Sets this stream's transmission priority.
 ///
 /// # Safety
 /// As [`iroh4k_send_stream_finish`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_send_stream_set_priority(
     handle: *mut c_void,
     priority: i32,
 ) -> *mut Iroh4kResult {
-    with::<StreamSlot>(handle, |slot| send_set_priority(slot, priority))
+    unsafe { with::<StreamSlot>(handle, |slot| send_set_priority(slot, priority)) }
 }
 
 /// This stream's transmission priority, in `i64_val`.
 ///
 /// # Safety
 /// As [`iroh4k_send_stream_finish`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_send_stream_priority(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<StreamSlot>(handle, |slot| send_priority(slot))
+    unsafe { with::<StreamSlot>(handle, |slot| send_priority(slot)) }
 }
 
 /// This stream's QUIC id, in `i64_val`.
 ///
 /// # Safety
 /// As [`iroh4k_send_stream_finish`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_send_stream_id(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<StreamSlot>(handle, |slot| send_id(slot))
+    unsafe { with::<StreamSlot>(handle, |slot| send_id(slot)) }
 }
 
 // ----------------------------------------------------------------------------
@@ -737,30 +741,30 @@ pub unsafe extern "C" fn iroh4k_send_stream_id(handle: *mut c_void) -> *mut Iroh
 ///
 /// # Safety
 /// As [`iroh4k_send_stream_finish`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_recv_stream_stop(
     handle: *mut c_void,
     error_code: i64,
 ) -> *mut Iroh4kResult {
-    with::<StreamSlot>(handle, |slot| recv_stop(slot, error_code))
+    unsafe { with::<StreamSlot>(handle, |slot| recv_stop(slot, error_code)) }
 }
 
 /// How many bytes have been consumed from this stream, in `i64_val`.
 ///
 /// # Safety
 /// As [`iroh4k_send_stream_finish`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_recv_stream_bytes_read(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<StreamSlot>(handle, |slot| recv_bytes_read(slot))
+    unsafe { with::<StreamSlot>(handle, |slot| recv_bytes_read(slot)) }
 }
 
 /// This stream's QUIC id, in `i64_val`.
 ///
 /// # Safety
 /// As [`iroh4k_send_stream_finish`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_recv_stream_id(handle: *mut c_void) -> *mut Iroh4kResult {
-    with::<StreamSlot>(handle, |slot| recv_id(slot))
+    unsafe { with::<StreamSlot>(handle, |slot| recv_id(slot)) }
 }
 
 // ----------------------------------------------------------------------------
@@ -772,56 +776,64 @@ pub unsafe extern "C" fn iroh4k_recv_stream_id(handle: *mut c_void) -> *mut Iroh
 /// # Safety
 /// `connection` must be null, or a live `Connection` handle from `connection.rs` that has not been
 /// freed. Kotlin's guard on `Connection` guarantees the second part.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_open_bi(
     connection: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let connection = connection_clone(connection);
-    ops::spawn_callback(callback, fun, open_bi(connection))
+    unsafe {
+        let connection = connection_clone(connection);
+        ops::spawn_callback(callback, fun, open_bi(connection))
+    }
 }
 
 /// Accepts the peer's next bidirectional stream. Asynchronous, and waits indefinitely.
 ///
 /// # Safety
 /// As [`iroh4k_connection_open_bi`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_accept_bi(
     connection: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let connection = connection_clone(connection);
-    ops::spawn_callback(callback, fun, accept_bi(connection))
+    unsafe {
+        let connection = connection_clone(connection);
+        ops::spawn_callback(callback, fun, accept_bi(connection))
+    }
 }
 
 /// Opens a unidirectional stream. Asynchronous.
 ///
 /// # Safety
 /// As [`iroh4k_connection_open_bi`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_open_uni(
     connection: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let connection = connection_clone(connection);
-    ops::spawn_callback(callback, fun, open_uni(connection))
+    unsafe {
+        let connection = connection_clone(connection);
+        ops::spawn_callback(callback, fun, open_uni(connection))
+    }
 }
 
 /// Accepts the peer's next unidirectional stream. Asynchronous, and waits indefinitely.
 ///
 /// # Safety
 /// As [`iroh4k_connection_open_bi`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_accept_uni(
     connection: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let connection = connection_clone(connection);
-    ops::spawn_callback(callback, fun, accept_uni(connection))
+    unsafe {
+        let connection = connection_clone(connection);
+        ops::spawn_callback(callback, fun, accept_uni(connection))
+    }
 }
 
 /// Writes as much of the payload as fits now; the count lands in `i64_val`. Asynchronous.
@@ -830,7 +842,7 @@ pub unsafe extern "C" fn iroh4k_connection_accept_uni(
 /// `handle` must satisfy `connection::share`'s contract for a stream handle. `payload`/`payload_len`
 /// must be null/0 or describe that many readable bytes; the buffer is **copied** before the future is
 /// spawned, so the caller may free it as soon as this returns.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_send_stream_write(
     handle: *mut c_void,
     payload: *const u8,
@@ -838,16 +850,18 @@ pub unsafe extern "C" fn iroh4k_send_stream_write(
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = share::<StreamSlot>(handle);
-    let payload = owned_bytes(payload, payload_len);
-    ops::spawn_callback(callback, fun, send_write(slot, payload))
+    unsafe {
+        let slot = share::<StreamSlot>(handle);
+        let payload = owned_bytes(payload, payload_len);
+        ops::spawn_callback(callback, fun, send_write(slot, payload))
+    }
 }
 
 /// Writes the whole payload, however long that takes. Asynchronous.
 ///
 /// # Safety
 /// As [`iroh4k_send_stream_write`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_send_stream_write_all(
     handle: *mut c_void,
     payload: *const u8,
@@ -855,9 +869,11 @@ pub unsafe extern "C" fn iroh4k_send_stream_write_all(
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = share::<StreamSlot>(handle);
-    let payload = owned_bytes(payload, payload_len);
-    ops::spawn_callback(callback, fun, send_write_all(slot, payload))
+    unsafe {
+        let slot = share::<StreamSlot>(handle);
+        let payload = owned_bytes(payload, payload_len);
+        ops::spawn_callback(callback, fun, send_write_all(slot, payload))
+    }
 }
 
 /// Suspends until the peer stops or fully receives the stream; the code lands in `i64_val`, `-1` for
@@ -865,14 +881,16 @@ pub unsafe extern "C" fn iroh4k_send_stream_write_all(
 ///
 /// # Safety
 /// `handle` must satisfy `connection::share`'s contract for a stream handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_send_stream_stopped(
     handle: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = share::<StreamSlot>(handle);
-    ops::spawn_callback(callback, fun, send_stopped(slot))
+    unsafe {
+        let slot = share::<StreamSlot>(handle);
+        ops::spawn_callback(callback, fun, send_stopped(slot))
+    }
 }
 
 /// Reads up to `size_limit` bytes; `-1` in `i64_val` and no payload at the end of the stream.
@@ -880,45 +898,51 @@ pub unsafe extern "C" fn iroh4k_send_stream_stopped(
 ///
 /// # Safety
 /// As [`iroh4k_send_stream_stopped`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_recv_stream_read(
     handle: *mut c_void,
     size_limit: i64,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = share::<StreamSlot>(handle);
-    ops::spawn_callback(callback, fun, recv_read(slot, size_limit))
+    unsafe {
+        let slot = share::<StreamSlot>(handle);
+        ops::spawn_callback(callback, fun, recv_read(slot, size_limit))
+    }
 }
 
 /// Reads exactly `size` bytes, or fails. Asynchronous.
 ///
 /// # Safety
 /// As [`iroh4k_send_stream_stopped`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_recv_stream_read_exact(
     handle: *mut c_void,
     size: i64,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = share::<StreamSlot>(handle);
-    ops::spawn_callback(callback, fun, recv_read_exact(slot, size))
+    unsafe {
+        let slot = share::<StreamSlot>(handle);
+        ops::spawn_callback(callback, fun, recv_read_exact(slot, size))
+    }
 }
 
 /// Reads to the end of the stream, up to `size_limit` bytes. Asynchronous.
 ///
 /// # Safety
 /// As [`iroh4k_send_stream_stopped`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_recv_stream_read_to_end(
     handle: *mut c_void,
     size_limit: i64,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = share::<StreamSlot>(handle);
-    ops::spawn_callback(callback, fun, recv_read_to_end(slot, size_limit))
+    unsafe {
+        let slot = share::<StreamSlot>(handle);
+        ops::spawn_callback(callback, fun, recv_read_to_end(slot, size_limit))
+    }
 }
 
 /// Suspends until the peer resets the stream; the code lands in `i64_val`, `-1` if it never will.
@@ -926,14 +950,16 @@ pub unsafe extern "C" fn iroh4k_recv_stream_read_to_end(
 ///
 /// # Safety
 /// As [`iroh4k_send_stream_stopped`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_recv_stream_received_reset(
     handle: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = share::<StreamSlot>(handle);
-    ops::spawn_callback(callback, fun, recv_received_reset(slot))
+    unsafe {
+        let slot = share::<StreamSlot>(handle);
+        ops::spawn_callback(callback, fun, recv_received_reset(slot))
+    }
 }
 
 // ============================================================================
@@ -949,9 +975,9 @@ pub unsafe extern "C" fn iroh4k_recv_stream_received_reset(
 #[allow(non_snake_case)]
 mod jni_facade {
     use super::*;
+    use jni::JNIEnv;
     use jni::objects::{JByteArray, JClass};
     use jni::sys::{jbyteArray, jint, jlong};
-    use jni::JNIEnv;
 
     use crate::jni::finish;
 
@@ -970,7 +996,7 @@ mod jni_facade {
         env.convert_byte_array(array).unwrap_or_default()
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_liveHandleCount(
         _env: JNIEnv,
         _class: JClass,
@@ -978,7 +1004,7 @@ mod jni_facade {
         LIVE_HANDLES.load(Ordering::Relaxed)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_free(
         _env: JNIEnv,
         _class: JClass,
@@ -987,7 +1013,7 @@ mod jni_facade {
         unsafe { handle::free::<StreamHandle>(as_handle(handle)) };
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_share(
         _env: JNIEnv,
         _class: JClass,
@@ -1002,7 +1028,7 @@ mod jni_facade {
 
     // ── The send half — synchronous ───────────────────────────────────────────────────────────
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_sendFinish(
         mut env: JNIEnv,
         _class: JClass,
@@ -1012,7 +1038,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_sendReset(
         mut env: JNIEnv,
         _class: JClass,
@@ -1024,7 +1050,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_sendSetPriority(
         mut env: JNIEnv,
         _class: JClass,
@@ -1037,7 +1063,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_sendPriority(
         mut env: JNIEnv,
         _class: JClass,
@@ -1047,7 +1073,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_sendId(
         mut env: JNIEnv,
         _class: JClass,
@@ -1059,7 +1085,7 @@ mod jni_facade {
 
     // ── The receive half — synchronous ────────────────────────────────────────────────────────
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_recvStop(
         mut env: JNIEnv,
         _class: JClass,
@@ -1071,7 +1097,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_recvBytesRead(
         mut env: JNIEnv,
         _class: JClass,
@@ -1081,7 +1107,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_recvId(
         mut env: JNIEnv,
         _class: JClass,
@@ -1093,7 +1119,7 @@ mod jni_facade {
 
     // ── Asynchronous ──────────────────────────────────────────────────────────────────────────
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_openBiStart(
         _env: JNIEnv,
         _class: JClass,
@@ -1103,7 +1129,7 @@ mod jni_facade {
         ops::spawn_channel(open_bi(connection))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_acceptBiStart(
         _env: JNIEnv,
         _class: JClass,
@@ -1113,7 +1139,7 @@ mod jni_facade {
         ops::spawn_channel(accept_bi(connection))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_openUniStart(
         _env: JNIEnv,
         _class: JClass,
@@ -1123,7 +1149,7 @@ mod jni_facade {
         ops::spawn_channel(open_uni(connection))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_acceptUniStart(
         _env: JNIEnv,
         _class: JClass,
@@ -1133,7 +1159,7 @@ mod jni_facade {
         ops::spawn_channel(accept_uni(connection))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_sendWriteStart(
         mut env: JNIEnv,
         _class: JClass,
@@ -1145,7 +1171,7 @@ mod jni_facade {
         ops::spawn_channel(send_write(slot, payload))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_sendWriteAllStart(
         mut env: JNIEnv,
         _class: JClass,
@@ -1157,7 +1183,7 @@ mod jni_facade {
         ops::spawn_channel(send_write_all(slot, payload))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_sendStoppedStart(
         _env: JNIEnv,
         _class: JClass,
@@ -1167,7 +1193,7 @@ mod jni_facade {
         ops::spawn_channel(send_stopped(slot))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_recvReadStart(
         _env: JNIEnv,
         _class: JClass,
@@ -1178,7 +1204,7 @@ mod jni_facade {
         ops::spawn_channel(recv_read(slot, size_limit))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_recvReadExactStart(
         _env: JNIEnv,
         _class: JClass,
@@ -1189,7 +1215,7 @@ mod jni_facade {
         ops::spawn_channel(recv_read_exact(slot, size))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_recvReadToEndStart(
         _env: JNIEnv,
         _class: JClass,
@@ -1200,7 +1226,7 @@ mod jni_facade {
         ops::spawn_channel(recv_read_to_end(slot, size_limit))
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_recvReceivedResetStart(
         _env: JNIEnv,
         _class: JClass,

@@ -1,7 +1,7 @@
 //! Watchers and event streams as pull-based cursors.
 //!
 //! Owned by the watch domain. Contains the shared logic plus both facades' exports for it:
-//! `#[no_mangle] extern "C"` for cinterop and `#[cfg(not(target_os = "ios"))] Java_*` for JNI.
+//! `#[unsafe(no_mangle)] extern "C"` for cinterop, `#[cfg(not(target_os = "ios"))] Java_*` for JNI.
 //!
 //! Unlike iroh-ffi, which registers foreign callbacks that Rust invokes, every stream here is a
 //! handle with a `next()` operation — async one-shot on the FFI path, blocking on JNI — so both
@@ -96,24 +96,24 @@ use std::{
     ffi::c_void,
     future::Future,
     sync::{
-        atomic::{AtomicI64, Ordering},
         Arc,
+        atomic::{AtomicI64, Ordering},
     },
 };
 
 use iroh::{
-    endpoint::{Connection, LocalTransportAddr, Path, PathEvent, PathStats, RelayStatus, UdpStats},
     Endpoint, TransportAddr, Watcher,
+    endpoint::{Connection, LocalTransportAddr, Path, PathEvent, PathStats, RelayStatus, UdpStats},
 };
 use n0_future::StreamExt;
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::addr::{
-    write_endpoint_addr, write_transport_addr, TAG_CUSTOM, TAG_IP, TAG_RELAY, TAG_UNKNOWN,
+    TAG_CUSTOM, TAG_IP, TAG_RELAY, TAG_UNKNOWN, write_endpoint_addr, write_transport_addr,
 };
 use crate::codec::Writer;
-use crate::connection::{connection_clone, released, share, Completion, Tracked};
-use crate::core::{bytes_result, handle_result, i64_result, Iroh4kResult};
+use crate::connection::{Completion, Tracked, connection_clone, released, share};
+use crate::core::{Iroh4kResult, bytes_result, handle_result, i64_result};
 use crate::endpoint::endpoint_clone;
 use crate::handle::{self, Tagged};
 use crate::ops::{self, OpResult};
@@ -536,7 +536,7 @@ fn path_event(event: &PathEvent) -> Vec<u8> {
 // ============================================================================
 
 /// Watcher handles still alive. Test hook for asserting handles do not leak.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn iroh4k_watch_live_handle_count() -> i64 {
     LIVE_HANDLES.load(Ordering::Relaxed)
 }
@@ -547,20 +547,24 @@ pub extern "C" fn iroh4k_watch_live_handle_count() -> i64 {
 ///
 /// # Safety
 /// `handle` must be null, or a watcher handle from this module that has not been freed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_watch_free(handle: *mut c_void) {
-    handle::free::<WatchHandle>(handle);
+    unsafe {
+        handle::free::<WatchHandle>(handle);
+    }
 }
 
 /// Starts watching an endpoint's `EndpointAddr`. Returns a watcher handle.
 ///
 /// # Safety
 /// `handle` must satisfy `endpoint::endpoint_clone`'s contract for an endpoint handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_watch_addr(handle: *mut c_void) -> *mut Iroh4kResult {
-    match endpoint_clone(handle) {
-        Some(endpoint) => watch_addr(endpoint),
-        None => released(),
+    unsafe {
+        match endpoint_clone(handle) {
+            Some(endpoint) => watch_addr(endpoint),
+            None => released(),
+        }
     }
 }
 
@@ -568,13 +572,15 @@ pub unsafe extern "C" fn iroh4k_endpoint_watch_addr(handle: *mut c_void) -> *mut
 ///
 /// # Safety
 /// As [`iroh4k_endpoint_watch_addr`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_endpoint_watch_home_relay(
     handle: *mut c_void,
 ) -> *mut Iroh4kResult {
-    match endpoint_clone(handle) {
-        Some(endpoint) => watch_home_relay(endpoint),
-        None => released(),
+    unsafe {
+        match endpoint_clone(handle) {
+            Some(endpoint) => watch_home_relay(endpoint),
+            None => released(),
+        }
     }
 }
 
@@ -582,11 +588,13 @@ pub unsafe extern "C" fn iroh4k_endpoint_watch_home_relay(
 ///
 /// # Safety
 /// `handle` must satisfy `connection::connection_clone`'s contract for a connection handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_watch_paths(handle: *mut c_void) -> *mut Iroh4kResult {
-    match connection_clone(handle) {
-        Some(connection) => watch_paths(connection),
-        None => released(),
+    unsafe {
+        match connection_clone(handle) {
+            Some(connection) => watch_paths(connection),
+            None => released(),
+        }
     }
 }
 
@@ -594,13 +602,15 @@ pub unsafe extern "C" fn iroh4k_connection_watch_paths(handle: *mut c_void) -> *
 ///
 /// # Safety
 /// As [`iroh4k_connection_watch_paths`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_watch_path_events(
     handle: *mut c_void,
 ) -> *mut Iroh4kResult {
-    match connection_clone(handle) {
-        Some(connection) => watch_path_events(connection),
-        None => released(),
+    unsafe {
+        match connection_clone(handle) {
+            Some(connection) => watch_path_events(connection),
+            None => released(),
+        }
     }
 }
 
@@ -609,14 +619,16 @@ pub unsafe extern "C" fn iroh4k_connection_watch_path_events(
 ///
 /// # Safety
 /// `handle` must satisfy `connection::share`'s contract for a watcher handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_watch_next(
     handle: *mut c_void,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
-    let slot = share::<WatchSlot>(handle);
-    ops::spawn_callback(callback, fun, next(slot))
+    unsafe {
+        let slot = share::<WatchSlot>(handle);
+        ops::spawn_callback(callback, fun, next(slot))
+    }
 }
 
 // ============================================================================
@@ -630,9 +642,9 @@ pub unsafe extern "C" fn iroh4k_watch_next(
 #[allow(non_snake_case)]
 mod jni_facade {
     use super::*;
+    use jni::JNIEnv;
     use jni::objects::JClass;
     use jni::sys::{jbyteArray, jlong};
-    use jni::JNIEnv;
 
     use crate::jni::finish;
 
@@ -645,7 +657,7 @@ mod jni_facade {
         handle as usize as *mut c_void
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_WatchJni_liveHandleCount(
         _env: JNIEnv,
         _class: JClass,
@@ -653,7 +665,7 @@ mod jni_facade {
         LIVE_HANDLES.load(Ordering::Relaxed)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_WatchJni_free(
         _env: JNIEnv,
         _class: JClass,
@@ -662,7 +674,7 @@ mod jni_facade {
         unsafe { handle::free::<WatchHandle>(as_handle(handle)) };
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_WatchJni_endpointWatchAddr(
         mut env: JNIEnv,
         _class: JClass,
@@ -675,7 +687,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_WatchJni_endpointWatchHomeRelay(
         mut env: JNIEnv,
         _class: JClass,
@@ -688,7 +700,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_WatchJni_connectionWatchPaths(
         mut env: JNIEnv,
         _class: JClass,
@@ -701,7 +713,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_WatchJni_connectionWatchPathEvents(
         mut env: JNIEnv,
         _class: JClass,
@@ -714,7 +726,7 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_WatchJni_nextStart(
         _env: JNIEnv,
         _class: JClass,
