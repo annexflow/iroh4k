@@ -64,3 +64,23 @@ extensions.configure<MavenPublishBaseExtension> {
     publishToMavenCentral()
     signAllPublications()
 }
+
+/**
+ * A local Maven repository the release workflow publishes to before it publishes to Central.
+ *
+ * Publishing here is file copying with no network, so it costs almost nothing, and it buys the two
+ * things a release needs and Maven Central will not tell you: what the release weighs, and whether
+ * the root module actually references every target. The second is the failure this project's
+ * publishing design exists to prevent — `kotlin.native.ignoreDisabledTargets` drops a target the
+ * host cannot build rather than failing, so a publish from the wrong host produces a root module
+ * that is structurally valid and missing platforms. `scripts/check-staged-release.sh` reads what
+ * lands here and refuses that.
+ */
+publishing {
+    repositories {
+        maven {
+            name = "localStaging"
+            url = layout.buildDirectory.dir("localStaging").get().asFile.toURI()
+        }
+    }
+}
