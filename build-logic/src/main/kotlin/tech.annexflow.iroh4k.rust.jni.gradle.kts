@@ -49,6 +49,10 @@ afterEvaluate {
     // `-Ptargets=all` produces the full Android + multi-host JVM build.
     val selectedTargets = Utils.targetsOf(project)
 
+    // Read once, at configuration time — see Utils.rustPrebuilt. Capturing `project` inside the
+    // `onlyIf` lambdas below would break the configuration cache.
+    val prebuilt = Utils.rustPrebuilt(project)
+
     /** A value from the root `local.properties`, or null when the file or the key is absent. */
     fun localProperty(key: String): String? = rootProject.file("local.properties")
         .takeIf { it.isFile }
@@ -138,6 +142,7 @@ afterEvaluate {
                     )
                 }
             }
+            onlyIf { !prebuilt }
         }
         // Wire before any task that merges JNI libraries into the AAR.
         tasks.matching {
@@ -205,6 +210,7 @@ afterEvaluate {
             inputs.files(rustSources).withPathSensitivity(PathSensitivity.RELATIVE)
             outputs.file(rustDir.file(libFile))
             commandLine(cargo, "build", "--release", "--target", triple)
+            onlyIf { !prebuilt }
         }
     }
 
@@ -243,6 +249,42 @@ afterEvaluate {
         if (name == "jvmTest" || name.contains("HostTest", ignoreCase = true)) {
             dependsOn(copyNativeLibJvm)
             systemProperty(nativePathProperty, generatedResources.get().asFile.absolutePath)
+        }
+    }
+
+    // ── Prebuilt verification ────────────────────────────────────────────────────────────────
+    // With -Prust.prebuilt the cargo tasks above are skipped and the libraries are expected to be
+    // on disk already, put there by the release workflow from its per-host build jobs. A library
+    // that failed to arrive would otherwise surface far downstream — as a cinterop error, or as an
+    // AAR quietly missing an ABI. This names the file instead.
+    //
+    // The expected paths are the cargo tasks' own declared outputs rather than a second list, so a
+    // target added to `Utils.allTargets` is covered here without anybody remembering to.
+    val expectedRustOutputs: List<File> =
+        tasks.matching {
+            it.name.startsWith("cargo-") || it.name.startsWith("buildRustJvm_")
+        }.flatMap { it.outputs.files.files } +
+                androidAbis.map { jniLibsDir.file("$it/lib$crateName.so").asFile }
+
+    tasks.register("checkRustPrebuilt") {
+        group = "rust"
+        description = "Fails when -Prust.prebuilt is set and an expected Rust library is missing."
+        val prebuiltMode = prebuilt
+        val expected = expectedRustOutputs
+        doLast {
+            if (!prebuiltMode) {
+                logger.lifecycle("checkRustPrebuilt: -Prust.prebuilt is not set, nothing to check.")
+                return@doLast
+            }
+            val missing = expected.filterNot { it.isFile }
+            if (missing.isNotEmpty()) {
+                error(
+                    "Prebuilt Rust libraries are missing:\n" +
+                            missing.joinToString("\n") { "  $it" } +
+                            "\nThe release workflow restores these from the `rust` job's artifacts."
+                )
+            }
+            logger.lifecycle("checkRustPrebuilt: ${expected.size} libraries present.")
         }
     }
 }
