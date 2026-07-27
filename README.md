@@ -119,14 +119,24 @@ the second is legal and leaves the peer to work it out from a timeout.
 | Target | Status |
 | --- | --- |
 | `macosArm64`, `jvm` | Tested. 410 test bodies, 205 per facade, run on every change |
+| `android` (AAR) | Tested on the host under Robolectric: the same 205 bodies `jvmTest` runs. Never executed on a device or emulator |
 | `iosArm64`, `iosSimulatorArm64` | Compiles and links; cinterop verified in CI |
 | `linuxX64` | Test suite is configured in CI on `ubuntu-latest`; not verified locally |
 | `linuxArm64`, `mingwX64` | Cross-compiled and assembled in CI; never executed |
-| `androidNativeArm64`, `androidNativeX64` | Written and buildable via `scripts/build.sh`; not in CI, not executed |
+| `androidNativeArm64`, `androidNativeX64` | Cross-compiled and assembled in CI; never executed |
 
-Android is presently the two `androidNative*` Kotlin/Native targets. The JNI facade is shared with
-the JVM and `build-logic` has the `cargo ndk` → `jniLibs` → AAR wiring, but no Android Gradle library
-target is enabled yet, so there is no AAR to consume.
+Android comes in two unrelated shapes, and an app wants the first one.
+
+`-Ptargets=…,android` builds the **Android library target**: the same JNI facade the JVM uses, plus a
+`libiroh4k.so` per ABI built by `cargo ndk`, packaged into an AAR. It is 64-bit only — `arm64-v8a`
+and `x86_64` — because the facade passes every native handle as a `jlong` and there is no 32-bit
+story to go with it, and its `minSdk` is 26, which a consuming app has to meet. The Robolectric host
+tests in `src/androidHostTest` run the shared `Common*Tests` bodies against that facade on the build
+machine's own JVM, loading the host library rather than the packaged `.so`.
+
+`androidNativeArm64`/`androidNativeX64` are **Kotlin/Native** targets on the cinterop path, for
+Kotlin/Native binaries that happen to run on Android. An app consuming the AAR does not use them, and
+neither selection implies the other.
 
 `Endpoint.networkChange()` is there for Android specifically: the OS reports interface changes to
 Java and not to native code, so an app should call it from its own `ConnectivityManager` callback.
@@ -144,16 +154,34 @@ does not install anything for you.
 
 With no `-Ptargets`, only the JVM and the host's own Kotlin/Native target are enabled, so a local
 build needs no cross toolchain at all. An explicit list enables exactly those targets; `all` enables
-every one of the nine. The property is read by `Utils.targetsOf` in `build-logic` and drives both the
+every one of the ten. The property is read by `Utils.targetsOf` in `build-logic` and drives both the
 Kotlin target set and which Rust triples cargo is asked for.
 
 Cross-compiling is where the prerequisites appear. [`scripts/build.sh`](scripts/build.sh) is the
 full-matrix build from a macOS host and documents, at the top, the exact `rustup target add`,
 `cargo install` and `brew install` lines it assumes you have already run knowingly.
-[`scripts/config.toml`](scripts/config.toml) is the matching `~/.cargo/config.toml` fragment naming a
-linker per target — including the reason the Android linkers are the NDK r21 `*21-clang` ones and not
-the newest available (Kotlin/Native links its Android output against r21's sysroot, and the two have
-to agree).
+[`scripts/config.toml`](scripts/config.toml) is the matching `~/.cargo/config.toml` fragment: a
+linker per target, plus the `[env]` block the Android targets need because `cc-rs` looks for a
+compiler named `<triple>-clang` while the NDK only ships the API-suffixed `<triple>21-clang`. That
+file also explains why the Android wrappers are the `*21-clang` ones and not the newest available —
+Kotlin/Native links its Android output against an API 21 sysroot, and the two have to agree.
+
+### Android
+
+```bash
+./gradlew :iroh4k:assemble -Ptargets=jvm,android          # the AAR, both ABIs
+./gradlew :iroh4k:testAndroidHostTest -Ptargets=jvm,android
+```
+
+That needs, beyond the Rust toolchain: an Android SDK, an NDK, `cargo install cargo-ndk`, and
+`rustup target add aarch64-linux-android x86_64-linux-android`. The SDK is found through
+`ANDROID_HOME` or `sdk.dir` in `local.properties`; the NDK through `ANDROID_NDK_HOME`,
+`ANDROID_NDK_ROOT`, `ndk.dir`, or the newest `ndk/<version>` under the SDK — so an Android Studio
+install with nothing exported works as is. Nothing here is needed for any other target: without
+`android` in `-Ptargets`, the Android Gradle plugin is never applied.
+
+The `androidNative*` Kotlin/Native targets are a separate path and need the `~/.cargo/config.toml`
+entries above instead of `cargo ndk`.
 
 ## Status and limitations
 
