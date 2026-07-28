@@ -27,7 +27,7 @@ macOS, Linux or Windows Kotlin/Native target, and there cannot be one without a 
 strategy. iroh4k is that different strategy: one Rust crate, built twice — as a `staticlib` linked
 into Kotlin/Native through cinterop, and as a `cdylib` reached from the JVM and Android through
 hand-written JNI. Both facades call the same Rust core through the same binary payload codec, and
-the same 211 shared test bodies run against each of them.
+the same 215 shared test bodies run against each of them.
 
 Three consequences worth stating plainly:
 
@@ -124,8 +124,8 @@ the second is legal and leaves the peer to work it out from a timeout.
 
 | Target | Status |
 | --- | --- |
-| `macosArm64`, `jvm` | Tested. 422 test bodies, 211 per facade, run on every change |
-| `android` (AAR) | Tested on the host under Robolectric: the same 211 shared bodies `jvmTest` runs, **plus 6 Android-only tests** that have no shared body because what they cover — `Iroh4kAndroid.multicastLock` over `WifiManager` — exists on no other target. 217 in all. Plus 6 instrumented tests, which are the only ones that exercise the packaged `.so` — CI runs them on an emulator, and they have also been run on a physical Galaxy A22 (Android 13, `arm64-v8a`) and on an API 37 emulator with 16 KB pages |
+| `macosArm64`, `jvm` | Tested. 430 test bodies, 215 per facade, run on every change |
+| `android` (AAR) | Tested on the host under Robolectric: the same 215 shared bodies `jvmTest` runs, **plus 6 Android-only tests** that have no shared body because what they cover — `Iroh4kAndroid.multicastLock` over `WifiManager` — exists on no other target. 221 in all. Plus 6 instrumented tests, which are the only ones that exercise the packaged `.so` — CI runs them on an emulator, and they have also been run on a physical Galaxy A22 (Android 13, `arm64-v8a`) and on an API 37 emulator with 16 KB pages |
 | `iosArm64`, `iosSimulatorArm64` | Compiles and links; cinterop verified in CI |
 | `linuxX64` | Test suite is configured in CI on `ubuntu-latest`; not verified locally |
 | `linuxArm64`, `mingwX64` | Cross-compiled and assembled in CI; never executed |
@@ -274,6 +274,17 @@ What is honestly incomplete:
   held: proving necessity needs a run with the permission granted and the lock deliberately not
   taken, and nobody has done one. Read `MdnsConfig`'s own documentation before relying on any of
   this — it also needs an entitlement on Apple platforms, which nothing here has exercised.
+
+- **Self-hosted discovery has never met a real server.** `EndpointConfig.discovery` builds pkarr
+  publishing, pkarr resolution and DNS lookup against whatever URL or domain it is given, and the
+  suite covers the value types, the encoding, and that an endpoint binds with them configured. What
+  it does not cover is any of them working: no pkarr relay and no DNS zone was stood up, so the path
+  from a `Discovery.PkarrPublisher` to a peer that resolved through it is unproven. The one thing
+  measured is the ordering invariant — that clearing the preset's services leaves the address book
+  behind `addEndpointAddr` intact — because that one can be shown on loopback.
+
+  The suite also cannot show that the preset's services *stopped* being queried when a list is
+  given: observing that n0 is no longer consulted needs the network.
 
 - **An IPv6 zone id does not survive a ticket.** `SocketAddr.parse("[fe80::1%3]:4433")` keeps its
   zone, because Rust's parser does, but iroh's postcard encoding of a `SocketAddr` has nowhere to put
