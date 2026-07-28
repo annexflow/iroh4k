@@ -139,4 +139,8 @@ class NativeEndpointTests {
     @Test
     fun `the address book survives clearing the preset's lookup`() =
         runner.`the address book survives clearing the preset's lookup`()
+
+    @Test
+    fun `PublishedAddrs ordinals match the Rust wire contract`() =
+        runner.`PublishedAddrs ordinals match the Rust wire contract`()
 }

@@ -24,11 +24,14 @@ sealed interface Discovery {
      *
      * [published] defaults to [PublishedAddrs.RelayOnly], which is upstream's default and is there
      * to avoid handing IP addresses to a *public* pkarr server. That reasoning inverts as soon as
-     * the server is your own, and the combination worth knowing about is this one: with
-     * [RelayMode.Disabled] there are no relay addresses to publish, so a `RelayOnly` publisher
-     * signs and uploads a packet containing **no addresses at all**. The endpoint binds, the
-     * publisher reports nothing wrong, and no peer can ever resolve it. Pass
-     * [PublishedAddrs.IpOnly] or [PublishedAddrs.Unfiltered] when you run the relay yourself.
+     * the server is your own, and the combination worth knowing about is this one: whenever the
+     * endpoint has no relay configured — explicitly via [RelayMode.Disabled], or implicitly by
+     * binding with [EndpointPreset.Minimal] and leaving [EndpointConfig.relayMode] at its `null`
+     * default, since that preset never configures a relay either — there are no relay addresses to
+     * publish, so a `RelayOnly` publisher signs and uploads a packet containing **no addresses at
+     * all**. The endpoint binds, the publisher reports nothing wrong, and no peer can ever resolve
+     * it. Pass [PublishedAddrs.IpOnly] or [PublishedAddrs.Unfiltered] when you run the relay
+     * yourself.
      *
      * @property relayUrl the pkarr relay to publish to, or `null` for n0's own — which is what
      *   [n0] produces. There is no default: publishing this endpoint's addresses to somebody

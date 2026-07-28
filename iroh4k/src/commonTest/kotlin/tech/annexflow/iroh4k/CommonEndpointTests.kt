@@ -2,6 +2,7 @@ package tech.annexflow.iroh4k
 
 import assertk.assertThat
 import assertk.assertions.contains
+import assertk.assertions.containsExactly
 import assertk.assertions.hasSize
 import assertk.assertions.isEmpty
 import assertk.assertions.isEqualTo
@@ -875,5 +876,20 @@ class CommonEndpointTests {
                 }
             }
         }
+    }
+
+    fun `PublishedAddrs ordinals match the Rust wire contract`() {
+        // This ordinal is worth a test because it is a wire contract shared with `endpoint.rs`,
+        // not an internal implementation detail: `Discovery.kt` writes `published.ordinal` as the
+        // `u8` after a `PkarrPublisher`'s relay URL, and `endpoint.rs` reads that byte back through
+        // its own `PUBLISHED_RELAY_ONLY`/`IP_ONLY`/`UNFILTERED` constants. A reorder here compiles
+        // cleanly on both sides — nothing type-checks against the numbering — and the failure it
+        // lets through is silent and privacy-shaped: an endpoint told to publish relay addresses
+        // only would instead publish its IP addresses to whatever pkarr relay it talks to.
+        assertThat(PublishedAddrs.entries.map { it.ordinal to it.name }).containsExactly(
+            0 to "RelayOnly",
+            1 to "IpOnly",
+            2 to "Unfiltered",
+        )
     }
 }

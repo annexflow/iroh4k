@@ -27,7 +27,7 @@ macOS, Linux or Windows Kotlin/Native target, and there cannot be one without a 
 strategy. iroh4k is that different strategy: one Rust crate, built twice — as a `staticlib` linked
 into Kotlin/Native through cinterop, and as a `cdylib` reached from the JVM and Android through
 hand-written JNI. Both facades call the same Rust core through the same binary payload codec, and
-the same 215 shared test bodies run against each of them.
+the same 216 shared test bodies run against each of them.
 
 Three consequences worth stating plainly:
 
@@ -124,8 +124,8 @@ the second is legal and leaves the peer to work it out from a timeout.
 
 | Target | Status |
 | --- | --- |
-| `macosArm64`, `jvm` | Tested. 430 test bodies, 215 per facade, run on every change |
-| `android` (AAR) | Tested on the host under Robolectric: the same 215 shared bodies `jvmTest` runs, **plus 6 Android-only tests** that have no shared body because what they cover — `Iroh4kAndroid.multicastLock` over `WifiManager` — exists on no other target. 221 in all. Plus 6 instrumented tests, which are the only ones that exercise the packaged `.so` — CI runs them on an emulator, and they have also been run on a physical Galaxy A22 (Android 13, `arm64-v8a`) and on an API 37 emulator with 16 KB pages |
+| `macosArm64`, `jvm` | Tested. 432 test bodies, 216 per facade, run on every change |
+| `android` (AAR) | Tested on the host under Robolectric: the same 216 shared bodies `jvmTest` runs, **plus 6 Android-only tests** that have no shared body because what they cover — `Iroh4kAndroid.multicastLock` over `WifiManager` — exists on no other target. 222 in all. Plus 6 instrumented tests, which are the only ones that exercise the packaged `.so` — CI runs them on an emulator, and they have also been run on a physical Galaxy A22 (Android 13, `arm64-v8a`) and on an API 37 emulator with 16 KB pages |
 | `iosArm64`, `iosSimulatorArm64` | Compiles and links; cinterop verified in CI |
 | `linuxX64` | Test suite is configured in CI on `ubuntu-latest`; not verified locally |
 | `linuxArm64`, `mingwX64` | Cross-compiled and assembled in CI; never executed |

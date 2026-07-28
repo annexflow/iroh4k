@@ -567,13 +567,12 @@ fn configure(config: BindConfig, lookup: MemoryLookup) -> Outcome<Builder> {
         }
         builder = builder.address_lookup(mdns_lookup);
     }
-    // Registration here is append-only: each service is added on top of whatever the preset (and
-    // mDNS, above) already installed, the same way `address_lookup` always behaves. That is a
-    // temporary gap against `EndpointConfig.discovery`'s own KDoc, which already promises that a
-    // non-empty list *replaces* the preset's services — the clearing that makes this loop live up
-    // to that promise arrives separately, with its own test, because it is a behaviour change
-    // worth pinning on its own. This comment describes the loop, not the clearing, so it stays
-    // true once that lands.
+    // Each service is registered in the order given. `address_lookup` itself only ever adds, but
+    // the clear above — run before anything in this function touches the preset's address
+    // lookup — is what turns a non-empty `config.discovery` into a replacement of the preset's
+    // services rather than an addition on top of them. mDNS, registered separately above, always
+    // composes with whatever ends up here: it points at no server, so it has nothing to disagree
+    // with, and no preset installs it, so there is nothing for the clear to have removed.
     for service in config.discovery {
         builder = match service {
             DiscoverySettings::PkarrPublisher {
