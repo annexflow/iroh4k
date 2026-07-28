@@ -63,6 +63,12 @@
 //!                             u8 2 Dns            + str? origin domain
 //!                             `str?` absent means upstream's own n0 default. Its own tag family,
 //!                             deliberately not `addr.rs`'s.
+//!   u8      transport config  0 absent — iroh's own defaults — or 1 present, then a
+//!                             `TransportConfig`: a counted, tagged, sparse sequence documented in
+//!                             full in `transport.rs`, whose own tag family that is, deliberately
+//!                             not `addr.rs`'s or this module's `DISCOVERY_TAG_*`. Read by
+//!                             `transport::read_optional`, last on the wire because a bind
+//!                             configuration can only ever grow at the end.
 //!
 //! EndpointAddr  (both ways)       — the same layout `addr.rs` documents and writes
 //!   bytes   id
@@ -92,10 +98,11 @@
 //!
 //! Every failure is either malformed caller input or a bind that iroh refused, reported under the
 //! code that fits: [`ERROR_BIND`] for the bind itself, [`ERROR_KEY`], [`ERROR_ADDR`] and
-//! [`ERROR_RELAY`] for the pieces of a configuration, and [`ERROR_CLOSED`] for a handle whose
-//! endpoint is gone. This crate builds with `panic = "abort"`, so a panic on a short buffer or a
-//! hostile length prefix would take the host process down — nothing below may ever panic on what
-//! Kotlin passes in, which is why the payload reader is fallible everywhere.
+//! [`ERROR_RELAY`] for the pieces of a configuration, [`ERROR_INVALID_ARGUMENT`] for a malformed
+//! transport configuration (see `transport.rs`), and [`ERROR_CLOSED`] for a handle whose endpoint
+//! is gone. This crate builds with `panic = "abort"`, so a panic on a short buffer or a hostile
+//! length prefix would take the host process down — nothing below may ever panic on what Kotlin
+//! passes in, which is why the payload reader is fallible everywhere.
 
 use std::{
     ffi::{c_char, c_int, c_void},
@@ -110,7 +117,7 @@ use std::{
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayConfig, RelayMode, RelayUrl, SecretKey,
     address_lookup::{AddrFilter, DnsAddressLookup, MemoryLookup, PkarrPublisher, PkarrResolver},
-    endpoint::{Builder, presets},
+    endpoint::{Builder, QuicTransportConfig, presets},
 };
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use iroh_relay::RelayQuicConfig;
@@ -119,11 +126,13 @@ use url::Url;
 use crate::addr::{decode_endpoint_addr, write_endpoint_addr};
 use crate::codec::{Reader, Writer};
 use crate::core::{
-    ERROR_ADDR, ERROR_BIND, ERROR_CLOSED, ERROR_DISCOVERY, ERROR_KEY, ERROR_RELAY, Iroh4kPtr,
-    Iroh4kResult, bytes_result, c_str, error_result, i64_result, ok_result, owned_bytes,
+    ERROR_ADDR, ERROR_BIND, ERROR_CLOSED, ERROR_DISCOVERY, ERROR_INVALID_ARGUMENT, ERROR_KEY,
+    ERROR_RELAY, Iroh4kPtr, Iroh4kResult, bytes_result, c_str, error_result, i64_result, ok_result,
+    owned_bytes,
 };
 use crate::handle::{self, Tagged};
 use crate::ops::{self, OpResult};
+use crate::transport;
 
 /// The completion callback every async C export takes — see [`crate::ffi`].
 type Completion = extern "C" fn(Iroh4kPtr, *mut Iroh4kResult);
@@ -287,6 +296,11 @@ struct BindConfig {
     external_addrs: Vec<SocketAddr>,
     mdns: Option<MdnsSettings>,
     discovery: Vec<DiscoverySettings>,
+    /// The QUIC transport parameters this endpoint applies to every connection by default.
+    /// `None` leaves iroh's own — including the six it overrides for hole punching before any
+    /// caller sees the builder. Last on the wire and last here, appended in this task after
+    /// everything Task 1 shipped.
+    transport_config: Option<QuicTransportConfig>,
 }
 
 /// What Kotlin can say about mDNS, mirroring `Endpoint.kt`'s `MdnsConfig`.
@@ -349,6 +363,8 @@ fn read_bind_config(payload: &[u8]) -> Outcome<BindConfig> {
     let external_addrs = read_socket_addrs(&mut r)?;
     let mdns = read_mdns(&mut r)?;
     let discovery = read_discovery(&mut r)?;
+    // Last on the wire, after the discovery sequence — see `Endpoint.kt`'s `encodeBindConfig`.
+    let transport_config = under(ERROR_INVALID_ARGUMENT, transport::read_optional(&mut r))?;
 
     under(ERROR_BIND, r.finish())?;
 
@@ -361,6 +377,7 @@ fn read_bind_config(payload: &[u8]) -> Outcome<BindConfig> {
         external_addrs,
         mdns,
         discovery,
+        transport_config,
     })
 }
 
@@ -498,6 +515,14 @@ fn builder_for(preset: i32) -> Outcome<Builder> {
 /// below for why it is threaded through here rather than fetched back off the bound endpoint.
 fn configure(config: BindConfig, lookup: MemoryLookup) -> Outcome<Builder> {
     let mut builder = builder_for(config.preset)?;
+
+    // Right after the preset dispatch, and independent of everything else `configure` does: a
+    // transport configuration replaces the preset's whole `QuicTransportConfig` outright, exactly
+    // as `TransportConfig`'s own class documentation promises, so there is no ordering to get
+    // wrong here the way there is for the address-lookup clear below.
+    if let Some(transport) = config.transport_config {
+        builder = builder.transport_config(transport);
+    }
 
     // Before the address book, always. A non-empty list means the caller named the services they
     // want, and `EndpointConfig` promises an explicit choice beats the preset's — the same contract

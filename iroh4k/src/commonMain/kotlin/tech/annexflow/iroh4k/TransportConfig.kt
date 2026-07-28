@@ -1,5 +1,6 @@
 package tech.annexflow.iroh4k
 
+import tech.annexflow.iroh4k.internal.BinaryWriter
 import kotlin.time.Duration
 
 /**
@@ -480,3 +481,195 @@ class AckFrequency(
  * These two are all that `noq` implements. There is no BBR.
  */
 enum class CongestionController { Cubic, NewReno }
+
+// ── Wire format ───────────────────────────────────────────────────────────────────────────────
+//
+// Mirrored by `transport.rs`; the two must be changed together, because the bind payload (and,
+// later, the per-connection options payload) is positional at its outer level and nothing on
+// either side would notice a drift.
+//
+// This is its own tag family, in three parts. `TRANSPORT_TAG_*` is NOT `Addr.kt`'s `ADDR_TAG_*`
+// and NOT `Discovery.kt`'s `DISCOVERY_TAG_*`, both of which number different payload shapes from
+// the same starting point; `MTU_TAG_*` and `ACK_TAG_*` are two further small families of their
+// own, for the nested records.
+
+/** Tags for [TransportConfig]'s counted, tagged, sparse entries — see [writeTransportConfig]. */
+private const val TRANSPORT_TAG_MAX_CONCURRENT_BIDI_STREAMS = 0
+private const val TRANSPORT_TAG_MAX_CONCURRENT_UNI_STREAMS = 1
+private const val TRANSPORT_TAG_STREAM_RECEIVE_WINDOW = 2
+private const val TRANSPORT_TAG_RECEIVE_WINDOW = 3
+private const val TRANSPORT_TAG_SEND_WINDOW = 4
+private const val TRANSPORT_TAG_SEND_FAIRNESS = 5
+private const val TRANSPORT_TAG_MAX_IDLE_TIMEOUT = 6
+private const val TRANSPORT_TAG_KEEP_ALIVE_INTERVAL = 7
+private const val TRANSPORT_TAG_INITIAL_RTT = 8
+private const val TRANSPORT_TAG_PACKET_THRESHOLD = 9
+private const val TRANSPORT_TAG_TIME_THRESHOLD = 10
+private const val TRANSPORT_TAG_PERSISTENT_CONGESTION_THRESHOLD = 11
+private const val TRANSPORT_TAG_ACK_FREQUENCY = 12
+private const val TRANSPORT_TAG_CONGESTION_CONTROLLER = 13
+private const val TRANSPORT_TAG_INITIAL_MTU = 14
+private const val TRANSPORT_TAG_MIN_MTU = 15
+private const val TRANSPORT_TAG_MTU_DISCOVERY = 16
+private const val TRANSPORT_TAG_PAD_TO_MTU = 17
+private const val TRANSPORT_TAG_DATAGRAM_RECEIVE_BUFFER_SIZE = 18
+private const val TRANSPORT_TAG_DATAGRAM_SEND_BUFFER_SIZE = 19
+private const val TRANSPORT_TAG_CRYPTO_BUFFER_SIZE = 20
+private const val TRANSPORT_TAG_ALLOW_SPIN = 21
+private const val TRANSPORT_TAG_ENABLE_SEGMENTATION_OFFLOAD = 22
+private const val TRANSPORT_TAG_SEND_OBSERVED_ADDRESS_REPORTS = 23
+private const val TRANSPORT_TAG_RECEIVE_OBSERVED_ADDRESS_REPORTS = 24
+private const val TRANSPORT_TAG_MAX_CONCURRENT_MULTIPATH_PATHS = 25
+private const val TRANSPORT_TAG_DEFAULT_PATH_MAX_IDLE_TIMEOUT = 26
+private const val TRANSPORT_TAG_DEFAULT_PATH_KEEP_ALIVE_INTERVAL = 27
+private const val TRANSPORT_TAG_MAX_REMOTE_NAT_TRAVERSAL_ADDRESSES = 28
+
+/** Tags for [MtuDiscovery]'s nested counted, tagged, sparse entries — see [writeMtuDiscovery]. */
+private const val MTU_TAG_INTERVAL = 0
+private const val MTU_TAG_UPPER_BOUND = 1
+private const val MTU_TAG_BLACK_HOLE_COOLDOWN = 2
+private const val MTU_TAG_MINIMUM_CHANGE = 3
+
+/** Tags for [AckFrequency]'s nested counted, tagged, sparse entries — see [writeAckFrequency]. */
+private const val ACK_TAG_ACK_ELICITING_THRESHOLD = 0
+private const val ACK_TAG_MAX_ACK_DELAY = 1
+private const val ACK_TAG_REORDERING_THRESHOLD = 2
+
+/** Discriminators for an optional record — the same convention `Endpoint.kt`'s carries. */
+private const val ABSENT = 0
+private const val PRESENT = 1
+
+/**
+ * Writes a transport configuration as a counted sequence of tagged entries.
+ *
+ * Sparse rather than positional: a caller typically sets two knobs out of twenty-nine, and a
+ * positional record would spend a presence byte on each of the twenty-seven they did not. It also
+ * means a knob added later is a new tag rather than a change of layout.
+ *
+ * Every field but one writes the way its Kotlin type suggests: a `Long` as `i64`, an `Int` as
+ * `i32`, a `Boolean` as a `u8` via [BinaryWriter.bool], a [Duration] as `i64` nanoseconds, and
+ * [timeThreshold][TransportConfig.timeThreshold] as `f64` even though upstream's own field is
+ * `f32` — the codec has no narrower float. [maxIdleTimeout][TransportConfig.maxIdleTimeout] is
+ * the one exception: it writes as `i64` **milliseconds**, not nanoseconds, because it is the only
+ * field that crosses into a `VarInt`-encoded value upstream (`noq_proto::IdleTimeout`, a 62-bit
+ * varint of milliseconds) rather than a plain [Duration]-shaped one. Nanoseconds would
+ * defeat the point: a nanosecond count can never be large enough, once divided back down to
+ * milliseconds, to exceed that varint's range — the wire could never refuse an oversized value,
+ * only silently accept a wrong one. Milliseconds is also upstream's own unit, so nothing is lost
+ * converting through it.
+ */
+internal fun BinaryWriter.writeTransportConfig(config: TransportConfig) {
+    val entries = BinaryWriter()
+    var count = 0
+    fun entry(tag: Int, write: BinaryWriter.() -> Unit) {
+        entries.u8(tag)
+        entries.write()
+        count++
+    }
+
+    config.maxConcurrentBidiStreams?.let { entry(TRANSPORT_TAG_MAX_CONCURRENT_BIDI_STREAMS) { i64(it) } }
+    config.maxConcurrentUniStreams?.let { entry(TRANSPORT_TAG_MAX_CONCURRENT_UNI_STREAMS) { i64(it) } }
+    config.streamReceiveWindow?.let { entry(TRANSPORT_TAG_STREAM_RECEIVE_WINDOW) { i64(it) } }
+    config.receiveWindow?.let { entry(TRANSPORT_TAG_RECEIVE_WINDOW) { i64(it) } }
+    config.sendWindow?.let { entry(TRANSPORT_TAG_SEND_WINDOW) { i64(it) } }
+    config.sendFairness?.let { entry(TRANSPORT_TAG_SEND_FAIRNESS) { bool(it) } }
+    // Milliseconds, not nanoseconds — see the KDoc above.
+    config.maxIdleTimeout?.let { entry(TRANSPORT_TAG_MAX_IDLE_TIMEOUT) { i64(it.inWholeMilliseconds) } }
+    config.keepAliveInterval?.let { entry(TRANSPORT_TAG_KEEP_ALIVE_INTERVAL) { i64(it.inWholeNanoseconds) } }
+    config.initialRtt?.let { entry(TRANSPORT_TAG_INITIAL_RTT) { i64(it.inWholeNanoseconds) } }
+    config.packetThreshold?.let { entry(TRANSPORT_TAG_PACKET_THRESHOLD) { i32(it) } }
+    config.timeThreshold?.let { entry(TRANSPORT_TAG_TIME_THRESHOLD) { f64(it.toDouble()) } }
+    config.persistentCongestionThreshold?.let {
+        entry(TRANSPORT_TAG_PERSISTENT_CONGESTION_THRESHOLD) { i32(it) }
+    }
+    config.ackFrequency?.let { entry(TRANSPORT_TAG_ACK_FREQUENCY) { writeAckFrequency(it) } }
+    config.congestionController?.let { entry(TRANSPORT_TAG_CONGESTION_CONTROLLER) { u8(it.ordinal) } }
+    config.initialMtu?.let { entry(TRANSPORT_TAG_INITIAL_MTU) { i32(it) } }
+    config.minMtu?.let { entry(TRANSPORT_TAG_MIN_MTU) { i32(it) } }
+    config.mtuDiscovery?.let { entry(TRANSPORT_TAG_MTU_DISCOVERY) { writeMtuDiscovery(it) } }
+    config.padToMtu?.let { entry(TRANSPORT_TAG_PAD_TO_MTU) { bool(it) } }
+    config.datagramReceiveBufferSize?.let {
+        entry(TRANSPORT_TAG_DATAGRAM_RECEIVE_BUFFER_SIZE) { i32(it) }
+    }
+    config.datagramSendBufferSize?.let { entry(TRANSPORT_TAG_DATAGRAM_SEND_BUFFER_SIZE) { i32(it) } }
+    config.cryptoBufferSize?.let { entry(TRANSPORT_TAG_CRYPTO_BUFFER_SIZE) { i32(it) } }
+    config.allowSpin?.let { entry(TRANSPORT_TAG_ALLOW_SPIN) { bool(it) } }
+    config.enableSegmentationOffload?.let {
+        entry(TRANSPORT_TAG_ENABLE_SEGMENTATION_OFFLOAD) { bool(it) }
+    }
+    config.sendObservedAddressReports?.let {
+        entry(TRANSPORT_TAG_SEND_OBSERVED_ADDRESS_REPORTS) { bool(it) }
+    }
+    config.receiveObservedAddressReports?.let {
+        entry(TRANSPORT_TAG_RECEIVE_OBSERVED_ADDRESS_REPORTS) { bool(it) }
+    }
+    config.maxConcurrentMultipathPaths?.let {
+        entry(TRANSPORT_TAG_MAX_CONCURRENT_MULTIPATH_PATHS) { i32(it) }
+    }
+    config.defaultPathMaxIdleTimeout?.let {
+        entry(TRANSPORT_TAG_DEFAULT_PATH_MAX_IDLE_TIMEOUT) { i64(it.inWholeNanoseconds) }
+    }
+    config.defaultPathKeepAliveInterval?.let {
+        entry(TRANSPORT_TAG_DEFAULT_PATH_KEEP_ALIVE_INTERVAL) { i64(it.inWholeNanoseconds) }
+    }
+    config.maxRemoteNatTraversalAddresses?.let {
+        entry(TRANSPORT_TAG_MAX_REMOTE_NAT_TRAVERSAL_ADDRESSES) { i32(it) }
+    }
+
+    i32(count)
+    raw(entries.finish())
+}
+
+/** As [writeTransportConfig]'s entries, for [MtuDiscovery]'s own small tag family. */
+private fun BinaryWriter.writeMtuDiscovery(config: MtuDiscovery) {
+    val entries = BinaryWriter()
+    var count = 0
+    fun entry(tag: Int, write: BinaryWriter.() -> Unit) {
+        entries.u8(tag)
+        entries.write()
+        count++
+    }
+
+    config.interval?.let { entry(MTU_TAG_INTERVAL) { i64(it.inWholeNanoseconds) } }
+    config.upperBound?.let { entry(MTU_TAG_UPPER_BOUND) { i32(it) } }
+    config.blackHoleCooldown?.let { entry(MTU_TAG_BLACK_HOLE_COOLDOWN) { i64(it.inWholeNanoseconds) } }
+    config.minimumChange?.let { entry(MTU_TAG_MINIMUM_CHANGE) { i32(it) } }
+
+    i32(count)
+    raw(entries.finish())
+}
+
+/** As [writeTransportConfig]'s entries, for [AckFrequency]'s own small tag family. */
+private fun BinaryWriter.writeAckFrequency(config: AckFrequency) {
+    val entries = BinaryWriter()
+    var count = 0
+    fun entry(tag: Int, write: BinaryWriter.() -> Unit) {
+        entries.u8(tag)
+        entries.write()
+        count++
+    }
+
+    config.ackElicitingThreshold?.let { entry(ACK_TAG_ACK_ELICITING_THRESHOLD) { i64(it) } }
+    config.maxAckDelay?.let { entry(ACK_TAG_MAX_ACK_DELAY) { i64(it.inWholeNanoseconds) } }
+    config.reorderingThreshold?.let { entry(ACK_TAG_REORDERING_THRESHOLD) { i64(it) } }
+
+    i32(count)
+    raw(entries.finish())
+}
+
+/**
+ * Writes `u8 present` then [writeTransportConfig], or `u8 absent` for `null`.
+ *
+ * The endpoint-wide default ([EndpointConfig.transportConfig]) and, later, a per-connection
+ * override both cross as this: an *optional* record, not a tag with an "unset" value like
+ * `relayMode`'s — there is no preset choice to leave alone here, so absent always means "iroh's
+ * own defaults" and never anything else.
+ */
+internal fun BinaryWriter.writeOptionalTransportConfig(config: TransportConfig?) {
+    if (config == null) {
+        u8(ABSENT)
+    } else {
+        u8(PRESENT)
+        writeTransportConfig(config)
+    }
+}

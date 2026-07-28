@@ -13,6 +13,7 @@ import assertk.assertions.isNotNull
 import assertk.assertions.isNull
 import assertk.assertions.isTrue
 import kotlin.test.assertFailsWith
+import kotlin.time.Duration.Companion.days
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.measureTime
 import kotlinx.coroutines.Dispatchers
@@ -924,5 +925,63 @@ class CommonEndpointTests {
         // nobody notices until a throughput graph looks wrong months later.
         assertThat(CongestionController.entries.map { it.name })
             .containsExactly("Cubic", "NewReno")
+    }
+
+    fun `an endpoint binds with a transport configuration`() = runTest {
+        Endpoint.bind(
+            EndpointConfig(
+                preset = EndpointPreset.Minimal,
+                relayMode = RelayMode.Disabled,
+                bindAddrs = listOf(loopback),
+                transportConfig = TransportConfig(
+                    maxIdleTimeout = 30.seconds,
+                    sendFairness = true,
+                    timeThreshold = 1.25f,
+                    congestionController = CongestionController.NewReno,
+                    mtuDiscovery = MtuDiscovery(upperBound = 1400),
+                    ackFrequency = AckFrequency(reorderingThreshold = 3),
+                ),
+            )
+        ).use { endpoint ->
+            // Every kind the codec has to carry is in that config: a duration, a boolean, a float,
+            // an ordinal, and both nested records. Binding proves the payload round-trips; what it
+            // cannot prove is that any value changed anything on the wire.
+            assertThat(endpoint.isClosed).isFalse()
+        }
+    }
+
+    fun `a transport value upstream ignores is passed through rather than refused`() = runTest {
+        // Upstream keeps its own 8 and logs a warning. iroh4k deliberately does not reject, so that
+        // this call behaves exactly as the same call from Rust does. This body exists to pin that
+        // decision: without it, somebody would eventually "fix" it into an error.
+        Endpoint.bind(
+            EndpointConfig(
+                preset = EndpointPreset.Minimal,
+                relayMode = RelayMode.Disabled,
+                bindAddrs = listOf(loopback),
+                transportConfig = TransportConfig(maxConcurrentMultipathPaths = 4),
+            )
+        ).use { endpoint ->
+            assertThat(endpoint.isClosed).isFalse()
+        }
+    }
+
+    fun `a transport duration too large for the wire is refused`() = runTest {
+        // `maxIdleTimeout` becomes a millisecond varint upstream (a 62-bit value), which tops out
+        // at roughly 146 million years — well below what a Kotlin `Duration` can express: its own
+        // ceiling, `Duration.INFINITE`, saturates every accessor at `Long.MAX_VALUE` instead of
+        // overflowing, and 60 billion days is already large enough to hit that ceiling. The
+        // conversion returns a `Result` and is treated as one.
+        val error = assertFailsWith<IrohError> {
+            Endpoint.bind(
+                EndpointConfig(
+                    preset = EndpointPreset.Minimal,
+                    relayMode = RelayMode.Disabled,
+                    bindAddrs = listOf(loopback),
+                    transportConfig = TransportConfig(maxIdleTimeout = 60_000_000_000L.days),
+                )
+            )
+        }
+        assertThat(error.code).isEqualTo(IrohError.Code.InvalidArgument)
     }
 }

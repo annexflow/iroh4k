@@ -627,6 +627,10 @@ class Endpoint private constructor(private val guard: NativeHandle) : AutoClosea
 //                            u8 0 PkarrPublisher + str? relay URL + u8 published addrs;
 //                            u8 1 PkarrResolver  + str? relay URL;
 //                            u8 2 Dns            + str? origin domain
+//   u8      transport config 0 absent — iroh's own defaults — or 1 present, then
+//                            `TransportConfig.kt`'s `writeTransportConfig`: a counted sequence of
+//                            tagged entries, its own tag family (`TRANSPORT_TAG_*`), documented in
+//                            full there and mirrored by `transport.rs`.
 //
 // `addEndpointAddr` sends an `EndpointAddr` as the *whole* payload, so it is written with
 // `encodeEndpointAddr` and read by `addr::decode_endpoint_addr`, which rejects trailing bytes —
@@ -701,6 +705,12 @@ private fun encodeBindConfig(config: EndpointConfig): ByteArray {
     // for a presence byte to distinguish.
     w.i32(config.discovery.size)
     for (service in config.discovery) w.writeDiscovery(service)
+
+    // Appended after the discovery sequence, for the same reason: the payload is positional and a
+    // field can only ever be added at the end. An optional *record*, like `mdns` above and unlike
+    // `relayMode`'s "leave the preset's choice" tag — there is no preset transport configuration to
+    // leave alone, so absent always means iroh's own defaults.
+    w.writeOptionalTransportConfig(config.transportConfig)
 
     return w.finish()
 }

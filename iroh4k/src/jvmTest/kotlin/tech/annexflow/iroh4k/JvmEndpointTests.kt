@@ -149,4 +149,16 @@ class JvmEndpointTests {
     @Test
     fun `CongestionController ordinals match the Rust wire contract`() =
         runner.`CongestionController ordinals match the Rust wire contract`()
+
+    @Test
+    fun `an endpoint binds with a transport configuration`() =
+        runner.`an endpoint binds with a transport configuration`()
+
+    @Test
+    fun `a transport value upstream ignores is passed through rather than refused`() =
+        runner.`a transport value upstream ignores is passed through rather than refused`()
+
+    @Test
+    fun `a transport duration too large for the wire is refused`() =
+        runner.`a transport duration too large for the wire is refused`()
 }

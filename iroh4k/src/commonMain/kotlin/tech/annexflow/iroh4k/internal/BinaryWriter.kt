@@ -56,5 +56,18 @@ internal class BinaryWriter {
         if (value == null) i32(-1) else string(value)
     }
 
+    /**
+     * Appends bytes with no length prefix.
+     *
+     * For a counted sequence whose count is not known until its entries have been written: the
+     * entries go into a second writer, and this splices them in behind the count. The reader needs
+     * no counterpart — it reads entries one at a time, guided by the count.
+     */
+    fun raw(value: ByteArray) {
+        reserve(value.size)
+        value.copyInto(buf, size)
+        size += value.size
+    }
+
     fun finish(): ByteArray = buf.copyOf(size)
 }
