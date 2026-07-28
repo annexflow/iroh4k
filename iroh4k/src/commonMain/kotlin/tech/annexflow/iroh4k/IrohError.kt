@@ -31,6 +31,7 @@ class IrohError(
         Ticket,
         Relay,
         Services,
+        Discovery,
         ;
 
         companion object {

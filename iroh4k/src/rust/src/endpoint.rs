@@ -56,6 +56,13 @@
 //!   u8      mDNS              0 absent — no mDNS at all — or 1 present, then:
 //!                             u8   advertise     0 resolve only, 1 also advertise this endpoint
 //!                             str? service name  i32 -1 for upstream's own default
+//!   i32     discovery count   then count × one service:
+//!                             u8 0 PkarrPublisher + str? relay URL + u8 published addrs
+//!                                  (0 relay only, 1 ip only, 2 unfiltered)
+//!                             u8 1 PkarrResolver  + str? relay URL
+//!                             u8 2 Dns            + str? origin domain
+//!                             `str?` absent means upstream's own n0 default. Its own tag family,
+//!                             deliberately not `addr.rs`'s.
 //!
 //! EndpointAddr  (both ways)       — the same layout `addr.rs` documents and writes
 //!   bytes   id
@@ -102,17 +109,18 @@ use std::{
 
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayConfig, RelayMode, RelayUrl, SecretKey,
-    address_lookup::MemoryLookup,
+    address_lookup::{AddrFilter, DnsAddressLookup, MemoryLookup, PkarrPublisher, PkarrResolver},
     endpoint::{Builder, presets},
 };
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use iroh_relay::RelayQuicConfig;
+use url::Url;
 
 use crate::addr::{decode_endpoint_addr, write_endpoint_addr};
 use crate::codec::{Reader, Writer};
 use crate::core::{
-    ERROR_ADDR, ERROR_BIND, ERROR_CLOSED, ERROR_KEY, ERROR_RELAY, Iroh4kPtr, Iroh4kResult,
-    bytes_result, c_str, error_result, i64_result, ok_result, owned_bytes,
+    ERROR_ADDR, ERROR_BIND, ERROR_CLOSED, ERROR_DISCOVERY, ERROR_KEY, ERROR_RELAY, Iroh4kPtr,
+    Iroh4kResult, bytes_result, c_str, error_result, i64_result, ok_result, owned_bytes,
 };
 use crate::handle::{self, Tagged};
 use crate::ops::{self, OpResult};
@@ -141,6 +149,18 @@ const RELAY_MODE_CUSTOM: u8 = 4;
 /// Discriminators for an optional record.
 const ABSENT: u8 = 0;
 const PRESENT: u8 = 1;
+
+/// Discovery service tags inside a bind configuration. Its own family: these are **not**
+/// `addr.rs`'s `TAG_RELAY`/`TAG_IP`/`TAG_CUSTOM`/`TAG_UNKNOWN`, which number a different set of
+/// payload shapes from the same starting point.
+const DISCOVERY_TAG_PKARR_PUBLISHER: u8 = 0;
+const DISCOVERY_TAG_PKARR_RESOLVER: u8 = 1;
+const DISCOVERY_TAG_DNS: u8 = 2;
+
+/// `PublishedAddrs` ordinals, matching Kotlin's enum.
+const PUBLISHED_RELAY_ONLY: u8 = 0;
+const PUBLISHED_IP_ONLY: u8 = 1;
+const PUBLISHED_UNFILTERED: u8 = 2;
 
 /// Raw byte lengths, fixed by Ed25519.
 const SECRET_KEY_LEN: usize = 32;
@@ -266,6 +286,7 @@ struct BindConfig {
     bind_addrs: Vec<SocketAddr>,
     external_addrs: Vec<SocketAddr>,
     mdns: Option<MdnsSettings>,
+    discovery: Vec<DiscoverySettings>,
 }
 
 /// What Kotlin can say about mDNS, mirroring `Endpoint.kt`'s `MdnsConfig`.
@@ -278,6 +299,24 @@ struct MdnsSettings {
     /// `None` leaves upstream's own default service name, currently `"irohv1"`. Kept as "not
     /// stated" rather than resolved here so the default stays upstream's to change.
     service_name: Option<String>,
+}
+
+/// One address lookup service Kotlin asked for, mirroring `Discovery.kt`'s sealed interface.
+///
+/// `None` for a URL or domain means "not stated", which is answered with upstream's own `n0_dns()`
+/// rather than with a URL spelled out on this side — so upstream keeps choosing between its
+/// production and staging infrastructure.
+enum DiscoverySettings {
+    PkarrPublisher {
+        relay_url: Option<String>,
+        published: AddrFilter,
+    },
+    PkarrResolver {
+        relay_url: Option<String>,
+    },
+    Dns {
+        origin_domain: Option<String>,
+    },
 }
 
 fn read_bind_config(payload: &[u8]) -> Outcome<BindConfig> {
@@ -309,6 +348,7 @@ fn read_bind_config(payload: &[u8]) -> Outcome<BindConfig> {
     let bind_addrs = read_socket_addrs(&mut r)?;
     let external_addrs = read_socket_addrs(&mut r)?;
     let mdns = read_mdns(&mut r)?;
+    let discovery = read_discovery(&mut r)?;
 
     under(ERROR_BIND, r.finish())?;
 
@@ -320,10 +360,12 @@ fn read_bind_config(payload: &[u8]) -> Outcome<BindConfig> {
         bind_addrs,
         external_addrs,
         mdns,
+        discovery,
     })
 }
 
-/// Reads the optional mDNS record that closes a bind configuration.
+/// Reads the optional mDNS record, second-to-last on the wire — [`read_discovery`] reads the
+/// field that actually closes a bind configuration.
 ///
 /// The fields are read into named bindings rather than straight into the struct literal, so the
 /// order they are consumed in is the order they appear on the wire no matter how the struct is
@@ -343,6 +385,56 @@ fn read_mdns(r: &mut Reader) -> Outcome<Option<MdnsSettings>> {
             return fail(
                 ERROR_BIND,
                 format!("malformed bind configuration: unknown optional-mDNS tag {other}"),
+            );
+        }
+    })
+}
+
+/// Reads the counted sequence of discovery services that closes a bind configuration.
+///
+/// An unknown tag is an error rather than a skipped record. This payload only ever travels from
+/// Kotlin to Rust, and both ends ship in one artifact, so a tag this build does not know is version
+/// skew *inside* the build — a bug to report, not a newer peer to tolerate.
+fn read_discovery(r: &mut Reader) -> Outcome<Vec<DiscoverySettings>> {
+    let count = under(ERROR_DISCOVERY, r.count())?;
+    let mut services = Vec::with_capacity(count);
+    for _ in 0..count {
+        services.push(match under(ERROR_DISCOVERY, r.u8())? {
+            DISCOVERY_TAG_PKARR_PUBLISHER => {
+                let relay_url = under(ERROR_DISCOVERY, r.opt_str())?.map(str::to_owned);
+                let published = read_published_addrs(r)?;
+                DiscoverySettings::PkarrPublisher {
+                    relay_url,
+                    published,
+                }
+            }
+            DISCOVERY_TAG_PKARR_RESOLVER => DiscoverySettings::PkarrResolver {
+                relay_url: under(ERROR_DISCOVERY, r.opt_str())?.map(str::to_owned),
+            },
+            DISCOVERY_TAG_DNS => DiscoverySettings::Dns {
+                origin_domain: under(ERROR_DISCOVERY, r.opt_str())?.map(str::to_owned),
+            },
+            other => {
+                return fail(
+                    ERROR_DISCOVERY,
+                    format!("malformed bind configuration: unknown discovery tag {other}"),
+                );
+            }
+        });
+    }
+    Ok(services)
+}
+
+/// Maps a `PublishedAddrs` ordinal onto the `AddrFilter` it names.
+fn read_published_addrs(r: &mut Reader) -> Outcome<AddrFilter> {
+    Ok(match under(ERROR_DISCOVERY, r.u8())? {
+        PUBLISHED_RELAY_ONLY => AddrFilter::relay_only(),
+        PUBLISHED_IP_ONLY => AddrFilter::ip_only(),
+        PUBLISHED_UNFILTERED => AddrFilter::unfiltered(),
+        other => {
+            return fail(
+                ERROR_DISCOVERY,
+                format!("malformed bind configuration: unknown published-addresses tag {other}"),
             );
         }
     })
@@ -407,6 +499,21 @@ fn builder_for(preset: i32) -> Outcome<Builder> {
 fn configure(config: BindConfig, lookup: MemoryLookup) -> Outcome<Builder> {
     let mut builder = builder_for(config.preset)?;
 
+    // Before the address book, always. A non-empty list means the caller named the services they
+    // want, and `EndpointConfig` promises an explicit choice beats the preset's — the same contract
+    // `bindAddrs` keeps when it clears iroh's default sockets rather than adding to them.
+    //
+    // Appending instead would be the quieter failure: `preset` defaults to `N0`, so
+    // `EndpointConfig(discovery = [PkarrPublisher(mine)])` would go on publishing this endpoint's
+    // addresses to n0 as well, which nobody would ever notice.
+    //
+    // This clears only what the preset registered. iroh4k's own `MemoryLookup` is registered below,
+    // after the clear, so `addEndpointAddr` keeps working under every configuration — an ordering
+    // invariant, not a property of the types, which is why a test pins it.
+    if !config.discovery.is_empty() {
+        builder = builder.clear_address_lookup();
+    }
+
     // Registered unconditionally, for every preset, because `Endpoint.addEndpointAddr` has
     // nowhere else to put an address: a bound `Endpoint` exposes only the erased
     // `AddressLookupServices`, so the sole way to still hold a typed `MemoryLookup` afterwards is
@@ -459,6 +566,40 @@ fn configure(config: BindConfig, lookup: MemoryLookup) -> Outcome<Builder> {
             mdns_lookup = mdns_lookup.service_name(name);
         }
         builder = builder.address_lookup(mdns_lookup);
+    }
+    // Each service is registered in the order given. `address_lookup` itself only ever adds, but
+    // the clear above — run before anything in this function touches the preset's address
+    // lookup — is what turns a non-empty `config.discovery` into a replacement of the preset's
+    // services rather than an addition on top of them. mDNS, registered separately above, always
+    // composes with whatever ends up here: it points at no server, so it has nothing to disagree
+    // with, and no preset installs it, so there is nothing for the clear to have removed.
+    for service in config.discovery {
+        builder = match service {
+            DiscoverySettings::PkarrPublisher {
+                relay_url,
+                published,
+            } => {
+                let publisher = match relay_url {
+                    Some(url) => PkarrPublisher::builder(parse_discovery_url(&url)?),
+                    None => PkarrPublisher::n0_dns(),
+                };
+                builder.address_lookup(publisher.addr_filter(published))
+            }
+            DiscoverySettings::PkarrResolver { relay_url } => {
+                let resolver = match relay_url {
+                    Some(url) => PkarrResolver::builder(parse_discovery_url(&url)?),
+                    None => PkarrResolver::n0_dns(),
+                };
+                builder.address_lookup(resolver)
+            }
+            DiscoverySettings::Dns { origin_domain } => {
+                let dns = match origin_domain {
+                    Some(domain) => DnsAddressLookup::builder(domain),
+                    None => DnsAddressLookup::n0_dns(),
+                };
+                builder.address_lookup(dns)
+            }
+        };
     }
     Ok(builder)
 }
@@ -825,6 +966,18 @@ fn parse_socket_addr(text: &str) -> Outcome<SocketAddr> {
     SocketAddr::from_str(text).map_err(|error| Failure {
         code: ERROR_ADDR,
         message: format!("could not parse {text:?} as a socket address: {error}"),
+    })
+}
+
+/// Parses a discovery service URL.
+///
+/// Its own error code rather than [`ERROR_RELAY`]: a pkarr relay is a plain URL upstream, not an
+/// iroh `RelayUrl`, so reporting it as a relay failure would name the wrong thing to whoever reads
+/// the message.
+fn parse_discovery_url(text: &str) -> Outcome<Url> {
+    Url::parse(text).map_err(|error| Failure {
+        code: ERROR_DISCOVERY,
+        message: format!("could not parse {text:?} as a discovery service URL: {error}"),
     })
 }
 

@@ -2,7 +2,9 @@ package tech.annexflow.iroh4k
 
 import assertk.assertThat
 import assertk.assertions.contains
+import assertk.assertions.containsExactly
 import assertk.assertions.hasSize
+import assertk.assertions.isEmpty
 import assertk.assertions.isEqualTo
 import assertk.assertions.isFalse
 import assertk.assertions.isGreaterThan
@@ -767,5 +769,127 @@ class CommonEndpointTests {
         assertThat(MdnsConfig().toString()).isEqualTo("MdnsConfig(advertise=true, serviceName=null)")
         assertThat(MdnsConfig(false, "swarm").toString())
             .isEqualTo("MdnsConfig(advertise=false, serviceName=swarm)")
+    }
+
+    fun `discovery services are values`() {
+        // Defaults: an endpoint says nothing about discovery unless asked, which is what keeps the
+        // preset's own services in place — and what keeps this suite offline.
+        assertThat(EndpointConfig().discovery).isEmpty()
+
+        // Upstream publishes relay addresses only, to avoid handing IP addresses to a public pkarr
+        // server. iroh4k keeps that default and lets a self-hoster override it.
+        assertThat(Discovery.PkarrPublisher("https://pkarr.example/pkarr").published)
+            .isEqualTo(PublishedAddrs.RelayOnly)
+
+        // `n0()` is "not stated", not a copy of n0's URL: the choice, including upstream's own
+        // prod/staging switch, stays upstream's to make at bind time.
+        assertThat(Discovery.PkarrPublisher.n0().relayUrl).isNull()
+        assertThat(Discovery.PkarrResolver.n0().relayUrl).isNull()
+        assertThat(Discovery.Dns.n0().originDomain).isNull()
+
+        assertThat(Discovery.PkarrResolver("https://a.example/pkarr"))
+            .isEqualTo(Discovery.PkarrResolver("https://a.example/pkarr"))
+        assertThat(Discovery.PkarrResolver("https://a.example/pkarr").hashCode())
+            .isEqualTo(Discovery.PkarrResolver("https://a.example/pkarr").hashCode())
+        assertThat(Discovery.PkarrResolver("https://a.example/pkarr"))
+            .isNotEqualTo(Discovery.PkarrResolver("https://b.example/pkarr"))
+
+        // A stated URL is not the same request as an unstated one, even if it happens to name the
+        // same server today.
+        assertThat(Discovery.Dns("dns.iroh.link")).isNotEqualTo(Discovery.Dns.n0())
+
+        // Both fields participate in equality, so an override is never silently equal to a default.
+        assertThat(Discovery.PkarrPublisher("https://a.example/pkarr"))
+            .isNotEqualTo(Discovery.PkarrPublisher("https://a.example/pkarr", PublishedAddrs.IpOnly))
+
+        assertThat(Discovery.Dns("dns.example").toString())
+            .isEqualTo("Discovery.Dns(originDomain=dns.example)")
+        assertThat(Discovery.PkarrResolver.n0().toString())
+            .isEqualTo("Discovery.PkarrResolver(relayUrl=null)")
+    }
+
+    fun `an endpoint binds with discovery services configured`() = runTest {
+        // A URL that parses but reaches nothing: port 1 on loopback is refused locally, so this
+        // stays as offline as the rest of the suite while still exercising the whole encode,
+        // decode and build path.
+        Endpoint.bind(
+            EndpointConfig(
+                preset = EndpointPreset.Minimal,
+                relayMode = RelayMode.Disabled,
+                bindAddrs = listOf(loopback),
+                discovery = listOf(
+                    // PkarrPublisher is the only variant whose payload carries a third field on
+                    // the wire — a `u8` for `published` after the optional relay URL — so it is
+                    // the one variant whose layout a test can actually pin. `Unfiltered` rather
+                    // than the default `RelayOnly`, so the encoder is caught carrying the real
+                    // ordinal instead of one that happens to match whatever the default already is.
+                    Discovery.PkarrPublisher("https://127.0.0.1:1/pkarr", PublishedAddrs.Unfiltered),
+                    Discovery.PkarrResolver("https://127.0.0.1:1/pkarr"),
+                    Discovery.Dns("dns.invalid"),
+                ),
+            )
+        ).use { endpoint ->
+            assertThat(endpoint.isClosed).isFalse()
+        }
+    }
+
+    fun `a malformed discovery URL is refused`() = runTest {
+        val error = assertFailsWith<IrohError> {
+            Endpoint.bind(
+                EndpointConfig(
+                    preset = EndpointPreset.Minimal,
+                    relayMode = RelayMode.Disabled,
+                    bindAddrs = listOf(loopback),
+                    discovery = listOf(Discovery.PkarrResolver("not a url")),
+                )
+            )
+        }
+        // Its own code: a pkarr relay is a plain URL upstream, not an iroh `RelayUrl`, so reporting
+        // it as `Relay` would name the wrong thing.
+        assertThat(error.code).isEqualTo(IrohError.Code.Discovery)
+        assertThat(error.message!!).contains("not a url")
+    }
+
+    fun `the address book survives clearing the preset's lookup`() = Loopback.bounded {
+        Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+            // A non-empty list, so `configure` takes the clearing path. The URL parses and reaches
+            // nothing: port 1 on loopback is refused locally.
+            val client = EndpointConfig(
+                preset = EndpointPreset.Minimal,
+                relayMode = RelayMode.Disabled,
+                bindAddrs = listOf(SocketAddr.parse("127.0.0.1:0")),
+                discovery = listOf(Discovery.PkarrResolver("https://127.0.0.1:1/pkarr")),
+            )
+
+            Endpoint.bind(client).use { endpoint ->
+                endpoint.addEndpointAddr(server.addr())
+
+                // Resolving an id with no transports in it is only possible out of the address
+                // book, so this dial passing is the proof that clearing the preset's services left
+                // iroh4k's own `MemoryLookup` in place.
+                val accepted = async { server.acceptOne() }
+                endpoint.connect(EndpointAddr.of(server.id), Loopback.alpn).use { connection ->
+                    accepted.await().use { served ->
+                        assertThat(connection.remoteId()).isEqualTo(server.id)
+                        assertThat(served.remoteId()).isEqualTo(endpoint.id)
+                    }
+                }
+            }
+        }
+    }
+
+    fun `PublishedAddrs ordinals match the Rust wire contract`() {
+        // This ordinal is worth a test because it is a wire contract shared with `endpoint.rs`,
+        // not an internal implementation detail: `Discovery.kt` writes `published.ordinal` as the
+        // `u8` after a `PkarrPublisher`'s relay URL, and `endpoint.rs` reads that byte back through
+        // its own `PUBLISHED_RELAY_ONLY`/`IP_ONLY`/`UNFILTERED` constants. A reorder here compiles
+        // cleanly on both sides — nothing type-checks against the numbering — and the failure it
+        // lets through is silent and privacy-shaped: an endpoint told to publish relay addresses
+        // only would instead publish its IP addresses to whatever pkarr relay it talks to.
+        assertThat(PublishedAddrs.entries.map { it.ordinal to it.name }).containsExactly(
+            0 to "RelayOnly",
+            1 to "IpOnly",
+            2 to "Unfiltered",
+        )
     }
 }

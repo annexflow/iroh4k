@@ -39,6 +39,7 @@ pub const ERROR_ADDR: c_int = 10;
 pub const ERROR_TICKET: c_int = 11;
 pub const ERROR_RELAY: c_int = 12;
 pub const ERROR_SERVICES: c_int = 13;
+pub const ERROR_DISCOVERY: c_int = 14;
 
 // ============================================================================
 // C-ABI types

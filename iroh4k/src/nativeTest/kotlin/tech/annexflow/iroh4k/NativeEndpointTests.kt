@@ -123,4 +123,24 @@ class NativeEndpointTests {
     @Test
     fun `mdns config is a value and is absent unless asked for`() =
         runner.`mdns config is a value and is absent unless asked for`()
+
+    @Test
+    fun `discovery services are values`() =
+        runner.`discovery services are values`()
+
+    @Test
+    fun `an endpoint binds with discovery services configured`() =
+        runner.`an endpoint binds with discovery services configured`()
+
+    @Test
+    fun `a malformed discovery URL is refused`() =
+        runner.`a malformed discovery URL is refused`()
+
+    @Test
+    fun `the address book survives clearing the preset's lookup`() =
+        runner.`the address book survives clearing the preset's lookup`()
+
+    @Test
+    fun `PublishedAddrs ordinals match the Rust wire contract`() =
+        runner.`PublishedAddrs ordinals match the Rust wire contract`()
 }

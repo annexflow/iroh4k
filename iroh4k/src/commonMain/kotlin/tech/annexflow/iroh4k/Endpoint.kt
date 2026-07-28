@@ -198,6 +198,14 @@ class MdnsConfig(
  *   touches nothing. Pass an [MdnsConfig] to switch it on, and read that type's caveats first: it
  *   needs a manifest permission on Android and an entitlement on Apple platforms, and it can make
  *   [Endpoint.bind] fail on a host with no usable multicast.
+ * @property discovery the address lookup services this endpoint uses. Empty, the default, means
+ *   "I did not say", leaving whatever [preset] configured — n0's pkarr and DNS under
+ *   [EndpointPreset.N0], nothing at all under [EndpointPreset.Minimal]. A **non-empty** list
+ *   replaces the preset's services rather than adding to them, so it is how an app points discovery
+ *   at its own infrastructure. Note the asymmetry that follows: "use the preset's relays but no
+ *   discovery at all" is not expressible here, because an empty list already means something else —
+ *   spell that [EndpointPreset.Minimal] with `relayMode = RelayMode.Default`. [mdns] is separate and
+ *   always composes, because it points at no server and no preset installs it.
  */
 class EndpointConfig(
     val preset: EndpointPreset = EndpointPreset.N0,
@@ -207,6 +215,7 @@ class EndpointConfig(
     val bindAddrs: List<SocketAddr> = emptyList(),
     val externalAddrs: List<SocketAddr> = emptyList(),
     val mdns: MdnsConfig? = null,
+    val discovery: List<Discovery> = emptyList(),
 ) {
     // Copied in and copied out, for the reason `CustomAddr` copies: a `ByteArray` is mutable, and a
     // configuration that changed under the caller after being built would be a confusing bug.
@@ -608,6 +617,10 @@ class Endpoint private constructor(private val guard: NativeHandle) : AutoClosea
 //   u8      mDNS             0 absent — no mDNS at all — or 1 present, then:
 //                            u8   advertise     0 resolve only, 1 also advertise this endpoint
 //                            str? service name  i32 -1 for upstream's own default
+//   i32     discovery count  then count × one service, `Discovery.kt`'s `writeDiscovery`:
+//                            u8 0 PkarrPublisher + str? relay URL + u8 published addrs;
+//                            u8 1 PkarrResolver  + str? relay URL;
+//                            u8 2 Dns            + str? origin domain
 //
 // `addEndpointAddr` sends an `EndpointAddr` as the *whole* payload, so it is written with
 // `encodeEndpointAddr` and read by `addr::decode_endpoint_addr`, which rejects trailing bytes —
@@ -675,6 +688,13 @@ private fun encodeBindConfig(config: EndpointConfig): ByteArray {
         w.bool(mdns.advertise)
         w.optString(mdns.serviceName)
     }
+
+    // Appended after the mDNS record, because the payload is positional and a field can only ever
+    // be added at the end. A counted sequence rather than an optional record: an empty list and an
+    // absent one mean the same thing here — leave the preset's services alone — so there is nothing
+    // for a presence byte to distinguish.
+    w.i32(config.discovery.size)
+    for (service in config.discovery) w.writeDiscovery(service)
 
     return w.finish()
 }
