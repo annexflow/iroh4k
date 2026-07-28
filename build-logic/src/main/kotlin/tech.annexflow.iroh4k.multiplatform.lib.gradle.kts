@@ -31,7 +31,18 @@ extensions.configure<KotlinMultiplatformExtension> {
         Pair("jvm") {
             jvm {
                 compilerOptions {
-                    jvmTarget.set(JvmTarget.JVM_21)
+                    // Java 11 because nothing here needs more, and every version above it is a
+                    // consumer this library would turn away for no gain. The JVM and JNI code
+                    // reaches for `java.io.File`, `AtomicBoolean` and a class loader — the newest
+                    // of those is Java 5 — while everything genuinely modern in the binding is
+                    // Kotlin's own: coroutines, `kotlin.concurrent.atomics`, the codec.
+                    //
+                    // One thing this does *not* do is stop a future edit from calling a Java 12+
+                    // API. Without a `jvmToolchain` the compiler still sees the whole JDK it runs
+                    // on, so such a call compiles here and fails at run time on an actual Java 11.
+                    // Setting a toolchain would close that, at the cost of every contributor
+                    // needing that exact JDK or Gradle downloading it for them.
+                    jvmTarget.set(JvmTarget.JVM_11)
                 }
             }
         },
