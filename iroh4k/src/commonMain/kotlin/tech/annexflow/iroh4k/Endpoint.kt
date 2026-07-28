@@ -116,6 +116,57 @@ class RelayConfig(
 }
 
 /**
+ * Configuration for mDNS peer discovery on the local link.
+ *
+ * A value type, like [RelayConfig]: it is inert data read once, when the endpoint binds.
+ *
+ * mDNS is not part of iroh itself — it is the separate `iroh-mdns-address-lookup` crate, which no
+ * preset installs — so setting this is the only way to switch it on, and leaving
+ * [EndpointConfig.mdns] `null` is the only way to be sure an endpoint sends no multicast at all.
+ * With it configured, the endpoint both announces itself on the local link and resolves the peers
+ * announcing themselves there, which is what lets [connect] reach a LAN peer given nothing but its
+ * [EndpointId].
+ *
+ * ## Caveats worth reading before relying on it
+ *
+ * These are silent failures — the endpoint binds, discovery simply never finds anything — and
+ * upstream documents none of them:
+ *
+ * - **Android** drops multicast and broadcast packets at the Wi-Fi driver unless the app holds a
+ *   `WifiManager.MulticastLock` and declares `CHANGE_WIFI_MULTICAST_STATE` in its manifest. iroh4k
+ *   deliberately does **not** put that permission in the AAR's manifest: it is a battery cost and a
+ *   visible permission, so it is the app's call, not a library's. An app that wants mDNS on Android
+ *   has to add both itself.
+ * - **iOS and macOS apps** need Apple's `com.apple.developer.networking.multicast` entitlement to
+ *   send or receive multicast, and that entitlement is granted by request rather than by checking a
+ *   box. Without it the traffic is dropped by the OS.
+ * - **A host with no usable multicast at all** — neither IPv4 nor IPv6 — makes the discovery
+ *   service fail to start, and that failure comes out of [Endpoint.bind] as [IrohError] with
+ *   [IrohError.Code.Bind]. Asking for mDNS can therefore turn a bind that would have succeeded into
+ *   one that fails.
+ *
+ * @property advertise whether this endpoint announces its own presence. `true`, the default,
+ *   advertises and resolves; `false` makes it a listen-only resolver, which finds peers on the link
+ *   without telling them it is there.
+ * @property serviceName the mDNS service name to advertise and query under, which is what separates
+ *   one swarm from another on a shared link. `null` leaves upstream's own default, currently
+ *   `"irohv1"` — kept as "not stated" rather than spelled out here so the default stays upstream's
+ *   to change. Two endpoints only find each other if their service names match.
+ */
+class MdnsConfig(
+    val advertise: Boolean = true,
+    val serviceName: String? = null,
+) {
+    override fun equals(other: Any?): Boolean =
+        this === other || (other is MdnsConfig &&
+                other.advertise == advertise && other.serviceName == serviceName)
+
+    override fun hashCode(): Int = 31 * advertise.hashCode() + serviceName.hashCode()
+
+    override fun toString(): String = "MdnsConfig(advertise=$advertise, serviceName=$serviceName)"
+}
+
+/**
  * Everything [Endpoint.bind] can be told, as one immutable value.
  *
  * iroh's `Builder` is consumed by `bind()`, so a Kotlin builder object backed by a Rust handle
@@ -140,6 +191,13 @@ class RelayConfig(
  *   OS for a free port.
  * @property externalAddrs addresses this endpoint is directly reachable on that it cannot discover
  *   itself — a static NAT mapping or a load balancer.
+ * @property mdns whether to discover peers over mDNS on the local link. `null`, the default, means
+ *   no mDNS at all: nothing is advertised, nothing is listened for, and no multicast leaves the
+ *   host. That is not merely a default — it is the whole reason an endpoint can be offline, so an
+ *   [EndpointPreset.Minimal] endpoint with [RelayMode.Disabled] and a loopback [bindAddrs] still
+ *   touches nothing. Pass an [MdnsConfig] to switch it on, and read that type's caveats first: it
+ *   needs a manifest permission on Android and an entitlement on Apple platforms, and it can make
+ *   [Endpoint.bind] fail on a host with no usable multicast.
  */
 class EndpointConfig(
     val preset: EndpointPreset = EndpointPreset.N0,
@@ -148,6 +206,7 @@ class EndpointConfig(
     val relayMode: RelayMode? = null,
     val bindAddrs: List<SocketAddr> = emptyList(),
     val externalAddrs: List<SocketAddr> = emptyList(),
+    val mdns: MdnsConfig? = null,
 ) {
     // Copied in and copied out, for the reason `CustomAddr` copies: a `ByteArray` is mutable, and a
     // configuration that changed under the caller after being built would be a confusing bug.
@@ -259,6 +318,59 @@ class Endpoint private constructor(private val guard: NativeHandle) : AutoClosea
         w.i32(alpns.size)
         for (alpn in alpns) w.bytes(alpn)
         nativeEndpointSetAlpns(handle, w.finish())
+    }
+
+    /**
+     * Records where a *remote* endpoint can be reached, in this endpoint's own address book.
+     *
+     * This does **not** dial anything; it only files [addr] away so that a later
+     * `connect(EndpointAddr.of(addr.id), alpn)` — an id with no transports in it — has somewhere to
+     * resolve that id from. Without an entry here, and without an address lookup service configured
+     * on [EndpointConfig], such a connect has no way to find the remote and fails.
+     *
+     * Calling this twice for the same endpoint **accumulates** rather than replaces, which is
+     * upstream's own behaviour and worth knowing before relying on it: the new IP addresses are
+     * added to the ones already recorded, and only the relay URL is overwritten. So this on its own
+     * is not a way to retract an address a peer has moved off — the stale one stays in the book
+     * alongside the new one, and iroh keeps trying it. [removeEndpointAddr] is how an entry goes
+     * away.
+     *
+     * Synchronous, unlike its neighbours here, because it genuinely is: the address is inserted into
+     * a map and nothing goes on the network.
+     *
+     * @throws IrohError with [IrohError.Code.Addr] if [addr] cannot be encoded, which means it
+     *   holds a [TransportAddr.Unknown] this build cannot re-encode.
+     * @throws IrohError with [IrohError.Code.Closed] if this endpoint has been released, or was
+     *   never successfully bound.
+     */
+    fun addEndpointAddr(addr: EndpointAddr) = sync {
+        nativeEndpointAddEndpointAddr(it, encodeEndpointAddr(addr))
+    }
+
+    /**
+     * Removes what [addEndpointAddr] recorded for [id]. `true` if there was an entry to remove.
+     *
+     * The whole entry goes, not part of it: the address book holds one record per peer, keyed by
+     * id, so every transport address and the relay URL in it disappear together. Since
+     * [addEndpointAddr] accumulates, this is the only way to retract an address — remove the entry
+     * and record the address the peer moved to.
+     *
+     * What was removed is not handed back. An entry is an `EndpointInfo`, which carries more than an
+     * [EndpointAddr] — when it was last updated, and the peer's own user data — and iroh4k models
+     * neither, so the most that could be returned is a lossy half of it. Whether there was an entry
+     * at all is the part a caller can act on.
+     *
+     * Removing an entry does not close connections already established with that peer, and does not
+     * un-learn the path a live connection is using; it only takes away what a *later*
+     * `connect(EndpointAddr.of(id), alpn)` would have resolved the id from.
+     *
+     * Synchronous, like [addEndpointAddr] and for the same reason.
+     *
+     * @throws IrohError with [IrohError.Code.Closed] if this endpoint has been released, or was
+     *   never successfully bound.
+     */
+    fun removeEndpointAddr(id: EndpointId): Boolean = sync {
+        nativeEndpointRemoveEndpointAddr(it, id.toBytes())
     }
 
     /**
@@ -488,6 +600,19 @@ class Endpoint private constructor(private val guard: NativeHandle) : AutoClosea
 // the two must be changed together. The transport-address tags are the same numbers `Addr.kt` uses,
 // deliberately: an `EndpointAddr` has one payload shape across the binding, whether it came from a
 // ticket or from `Endpoint.addr()`.
+//
+// The bind configuration is *positional* — no field ids, no version — so a new field can only ever
+// be appended, and only in the same change as the Rust reader. The tail of it currently reads:
+//
+//   i32     external count   then count × str (canonical socket address)
+//   u8      mDNS             0 absent — no mDNS at all — or 1 present, then:
+//                            u8   advertise     0 resolve only, 1 also advertise this endpoint
+//                            str? service name  i32 -1 for upstream's own default
+//
+// `addEndpointAddr` sends an `EndpointAddr` as the *whole* payload, so it is written with
+// `encodeEndpointAddr` and read by `addr::decode_endpoint_addr`, which rejects trailing bytes —
+// not the inline `writeEndpointAddr`/`read_endpoint_addr` pair, which is for an address embedded in
+// a larger message and would accept a wrong-layout payload here without complaint.
 
 private const val ADDR_TAG_RELAY = 0
 private const val ADDR_TAG_IP = 1
@@ -496,6 +621,7 @@ private const val ADDR_TAG_UNKNOWN = 3
 
 /** Discriminators for an optional record. */
 private const val ABSENT = 0
+private const val PRESENT = 1
 
 /** Ordinals of the relay-mode tag inside a bind configuration. */
 private const val RELAY_MODE_UNSET = 0
@@ -537,6 +663,18 @@ private fun encodeBindConfig(config: EndpointConfig): ByteArray {
 
     w.i32(config.externalAddrs.size)
     for (addr in config.externalAddrs) w.string(addr.toString())
+
+    // An optional *record* rather than a tag with an "unset" value, as `relayMode` has: there is no
+    // preset choice to leave alone here, because no iroh preset configures mDNS at all. Absent
+    // means the discovery service is never created, which is what keeps an endpoint off the link.
+    val mdns = config.mdns
+    if (mdns == null) {
+        w.u8(ABSENT)
+    } else {
+        w.u8(PRESENT)
+        w.bool(mdns.advertise)
+        w.optString(mdns.serviceName)
+    }
 
     return w.finish()
 }
@@ -599,6 +737,10 @@ internal expect fun nativeEndpointAddr(handle: Long): ByteArray
 internal expect fun nativeEndpointSecretKey(handle: Long): ByteArray
 
 internal expect fun nativeEndpointSetAlpns(handle: Long, payload: ByteArray)
+
+internal expect fun nativeEndpointAddEndpointAddr(handle: Long, payload: ByteArray)
+
+internal expect fun nativeEndpointRemoveEndpointAddr(handle: Long, id: ByteArray): Boolean
 
 internal expect fun nativeEndpointBoundSockets(handle: Long): ByteArray
 

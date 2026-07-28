@@ -2,6 +2,7 @@
 
 package tech.annexflow.iroh4k
 
+import iroh4k.ffi.iroh4k_endpoint_add_endpoint_addr
 import iroh4k.ffi.iroh4k_endpoint_add_external_addr
 import iroh4k.ffi.iroh4k_endpoint_addr
 import iroh4k.ffi.iroh4k_endpoint_bind
@@ -15,6 +16,7 @@ import iroh4k.ffi.iroh4k_endpoint_network_change
 import iroh4k.ffi.iroh4k_endpoint_new
 import iroh4k.ffi.iroh4k_endpoint_online
 import iroh4k.ffi.iroh4k_endpoint_remote_addr
+import iroh4k.ffi.iroh4k_endpoint_remove_endpoint_addr
 import iroh4k.ffi.iroh4k_endpoint_remove_external_addr
 import iroh4k.ffi.iroh4k_endpoint_remove_relay
 import iroh4k.ffi.iroh4k_endpoint_secret_key
@@ -102,6 +104,17 @@ internal actual fun nativeEndpointSecretKey(handle: Long): ByteArray =
 internal actual fun nativeEndpointSetAlpns(handle: Long, payload: ByteArray) {
     payload.usePtr { ptr, len -> iroh4k_endpoint_set_alpns(handle.asHandle(), ptr, len) }.orThrow()
 }
+
+internal actual fun nativeEndpointAddEndpointAddr(handle: Long, payload: ByteArray) {
+    payload.usePtr { ptr, len ->
+        iroh4k_endpoint_add_endpoint_addr(handle.asHandle(), ptr, len)
+    }.orThrow()
+}
+
+internal actual fun nativeEndpointRemoveEndpointAddr(handle: Long, id: ByteArray): Boolean =
+    id.usePtr { ptr, len ->
+        iroh4k_endpoint_remove_endpoint_addr(handle.asHandle(), ptr, len)
+    }.longOrThrow() != 0L
 
 internal actual fun nativeEndpointBoundSockets(handle: Long): ByteArray =
     iroh4k_endpoint_bound_sockets(handle.asHandle()).bytesOrThrow()

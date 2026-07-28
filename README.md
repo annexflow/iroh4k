@@ -27,7 +27,7 @@ macOS, Linux or Windows Kotlin/Native target, and there cannot be one without a 
 strategy. iroh4k is that different strategy: one Rust crate, built twice — as a `staticlib` linked
 into Kotlin/Native through cinterop, and as a `cdylib` reached from the JVM and Android through
 hand-written JNI. Both facades call the same Rust core through the same binary payload codec, and
-the same 205 test bodies run against each of them.
+the same 211 shared test bodies run against each of them.
 
 Three consequences worth stating plainly:
 
@@ -124,8 +124,8 @@ the second is legal and leaves the peer to work it out from a timeout.
 
 | Target | Status |
 | --- | --- |
-| `macosArm64`, `jvm` | Tested. 410 test bodies, 205 per facade, run on every change |
-| `android` (AAR) | Tested on the host under Robolectric — the same 205 bodies `jvmTest` runs — plus 5 instrumented tests on an emulator, which are the only ones that exercise the packaged `.so` |
+| `macosArm64`, `jvm` | Tested. 422 test bodies, 211 per facade, run on every change |
+| `android` (AAR) | Tested on the host under Robolectric: the same 211 shared bodies `jvmTest` runs, **plus 6 Android-only tests** that have no shared body because what they cover — `Iroh4kAndroid.multicastLock` over `WifiManager` — exists on no other target. 217 in all. Plus 6 instrumented tests, which are the only ones that exercise the packaged `.so` — CI runs them on an emulator, and they have also been run on a physical Galaxy A22 (Android 13, `arm64-v8a`) and on an API 37 emulator with 16 KB pages |
 | `iosArm64`, `iosSimulatorArm64` | Compiles and links; cinterop verified in CI |
 | `linuxX64` | Test suite is configured in CI on `ubuntu-latest`; not verified locally |
 | `linuxArm64`, `mingwX64` | Cross-compiled and assembled in CI; never executed |
@@ -138,7 +138,9 @@ Android comes in two unrelated shapes, and an app wants the first one.
 and `x86_64` — because the facade passes every native handle as a `jlong` and there is no 32-bit
 story to go with it, and its `minSdk` is 26, which a consuming app has to meet. The Robolectric host
 tests in `src/androidHostTest` run the shared `Common*Tests` bodies against that facade on the build
-machine's own JVM, loading the host library rather than the packaged `.so`.
+machine's own JVM, loading the host library rather than the packaged `.so`, and one class there —
+`AndroidMulticastLockTests` — is not a delegator at all, because `androidMain` has a little surface
+of its own that no shared body could exercise.
 
 Two things the AAR does for a consuming app, both of which it would otherwise crash without.
 
@@ -154,6 +156,25 @@ It also **declares the permissions it needs** — `INTERNET` and `ACCESS_NETWORK
 Android gates socket creation on the first at the kernel level, and a bind without it fails as
 `could not bind an endpoint: Failed to bind sockets` with nothing naming the cause. Both are
 install-time permissions with no runtime prompt.
+
+What the AAR does **not** declare is `CHANGE_WIFI_MULTICAST_STATE`, and that is a decision rather
+than an omission. Android's Wi-Fi stack drops multicast and broadcast frames not addressed to this
+device, so `EndpointConfig.mdns` discovers nothing until the app holds a `WifiManager.MulticastLock`
+— and there is no error when it does not, only silence. `Iroh4kAndroid.multicastLock(context)`
+acquires one and returns an `AutoCloseable`:
+
+```kotlin
+Iroh4kAndroid.multicastLock(context).use {
+    Endpoint.bind(EndpointConfig(mdns = MdnsConfig())).use { endpoint -> /* discover, connect */ }
+}
+```
+
+The permission has to be in the app's own manifest. Unlike the two above, iroh4k works completely
+without it — mDNS is off by default — while a Wi-Fi permission is visible in the merged manifest and
+in a store listing, and holding the lock costs battery for as long as it is held. That makes it the
+app's call, not a library's. Without the permission the call throws `SecurityException` naming it,
+which is the one part of mDNS on Android that reports itself; hold the lock only while discovery
+actually matters, not for the process lifetime. `Iroh4kAndroid.multicastLock` documents both in full.
 
 `androidNativeArm64`/`androidNativeX64` are **Kotlin/Native** targets on the cinterop path, for
 Kotlin/Native binaries that happen to run on Android. They have no `JavaVM` to install, so anything
@@ -221,6 +242,38 @@ What is honestly incomplete:
   endpoint, liveness, metric push, network reports — are covered only against the failure path they
   take when the service cannot be reached. Credential handling, configuration and lifecycle are
   tested properly; the successful round trips are not tested at all.
+
+- **mDNS discovery is wired but never exercised by a test.** `EndpointConfig.mdns` builds an
+  `iroh-mdns-address-lookup` service into the endpoint, and it is the one option in the binding that
+  puts multicast on the local link. That is precisely why no test binds with it set: the suite is
+  hermetic by construction, and a body that joined a multicast group would stop being so — and would
+  fail outright on a runner with no usable IPv4 or IPv6 multicast, since that failure comes out of
+  `Endpoint.bind` rather than being a silent no-op. What the suite covers is therefore the value type
+  and the encoding, and nothing beyond them.
+
+  It has been run by hand instead, which is the only reason anything here claims it works. First on
+  one macOS host, two endpoints in one process, `Minimal` with relays off, a unique service name,
+  dialling
+  `EndpointAddr.of(id)` with no transport addresses at all. The connection came up in 715 ms, and
+  iroh's own debug log shows the whole chain — the query on the wire, the response, the address
+  entering the client's book, then the handshake over the LAN interface rather than loopback. Most of
+  that 715 ms is `swarm-discovery`'s initial announcement jitter, so treat sub-second as the floor
+  rather than the expectation. `advertise = false` on both ends found nothing, as documented.
+
+  It has since been run across two *separate* hosts, which is the part a single machine cannot
+  stand in for: a macOS laptop on 5 GHz and a Galaxy A22 on 2.4 GHz, different BSSIDs bridged onto
+  one `/24`, so the multicast had to cross between two radios rather than loop back through one
+  kernel. Both directions resolved an id with no transport addresses in it — Mac dialling the phone
+  in 127 ms and 435 ms on two runs, phone dialling the Mac in 551 ms, with round-trip times of 5 to
+  23 ms, which is Wi-Fi and not loopback. The phone held `Iroh4kAndroid.multicastLock` throughout. A
+  packet capture taken outside iroh entirely — a plain socket joined to `224.0.0.251:5353` — saw the
+  service name cross the wire eleven times, and the discovered endpoint id in iroh's log matches the
+  phone's, so nothing here rests on the binding's own account of itself.
+
+  What that still does not establish is that the multicast lock is *necessary*, only that it was
+  held: proving necessity needs a run with the permission granted and the lock deliberately not
+  taken, and nobody has done one. Read `MdnsConfig`'s own documentation before relying on any of
+  this — it also needs an entitlement on Apple platforms, which nothing here has exercised.
 
 - **An IPv6 zone id does not survive a ticket.** `SocketAddr.parse("[fe80::1%3]:4433")` keeps its
   zone, because Rust's parser does, but iroh's postcard encoding of a `SocketAddr` has nowhere to put
