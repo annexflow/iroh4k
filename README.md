@@ -125,7 +125,7 @@ the second is legal and leaves the peer to work it out from a timeout.
 | Target | Status |
 | --- | --- |
 | `macosArm64`, `jvm` | Tested. 422 test bodies, 211 per facade, run on every change |
-| `android` (AAR) | Tested on the host under Robolectric: the same 211 shared bodies `jvmTest` runs, **plus 6 Android-only tests** that have no shared body because what they cover — `Iroh4kAndroid.multicastLock` over `WifiManager` — exists on no other target. 217 in all. Plus 5 instrumented tests on an emulator, which are the only ones that exercise the packaged `.so` |
+| `android` (AAR) | Tested on the host under Robolectric: the same 211 shared bodies `jvmTest` runs, **plus 6 Android-only tests** that have no shared body because what they cover — `Iroh4kAndroid.multicastLock` over `WifiManager` — exists on no other target. 217 in all. Plus 6 instrumented tests, which are the only ones that exercise the packaged `.so` — CI runs them on an emulator, and they have also been run on a physical Galaxy A22 (Android 13, `arm64-v8a`) and on an API 37 emulator with 16 KB pages |
 | `iosArm64`, `iosSimulatorArm64` | Compiles and links; cinterop verified in CI |
 | `linuxX64` | Test suite is configured in CI on `ubuntu-latest`; not verified locally |
 | `linuxArm64`, `mingwX64` | Cross-compiled and assembled in CI; never executed |

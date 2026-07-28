@@ -1,8 +1,10 @@
 package tech.annexflow.iroh4k
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
@@ -141,6 +143,35 @@ class DeviceSmokeTests {
                 server.shutdown()
             }
         }
+    }
+
+    /**
+     * `Iroh4kAndroid.multicastLock` refuses, comprehensibly, when the app has not declared
+     * `CHANGE_WIFI_MULTICAST_STATE`.
+     *
+     * This test exists because that APK is one: the library's manifest declares `INTERNET` and
+     * `ACCESS_NETWORK_STATE` and deliberately stops there, so an instrumented run is an app in
+     * exactly the position of a consumer who reached for mDNS without reading the documentation.
+     * Nothing on a host can stand in for it — Robolectric's `ShadowWifiManager` enforces no
+     * permission at all, so under the host tests the call succeeds either way.
+     *
+     * What is being pinned is that the failure is *loud*. Everything else about mDNS on Android
+     * fails silently: without the lock, announcements go out and no answer ever comes back, with no
+     * exception and no log line. The permission is the one part that reports itself, and the method
+     * documents precisely where the `SecurityException` comes from — `acquire()`'s binder call into
+     * `WifiServiceImpl`, not `createMulticastLock` — so if a vendor's framework ever swallowed it
+     * instead, that documentation would be wrong and this is what would say so.
+     */
+    @Test
+    fun multicastLockRefusesWithoutTheDeclaredPermission() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val error = assertFailsWith<SecurityException> { Iroh4kAndroid.multicastLock(context) }
+        // The platform names the permission in the message, which is what makes this the one
+        // failure in the Android mDNS story a developer can diagnose from the stack trace alone.
+        assertTrue(
+            error.message?.contains("CHANGE_WIFI_MULTICAST_STATE") == true,
+            "SecurityException did not name the permission: ${error.message}",
+        )
     }
 
     private companion object {

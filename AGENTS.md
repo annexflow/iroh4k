@@ -221,7 +221,11 @@ callback into application code on the back of that VM being available.
 - **`androidDeviceTest` is deliberately not a fourth delegator.** It runs on a device or emulator
   (`./gradlew :iroh4k:connectedAndroidDeviceTest -Ptargets=jvm,android`) and covers only what a
   host cannot: `System.loadLibrary` on the packaged `.so`, ART instead of HotSpot, the manifest's
-  permissions, and `androidx.startup` having installed the Android context. It cannot run the
+  permissions — including one the manifest deliberately does **not** declare, since
+  `multicastLockRefusesWithoutTheDeclaredPermission` asserts the `SecurityException` an app gets for
+  reaching for `Iroh4kAndroid.multicastLock` without `CHANGE_WIFI_MULTICAST_STATE`, which
+  Robolectric's shadow cannot produce because it enforces no permission at all — and
+  `androidx.startup` having installed the Android context. It cannot run the
   shared bodies at all — Kotlin turns a suspend lambda inside ``fun `a name with spaces`()`` into a
   class whose name contains spaces, which DEX rejects below version 040, i.e. below `minSdk 35`.
   That is why its methods are named without backticks and why the compilation is left out of the
