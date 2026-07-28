@@ -848,4 +848,32 @@ class CommonEndpointTests {
         assertThat(error.code).isEqualTo(IrohError.Code.Discovery)
         assertThat(error.message!!).contains("not a url")
     }
+
+    fun `the address book survives clearing the preset's lookup`() = Loopback.bounded {
+        Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+            // A non-empty list, so `configure` takes the clearing path. The URL parses and reaches
+            // nothing: port 1 on loopback is refused locally.
+            val client = EndpointConfig(
+                preset = EndpointPreset.Minimal,
+                relayMode = RelayMode.Disabled,
+                bindAddrs = listOf(SocketAddr.parse("127.0.0.1:0")),
+                discovery = listOf(Discovery.PkarrResolver("https://127.0.0.1:1/pkarr")),
+            )
+
+            Endpoint.bind(client).use { endpoint ->
+                endpoint.addEndpointAddr(server.addr())
+
+                // Resolving an id with no transports in it is only possible out of the address
+                // book, so this dial passing is the proof that clearing the preset's services left
+                // iroh4k's own `MemoryLookup` in place.
+                val accepted = async { server.acceptOne() }
+                endpoint.connect(EndpointAddr.of(server.id), Loopback.alpn).use { connection ->
+                    accepted.await().use { served ->
+                        assertThat(connection.remoteId()).isEqualTo(server.id)
+                        assertThat(served.remoteId()).isEqualTo(endpoint.id)
+                    }
+                }
+            }
+        }
+    }
 }

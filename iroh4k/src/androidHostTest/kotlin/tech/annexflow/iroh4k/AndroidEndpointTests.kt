@@ -143,4 +143,8 @@ class AndroidEndpointTests {
     @Test
     fun `a malformed discovery URL is refused`() =
         runner.`a malformed discovery URL is refused`()
+
+    @Test
+    fun `the address book survives clearing the preset's lookup`() =
+        runner.`the address book survives clearing the preset's lookup`()
 }

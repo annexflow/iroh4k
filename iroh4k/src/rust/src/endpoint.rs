@@ -499,6 +499,21 @@ fn builder_for(preset: i32) -> Outcome<Builder> {
 fn configure(config: BindConfig, lookup: MemoryLookup) -> Outcome<Builder> {
     let mut builder = builder_for(config.preset)?;
 
+    // Before the address book, always. A non-empty list means the caller named the services they
+    // want, and `EndpointConfig` promises an explicit choice beats the preset's — the same contract
+    // `bindAddrs` keeps when it clears iroh's default sockets rather than adding to them.
+    //
+    // Appending instead would be the quieter failure: `preset` defaults to `N0`, so
+    // `EndpointConfig(discovery = [PkarrPublisher(mine)])` would go on publishing this endpoint's
+    // addresses to n0 as well, which nobody would ever notice.
+    //
+    // This clears only what the preset registered. iroh4k's own `MemoryLookup` is registered below,
+    // after the clear, so `addEndpointAddr` keeps working under every configuration — an ordering
+    // invariant, not a property of the types, which is why a test pins it.
+    if !config.discovery.is_empty() {
+        builder = builder.clear_address_lookup();
+    }
+
     // Registered unconditionally, for every preset, because `Endpoint.addEndpointAddr` has
     // nowhere else to put an address: a bound `Endpoint` exposes only the erased
     // `AddressLookupServices`, so the sole way to still hold a typed `MemoryLookup` afterwards is
