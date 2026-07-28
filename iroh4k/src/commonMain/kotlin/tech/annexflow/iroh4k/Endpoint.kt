@@ -198,6 +198,14 @@ class MdnsConfig(
  *   touches nothing. Pass an [MdnsConfig] to switch it on, and read that type's caveats first: it
  *   needs a manifest permission on Android and an entitlement on Apple platforms, and it can make
  *   [Endpoint.bind] fail on a host with no usable multicast.
+ * @property discovery the address lookup services this endpoint uses. Empty, the default, means
+ *   "I did not say", leaving whatever [preset] configured — n0's pkarr and DNS under
+ *   [EndpointPreset.N0], nothing at all under [EndpointPreset.Minimal]. A **non-empty** list
+ *   replaces the preset's services rather than adding to them, so it is how an app points discovery
+ *   at its own infrastructure. Note the asymmetry that follows: "use the preset's relays but no
+ *   discovery at all" is not expressible here, because an empty list already means something else —
+ *   spell that [EndpointPreset.Minimal] with `relayMode = RelayMode.Default`. [mdns] is separate and
+ *   always composes, because it points at no server and no preset installs it.
  */
 class EndpointConfig(
     val preset: EndpointPreset = EndpointPreset.N0,
@@ -207,6 +215,7 @@ class EndpointConfig(
     val bindAddrs: List<SocketAddr> = emptyList(),
     val externalAddrs: List<SocketAddr> = emptyList(),
     val mdns: MdnsConfig? = null,
+    val discovery: List<Discovery> = emptyList(),
 ) {
     // Copied in and copied out, for the reason `CustomAddr` copies: a `ByteArray` is mutable, and a
     // configuration that changed under the caller after being built would be a confusing bug.

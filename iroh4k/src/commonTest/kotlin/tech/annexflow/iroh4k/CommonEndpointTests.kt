@@ -3,6 +3,7 @@ package tech.annexflow.iroh4k
 import assertk.assertThat
 import assertk.assertions.contains
 import assertk.assertions.hasSize
+import assertk.assertions.isEmpty
 import assertk.assertions.isEqualTo
 import assertk.assertions.isFalse
 import assertk.assertions.isGreaterThan
@@ -767,5 +768,42 @@ class CommonEndpointTests {
         assertThat(MdnsConfig().toString()).isEqualTo("MdnsConfig(advertise=true, serviceName=null)")
         assertThat(MdnsConfig(false, "swarm").toString())
             .isEqualTo("MdnsConfig(advertise=false, serviceName=swarm)")
+    }
+
+    fun `discovery services are values`() {
+        // Defaults: an endpoint says nothing about discovery unless asked, which is what keeps the
+        // preset's own services in place — and what keeps this suite offline.
+        assertThat(EndpointConfig().discovery).isEmpty()
+
+        // Upstream publishes relay addresses only, to avoid handing IP addresses to a public pkarr
+        // server. iroh4k keeps that default and lets a self-hoster override it.
+        assertThat(Discovery.PkarrPublisher("https://pkarr.example/pkarr").published)
+            .isEqualTo(PublishedAddrs.RelayOnly)
+
+        // `n0()` is "not stated", not a copy of n0's URL: the choice, including upstream's own
+        // prod/staging switch, stays upstream's to make at bind time.
+        assertThat(Discovery.PkarrPublisher.n0().relayUrl).isNull()
+        assertThat(Discovery.PkarrResolver.n0().relayUrl).isNull()
+        assertThat(Discovery.Dns.n0().originDomain).isNull()
+
+        assertThat(Discovery.PkarrResolver("https://a.example/pkarr"))
+            .isEqualTo(Discovery.PkarrResolver("https://a.example/pkarr"))
+        assertThat(Discovery.PkarrResolver("https://a.example/pkarr").hashCode())
+            .isEqualTo(Discovery.PkarrResolver("https://a.example/pkarr").hashCode())
+        assertThat(Discovery.PkarrResolver("https://a.example/pkarr"))
+            .isNotEqualTo(Discovery.PkarrResolver("https://b.example/pkarr"))
+
+        // A stated URL is not the same request as an unstated one, even if it happens to name the
+        // same server today.
+        assertThat(Discovery.Dns("dns.iroh.link")).isNotEqualTo(Discovery.Dns.n0())
+
+        // Both fields participate in equality, so an override is never silently equal to a default.
+        assertThat(Discovery.PkarrPublisher("https://a.example/pkarr"))
+            .isNotEqualTo(Discovery.PkarrPublisher("https://a.example/pkarr", PublishedAddrs.IpOnly))
+
+        assertThat(Discovery.Dns("dns.example").toString())
+            .isEqualTo("Discovery.Dns(originDomain=dns.example)")
+        assertThat(Discovery.PkarrResolver.n0().toString())
+            .isEqualTo("Discovery.PkarrResolver(relayUrl=null)")
     }
 }

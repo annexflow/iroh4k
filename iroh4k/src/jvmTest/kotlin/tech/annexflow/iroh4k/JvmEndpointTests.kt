@@ -121,4 +121,8 @@ class JvmEndpointTests {
     @Test
     fun `mdns config is a value and is absent unless asked for`() =
         runner.`mdns config is a value and is absent unless asked for`()
+
+    @Test
+    fun `discovery services are values`() =
+        runner.`discovery services are values`()
 }
