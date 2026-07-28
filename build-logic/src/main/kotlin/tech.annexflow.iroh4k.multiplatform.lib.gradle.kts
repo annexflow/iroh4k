@@ -37,12 +37,20 @@ extensions.configure<KotlinMultiplatformExtension> {
                     // of those is Java 5 — while everything genuinely modern in the binding is
                     // Kotlin's own: coroutines, `kotlin.concurrent.atomics`, the codec.
                     //
-                    // One thing this does *not* do is stop a future edit from calling a Java 12+
-                    // API. Without a `jvmToolchain` the compiler still sees the whole JDK it runs
-                    // on, so such a call compiles here and fails at run time on an actual Java 11.
-                    // Setting a toolchain would close that, at the cost of every contributor
-                    // needing that exact JDK or Gradle downloading it for them.
                     jvmTarget.set(JvmTarget.JVM_11)
+
+                    // `jvmTarget` alone only lowers the class-file version; the compiler still sees
+                    // every API of whatever JDK the build runs on, so a call to a Java 12+ method
+                    // would compile here and fail at run time on the Java 11 a consumer was
+                    // promised. This is javac's `--release`: it restricts the visible API surface
+                    // to 11 as well, which is the half that actually keeps the promise.
+                    //
+                    // A `jvmToolchain(11)` would do the same and pin the compiler itself, but it
+                    // pins the *whole* build: Robolectric refuses to create a sandbox for Android
+                    // SDK 34 on anything below Java 17, so a toolchain of 11 silently costs the
+                    // entire `androidHostTest` suite. This flag restricts the API without moving
+                    // the JDK anything runs on, so those tests keep working.
+                    freeCompilerArgs.add("-Xjdk-release=11")
                 }
             }
         },
