@@ -251,18 +251,29 @@ What is honestly incomplete:
   `Endpoint.bind` rather than being a silent no-op. What the suite covers is therefore the value type
   and the encoding, and nothing beyond them.
 
-  It has been run by hand once, which is the only reason anything here claims it works: two endpoints
-  on one macOS host, `Minimal` with relays off, a unique service name, dialling
+  It has been run by hand instead, which is the only reason anything here claims it works. First on
+  one macOS host, two endpoints in one process, `Minimal` with relays off, a unique service name,
+  dialling
   `EndpointAddr.of(id)` with no transport addresses at all. The connection came up in 715 ms, and
   iroh's own debug log shows the whole chain — the query on the wire, the response, the address
   entering the client's book, then the handshake over the LAN interface rather than loopback. Most of
   that 715 ms is `swarm-discovery`'s initial announcement jitter, so treat sub-second as the floor
-  rather than the expectation. `advertise = false` on both ends found nothing, as documented. What is
-  still unproven is two *separate* hosts: those packets looped back through one machine's stack
-  instead of crossing a switch. Read `MdnsConfig`'s own documentation before relying on any of it —
-  it also needs a manifest permission on Android and an entitlement on Apple platforms.
-  `Iroh4kAndroid.multicastLock` covers the Android half of that; the six tests it has verify the
-  lock's own acquire/release contract under Robolectric and nothing about multicast reaching a wire.
+  rather than the expectation. `advertise = false` on both ends found nothing, as documented.
+
+  It has since been run across two *separate* hosts, which is the part a single machine cannot
+  stand in for: a macOS laptop on 5 GHz and a Galaxy A22 on 2.4 GHz, different BSSIDs bridged onto
+  one `/24`, so the multicast had to cross between two radios rather than loop back through one
+  kernel. Both directions resolved an id with no transport addresses in it — Mac dialling the phone
+  in 127 ms and 435 ms on two runs, phone dialling the Mac in 551 ms, with round-trip times of 5 to
+  23 ms, which is Wi-Fi and not loopback. The phone held `Iroh4kAndroid.multicastLock` throughout. A
+  packet capture taken outside iroh entirely — a plain socket joined to `224.0.0.251:5353` — saw the
+  service name cross the wire eleven times, and the discovered endpoint id in iroh's log matches the
+  phone's, so nothing here rests on the binding's own account of itself.
+
+  What that still does not establish is that the multicast lock is *necessary*, only that it was
+  held: proving necessity needs a run with the permission granted and the lock deliberately not
+  taken, and nobody has done one. Read `MdnsConfig`'s own documentation before relying on any of
+  this — it also needs an entitlement on Apple platforms, which nothing here has exercised.
 
 - **An IPv6 zone id does not survive a ticket.** `SocketAddr.parse("[fe80::1%3]:4433")` keeps its
   zone, because Rust's parser does, but iroh's postcard encoding of a `SocketAddr` has nowhere to put
