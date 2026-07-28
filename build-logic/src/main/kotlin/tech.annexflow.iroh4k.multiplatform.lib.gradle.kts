@@ -26,6 +26,14 @@ plugins {
 }
 
 extensions.configure<KotlinMultiplatformExtension> {
+    // Pins the compiler itself, so the build does not depend on whichever JDK a contributor happens
+    // to have installed. 17 rather than the 11 this library targets, because a toolchain moves the
+    // JDK *everything* runs on, tests included, and Robolectric refuses to create a sandbox for
+    // Android SDK 34 on anything below 17 — a toolchain of 11 costs the whole `androidHostTest`
+    // suite. The gap between compiling on 17 and promising 11 is closed by `-Xjdk-release=11`
+    // below, not by the toolchain.
+    jvmToolchain(17)
+
     val targets = Utils.targetsOf(project)
     val availableTargets = mapOf(
         Pair("jvm") {
