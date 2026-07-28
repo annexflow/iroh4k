@@ -3,10 +3,6 @@
 Kotlin Multiplatform bindings for [iroh](https://github.com/n0-computer/iroh): peer-to-peer QUIC
 connections dialled by public key.
 
-```kotlin
-implementation("tech.annexflow.iroh4k:iroh4k:0.1.0")
-```
-
 You dial a peer by its 32-byte public key instead of an address, and iroh works out how to get
 there — directly if it can, hole punched if it must, through a relay if it cannot. What you get back
 is a QUIC connection: authenticated, encrypted, as many streams as you want, and able to survive the
@@ -15,13 +11,29 @@ network changing underneath it.
 iroh4k puts that behind `suspend` functions, `Flow`s and `AutoCloseable` handles, on JVM, Android,
 iOS, macOS, Linux and Windows.
 
+> **Not published yet.** There is no release on Maven Central, so there is nothing to add to your
+> build file today — the first one will be `tech.annexflow.iroh4k:iroh4k:0.1.0`. Until then, clone
+> and [build from source](#building-from-source), which needs a Rust toolchain.
+
+**If your app is JVM-only, look at [iroh-ffi](https://github.com/n0-computer/iroh-ffi) first.** It is
+upstream's own binding, maintained by the people who write iroh. iroh4k exists for the case it does
+not cover — Kotlin Multiplatform — and [says why](#how-this-relates-to-iroh-ffi) further down.
+
+Requirements: **Java 11** or newer for the JVM, **Android API 26** (8.0) or newer, Kotlin 2.x. The
+JVM artifact carries a native library per host, and the ones it ships are macOS on Apple silicon,
+Linux x64 and arm64, and Windows x64 — **an Intel Mac is not covered**, and neither is a musl distro
+like Alpine.
+
 ## Quickstart
 
 Two endpoints in one process: one serves an echo protocol, the other dials it and gets its bytes
 back. It is lifted from [`examples/echo`](examples/echo), which runs on both the JVM and
-Kotlin/Native — try it with `./gradlew :examples:echo:jvmRun`.
+Kotlin/Native — try it with `./gradlew :examples:echo:jvmRun`. That builds the Rust crate first, so
+it needs a Rust toolchain and takes a few minutes the first time; it prints `hello` and exits.
 
 Everything is suspending, so it lives in a coroutine; the example's `main` is a `runBlocking { }`.
+`connect`, `openBi` and `acceptBi` are extension functions rather than members, so your IDE will want
+to import them explicitly — `Echo.kt` shows the full set.
 
 ```kotlin
 val alpn = "iroh4k/echo/0".encodeToByteArray()
@@ -190,6 +202,12 @@ cause. Both are install-time permissions with no runtime prompt.
 The AAR is 64-bit only — `arm64-v8a` and `x86_64` — because the facade passes every native handle as
 a `jlong`. `minSdk` is 26.
 
+**Budget for the size.** The native library is about **11 MB for `arm64-v8a` and 13 MB for
+`x86_64`** — it contains a QUIC stack, a TLS stack and a tokio runtime, and it is the same code the
+desktop targets link. A universal APK carries both; an App Bundle ships one per device, so what a
+user downloads is the smaller number. If that is too much for your app, this is the thing to check
+before anything else in this README.
+
 ### mDNS needs one permission you have to add
 
 Android's Wi-Fi stack drops multicast frames not addressed to the device, so `EndpointConfig.mdns`
@@ -218,6 +236,18 @@ other.
 
 `Endpoint.networkChange()` exists for Android specifically: the OS reports interface changes to Java
 and not to native code, so call it from your own `ConnectivityManager` callback.
+
+## Apple platforms
+
+There is no counterpart to the Android setup above: nothing needs installing, no permission is
+declared, and the cinterop path links the Rust static library straight into your binary. macOS on
+Apple silicon is one of the two fully tested targets. iOS device and simulator compile and link, and
+CI verifies the cinterop, but no test has ever executed on either — if you ship on iOS, that is the
+gap to know about.
+
+One caveat if you want `EndpointConfig.mdns`: Apple gates multicast behind the
+`com.apple.developer.networking.multicast` entitlement, which is granted by request rather than by
+ticking a box. Nothing here has exercised that path.
 
 ## Building from source
 
@@ -258,18 +288,25 @@ as is. Without `android` in `-Ptargets`, the Android Gradle plugin is never appl
 
 Version `0.1.0-SNAPSHOT`, targeting **iroh 1.0.3**. Dual licensed Apache-2.0 or MIT.
 
-Four things are worth knowing before you rely on them, and
-[`STATUS.md`](STATUS.md) has the evidence for each:
+The transport itself — endpoints, connections, streams, datagrams, the router — is covered by the
+test suite on every change. Four things around it are in different states, and the difference is
+worth seeing rather than lumping them together. [`STATUS.md`](STATUS.md) has the evidence for each.
 
-- **mDNS** works — measured by hand across two hosts, including a packet capture taken outside iroh —
-  but no automated test covers it, because a test that joined a multicast group would stop the suite
-  being hermetic.
-- **Self-hosted pkarr and DNS** are wired and encoded, but no pkarr relay or DNS zone was ever stood
-  up, so nothing proves a peer resolved through them.
-- **The services domain** is tested only against its failure path; the successful round trips to
-  services.iroh.computer are not covered.
-- **No 0-RTT and no per-connection transport config** yet, and an IPv6 zone id does not survive an
-  `EndpointTicket`.
+**Verified by hand, not in CI.** mDNS discovery works: measured across two hosts on different Wi-Fi
+radios, with a packet capture taken outside iroh to confirm it. No automated test covers it, because
+a test that joined a multicast group would stop the suite being hermetic — that is a deliberate
+trade, not an oversight.
+
+**Not verified against a real server.** Self-hosted pkarr and DNS are wired, encoded and tested up to
+the point of binding, but no pkarr relay and no DNS zone was ever stood up. Likewise the services
+domain is tested only against its failure path; the successful round trips to services.iroh.computer
+are not covered.
+
+**Not implemented.** No 0-RTT and no per-connection transport configuration. Both are upstream
+features that have a place waiting for them.
+
+**Known and pinned.** An IPv6 zone id does not survive an `EndpointTicket`, because upstream's
+encoding has nowhere to put one. A test holds that behaviour in place so it cannot regress quietly.
 
 ## License
 
