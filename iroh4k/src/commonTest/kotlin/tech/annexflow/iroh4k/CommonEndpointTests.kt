@@ -14,6 +14,7 @@ import kotlin.test.assertFailsWith
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.measureTime
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
@@ -33,8 +34,10 @@ import kotlinx.coroutines.withTimeoutOrNull
  * loopback bind address. That combination is what makes the suite offline rather than merely
  * *usually* offline:
  *
- * - `Minimal` installs a crypto provider and nothing else — no address lookup, so nothing publishes
- *   to or queries n0's DNS servers. (`N0` and even `N0DisableRelay` both do.)
+ * - `Minimal` installs a crypto provider and nothing else, so nothing publishes to or queries n0's
+ *   DNS servers. (`N0` and even `N0DisableRelay` both do.) The one address lookup an iroh4k endpoint
+ *   always carries is the in-memory book behind [Endpoint.addEndpointAddr]: it resolves only what
+ *   Kotlin put into it and publishes nowhere, so it sends no packet of its own.
  * - `RelayMode.Disabled` means there is no relay to dial.
  * - `bindAddrs = [127.0.0.1:0]` replaces iroh's default `0.0.0.0` and `[::]` sockets, so the only
  *   socket that exists is on loopback.
@@ -315,6 +318,88 @@ class CommonEndpointTests {
         }
     }
 
+    // ── The address book ─────────────────────────────────────────────────────────────────────
+
+    fun `an added endpoint address lets an id-only dial resolve`() = Loopback.bounded {
+        Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+            // An id and nothing else: no relay URL, no IP socket. The only lookup a `Minimal`
+            // endpoint has is its own address book, which starts empty and queries nothing, so
+            // the only thing that can turn this into somewhere to send a packet is an entry
+            // `addEndpointAddr` put there.
+            val idOnly = EndpointAddr.of(server.id)
+
+            Endpoint.bind(Loopback.config()).use { client ->
+                client.addEndpointAddr(server.addr())
+
+                val accepted = async { server.acceptOne() }
+                client.connect(idOnly, Loopback.alpn).use { connection ->
+                    accepted.await().use { served ->
+                        // Both ends really are this pair, so the id resolved to the right endpoint
+                        // rather than to whatever happened to be listening on loopback.
+                        assertThat(connection.remoteId()).isEqualTo(server.id)
+                        assertThat(served.remoteId()).isEqualTo(client.id)
+                    }
+                }
+            }
+
+            // The control, and the reason the assertion above means anything: a client that never
+            // recorded the address cannot dial the same id. Without this the test would pass with
+            // an `addEndpointAddr` that did nothing at all, because iroh would have found the
+            // server some other way.
+            Endpoint.bind(Loopback.config()).use { stranger ->
+                val error = assertFailsWith<IrohError> { stranger.connect(idOnly, Loopback.alpn) }
+                assertThat(error.code).isEqualTo(IrohError.Code.Connect)
+            }
+        }
+    }
+
+    fun `adding an endpoint address accumulates rather than replacing`() = Loopback.bounded {
+        Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+            Endpoint.bind(Loopback.config()).use { client ->
+                client.addEndpointAddr(server.addr())
+                // Adding the same address twice is not an error — the addresses are a set, as they
+                // are for `addExternalAddr`.
+                client.addEndpointAddr(server.addr())
+
+                // Then a second entry for the *same* id carrying nothing but a dead loopback port.
+                // If the insert replaced, the reachable address would be gone and the dial below
+                // could only fail; it succeeding is what "the new addresses are added to the ones
+                // already recorded" looks like from outside. Port 1 on loopback so a wrong answer
+                // costs one refused datagram on this host rather than a packet on the network.
+                val dead = EndpointAddr.of(server.id).withIpAddr(SocketAddr.parse("127.0.0.1:1"))
+                client.addEndpointAddr(dead)
+
+                val accepted = async { server.acceptOne() }
+                client.connect(EndpointAddr.of(server.id), Loopback.alpn).use { connection ->
+                    accepted.await().use { served ->
+                        assertThat(served.remoteId()).isEqualTo(client.id)
+                    }
+                }
+            }
+        }
+    }
+
+    fun `an endpoint address this build cannot re-encode is refused`() = runTest {
+        val unknown = TransportAddr.Unknown("some-future-transport://host")
+        val addr = EndpointAddr.of(SecretKey.generate().public())
+            .withIpAddr(SocketAddr.parse("127.0.0.1:4433"))
+            .withAddr(unknown)
+
+        Endpoint.bind(config()).use { endpoint ->
+            // `Unknown` only ever comes *from* a newer Rust core, and sending one back is refused
+            // rather than silently dropped — the rule `Addr.kt` documents. Recording an address
+            // whose reachable half was quietly discarded is exactly the failure this refusal is
+            // for, since the caller would then be told the peer is unreachable.
+            val error = assertFailsWith<IrohError> { endpoint.addEndpointAddr(addr) }
+            assertThat(error.code).isEqualTo(IrohError.Code.Addr)
+            assertThat(error.message!!).contains("some-future-transport://host")
+
+            // Without that one member the very same address is accepted, so the refusal is about
+            // the transport rather than about the address.
+            endpoint.addEndpointAddr(addr.without(unknown))
+        }
+    }
+
     fun `an unknown remote has no address`() = runTest {
         val stranger = SecretKey.generate().public()
         Endpoint.bind(config()).use { endpoint ->
@@ -388,6 +473,7 @@ class CommonEndpointTests {
             "stats" to { endpoint.stats() },
             "isClosed" to { endpoint.isClosed },
             "setAlpns" to { endpoint.setAlpns(emptyList()) },
+            "addEndpointAddr" to { endpoint.addEndpointAddr(EndpointAddr.of(id)) },
         )
         for ((name, call) in synchronous) {
             val error = assertFailsWith<IrohError>("expected $name to report Closed") { call() }
@@ -568,5 +654,34 @@ class CommonEndpointTests {
         assertThat(RelayConfig(url, 443, "hunter2").toString()).contains("quicPort=443")
         assertThat(RelayConfig(url, 443, "hunter2").toString().contains("hunter2")).isFalse()
         assertThat(RelayConfig(url).toString()).contains("authToken=null")
+    }
+
+    fun `mdns config is a value and is absent unless asked for`() {
+        // No endpoint here binds with mDNS, and none anywhere in this suite does: joining a
+        // multicast group would put traffic on the test host's local link, which is the one thing
+        // "hermetic by construction" rules out. So what is testable is the value type and the
+        // default — the wiring from here to a discovered peer is not covered, and the README says
+        // so rather than implying otherwise.
+        assertThat(EndpointConfig().mdns).isNull()
+
+        // Advertising is the default because an endpoint that resolves peers without announcing
+        // itself is the special case, and `null` leaves the service name upstream's to choose.
+        assertThat(MdnsConfig().advertise).isTrue()
+        assertThat(MdnsConfig().serviceName).isNull()
+
+        assertThat(MdnsConfig()).isEqualTo(MdnsConfig(advertise = true, serviceName = null))
+        assertThat(MdnsConfig(false, "swarm")).isEqualTo(MdnsConfig(false, "swarm"))
+        assertThat(MdnsConfig(false, "swarm").hashCode())
+            .isEqualTo(MdnsConfig(false, "swarm").hashCode())
+
+        // Both fields participate, and an unset service name is not the same request as one that
+        // happens to spell out upstream's current default.
+        assertThat(MdnsConfig()).isNotEqualTo(MdnsConfig(advertise = false))
+        assertThat(MdnsConfig()).isNotEqualTo(MdnsConfig(serviceName = "irohv1"))
+        assertThat(MdnsConfig(serviceName = "a")).isNotEqualTo(MdnsConfig(serviceName = "b"))
+
+        assertThat(MdnsConfig().toString()).isEqualTo("MdnsConfig(advertise=true, serviceName=null)")
+        assertThat(MdnsConfig(false, "swarm").toString())
+            .isEqualTo("MdnsConfig(advertise=false, serviceName=swarm)")
     }
 }

@@ -27,7 +27,7 @@ macOS, Linux or Windows Kotlin/Native target, and there cannot be one without a 
 strategy. iroh4k is that different strategy: one Rust crate, built twice — as a `staticlib` linked
 into Kotlin/Native through cinterop, and as a `cdylib` reached from the JVM and Android through
 hand-written JNI. Both facades call the same Rust core through the same binary payload codec, and
-the same 205 test bodies run against each of them.
+the same 209 test bodies run against each of them.
 
 Three consequences worth stating plainly:
 
@@ -124,8 +124,8 @@ the second is legal and leaves the peer to work it out from a timeout.
 
 | Target | Status |
 | --- | --- |
-| `macosArm64`, `jvm` | Tested. 410 test bodies, 205 per facade, run on every change |
-| `android` (AAR) | Tested on the host under Robolectric — the same 205 bodies `jvmTest` runs — plus 5 instrumented tests on an emulator, which are the only ones that exercise the packaged `.so` |
+| `macosArm64`, `jvm` | Tested. 418 test bodies, 209 per facade, run on every change |
+| `android` (AAR) | Tested on the host under Robolectric — the same 209 bodies `jvmTest` runs — plus 5 instrumented tests on an emulator, which are the only ones that exercise the packaged `.so` |
 | `iosArm64`, `iosSimulatorArm64` | Compiles and links; cinterop verified in CI |
 | `linuxX64` | Test suite is configured in CI on `ubuntu-latest`; not verified locally |
 | `linuxArm64`, `mingwX64` | Cross-compiled and assembled in CI; never executed |
@@ -221,6 +221,16 @@ What is honestly incomplete:
   endpoint, liveness, metric push, network reports — are covered only against the failure path they
   take when the service cannot be reached. Credential handling, configuration and lifecycle are
   tested properly; the successful round trips are not tested at all.
+
+- **mDNS discovery is wired but never exercised by a test.** `EndpointConfig.mdns` builds an
+  `iroh-mdns-address-lookup` service into the endpoint, and it is the one option in the binding that
+  puts multicast on the local link. That is precisely why no test binds with it set: the suite is
+  hermetic by construction, and a body that joined a multicast group would stop being so — and would
+  fail outright on a runner with no usable IPv4 or IPv6 multicast, since that failure comes out of
+  `Endpoint.bind` rather than being a silent no-op. What is covered is therefore the value type and
+  the encoding; the path from an `MdnsConfig` to a peer actually discovered over the link is proven
+  by nothing. Read `MdnsConfig`'s own documentation before relying on it — it also needs a manifest
+  permission on Android and an entitlement on Apple platforms.
 
 - **An IPv6 zone id does not survive a ticket.** `SocketAddr.parse("[fe80::1%3]:4433")` keeps its
   zone, because Rust's parser does, but iroh's postcard encoding of a `SocketAddr` has nowhere to put

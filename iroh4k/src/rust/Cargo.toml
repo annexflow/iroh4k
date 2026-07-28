@@ -43,6 +43,12 @@ iroh-services = { version = "1.0.0", default-features = false }
 iroh-tickets = { version = "1.0.0" }
 # https://crates.io/crates/iroh-metrics
 iroh-metrics = { version = "1.0.1" }
+# https://crates.io/crates/iroh-mdns-address-lookup
+# mDNS is not part of the `iroh` crate in 1.0; it is this separate address-lookup service, which
+# both advertises this endpoint on the local link and resolves the peers advertising themselves on
+# it. Only reached when `EndpointConfig.mdns` is set, so an endpoint that does not ask for it sends
+# no multicast traffic at all.
+iroh-mdns-address-lookup = { version = "0.4.0" }
 
 # https://crates.io/crates/n0-future
 n0-future = "0.3"

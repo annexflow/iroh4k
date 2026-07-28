@@ -197,7 +197,7 @@ callback into application code on the back of that VM being available.
 - **Bodies live once.** `commonTest`'s `Common*Tests` classes hold the test bodies;
   `nativeTest`, `jvmTest` and `androidHostTest` are thin classes that construct the runner and
   delegate one `@Test` per method. Every facade is held to identical behaviour, so a body added to
-  a runner must be added to all **three** delegators — 205 bodies run in each. The Android ones
+  a runner must be added to all **three** delegators — 209 bodies run in each. The Android ones
   additionally carry `@RunWith(RobolectricTestRunner::class)` and `@Config(sdk = [34])`. Note what
   that does *not* buy: the shared bodies touch no Android API, so a delegator that omits the runner
   still passes — measured, not assumed. It is there so the class is an Android unit test rather
@@ -213,7 +213,7 @@ callback into application code on the back of that VM being available.
   shared bodies at all — Kotlin turns a suspend lambda inside ``fun `a name with spaces`()`` into a
   class whose name contains spaces, which DEX rejects below version 040, i.e. below `minSdk 35`.
   That is why its methods are named without backticks and why the compilation is left out of the
-  `test` source-set tree. Everything these tests found was invisible to all 615 host tests: a
+  `test` source-set tree. Everything these tests found was invisible to all 627 host tests: a
   process-aborting missing init, and a missing `INTERNET` permission.
 - **Robolectric gives each test class its own sandbox classloader**, so under `androidHostTest`
   every class loads its *own copy* of the host `libiroh4k.so` — the loader in `androidMain`

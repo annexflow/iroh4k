@@ -45,6 +45,8 @@ internal object EndpointJni {
 
     external fun setAlpns(handle: Long, payload: ByteArray): ByteArray
 
+    external fun addEndpointAddr(handle: Long, payload: ByteArray): ByteArray
+
     external fun boundSockets(handle: Long): ByteArray
 
     external fun isClosed(handle: Long): ByteArray
@@ -104,6 +106,9 @@ internal actual fun nativeEndpointSecretKey(handle: Long): ByteArray =
 
 internal actual fun nativeEndpointSetAlpns(handle: Long, payload: ByteArray) =
     EndpointJni.setAlpns(handle, payload).jniOrThrow()
+
+internal actual fun nativeEndpointAddEndpointAddr(handle: Long, payload: ByteArray) =
+    EndpointJni.addEndpointAddr(handle, payload).jniOrThrow()
 
 internal actual fun nativeEndpointBoundSockets(handle: Long): ByteArray =
     EndpointJni.boundSockets(handle).jniBytesOrThrow()

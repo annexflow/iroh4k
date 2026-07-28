@@ -53,13 +53,20 @@
 //!                             4 Custom + i32 count + count × str (relay URL)
 //!   i32     bind addr count   then count × str (canonical socket address)
 //!   i32     external count    then count × str (canonical socket address)
+//!   u8      mDNS              0 absent — no mDNS at all — or 1 present, then:
+//!                             u8   advertise     0 resolve only, 1 also advertise this endpoint
+//!                             str? service name  i32 -1 for upstream's own default
 //!
-//! EndpointAddr  (Rust → Kotlin)   — the same layout `addr.rs` documents and writes
+//! EndpointAddr  (both ways)       — the same layout `addr.rs` documents and writes
 //!   bytes   id
 //!   i32     count             then count × TransportAddr
 //!                             u8 0 Relay   + str; u8 1 Ip + str;
 //!                             u8 2 Custom  + i64 transport id + bytes data;
 //!                             u8 3 Unknown + str Display text
+//!                             Rust → Kotlin for `addr` and `remote_addr`, Kotlin → Rust for
+//!                             `add_endpoint_addr`. The inbound direction is the *standalone*
+//!                             form — the address is the whole payload — so it is read with
+//!                             `addr::decode_endpoint_addr`, which rejects trailing bytes.
 //!
 //! RelayConfig  (both ways)
 //!   str     canonical relay URL
@@ -95,11 +102,13 @@ use std::{
 
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayConfig, RelayMode, RelayUrl, SecretKey,
+    address_lookup::MemoryLookup,
     endpoint::{Builder, presets},
 };
+use iroh_mdns_address_lookup::MdnsAddressLookup;
 use iroh_relay::RelayQuicConfig;
 
-use crate::addr::write_endpoint_addr;
+use crate::addr::{decode_endpoint_addr, write_endpoint_addr};
 use crate::codec::{Reader, Writer};
 use crate::core::{
     ERROR_ADDR, ERROR_BIND, ERROR_CLOSED, ERROR_KEY, ERROR_RELAY, Iroh4kPtr, Iroh4kResult,
@@ -256,6 +265,19 @@ struct BindConfig {
     relay_mode: Option<RelayMode>,
     bind_addrs: Vec<SocketAddr>,
     external_addrs: Vec<SocketAddr>,
+    mdns: Option<MdnsSettings>,
+}
+
+/// What Kotlin can say about mDNS, mirroring `Endpoint.kt`'s `MdnsConfig`.
+///
+/// Absent means "no mDNS", which is the only way to keep an endpoint off the local link entirely,
+/// so it is deliberately not the same shape as [`RELAY_MODE_UNSET`]: there is nothing a preset
+/// could have configured for this — mDNS is a separate crate that no iroh preset installs.
+struct MdnsSettings {
+    advertise: bool,
+    /// `None` leaves upstream's own default service name, currently `"irohv1"`. Kept as "not
+    /// stated" rather than resolved here so the default stays upstream's to change.
+    service_name: Option<String>,
 }
 
 fn read_bind_config(payload: &[u8]) -> Outcome<BindConfig> {
@@ -286,6 +308,7 @@ fn read_bind_config(payload: &[u8]) -> Outcome<BindConfig> {
     let relay_mode = read_relay_mode(&mut r)?;
     let bind_addrs = read_socket_addrs(&mut r)?;
     let external_addrs = read_socket_addrs(&mut r)?;
+    let mdns = read_mdns(&mut r)?;
 
     under(ERROR_BIND, r.finish())?;
 
@@ -296,6 +319,32 @@ fn read_bind_config(payload: &[u8]) -> Outcome<BindConfig> {
         relay_mode,
         bind_addrs,
         external_addrs,
+        mdns,
+    })
+}
+
+/// Reads the optional mDNS record that closes a bind configuration.
+///
+/// The fields are read into named bindings rather than straight into the struct literal, so the
+/// order they are consumed in is the order they appear on the wire no matter how the struct is
+/// declared.
+fn read_mdns(r: &mut Reader) -> Outcome<Option<MdnsSettings>> {
+    Ok(match under(ERROR_BIND, r.u8())? {
+        ABSENT => None,
+        PRESENT => {
+            let advertise = under(ERROR_BIND, r.bool())?;
+            let service_name = under(ERROR_BIND, r.opt_str())?.map(str::to_owned);
+            Some(MdnsSettings {
+                advertise,
+                service_name,
+            })
+        }
+        other => {
+            return fail(
+                ERROR_BIND,
+                format!("malformed bind configuration: unknown optional-mDNS tag {other}"),
+            );
+        }
     })
 }
 
@@ -352,8 +401,24 @@ fn builder_for(preset: i32) -> Outcome<Builder> {
 }
 
 /// Applies `config` on top of its preset, in the order that makes the explicit fields win.
-fn configure(config: BindConfig) -> Outcome<Builder> {
+///
+/// `lookup` is the address book [`bind`] created and kept; see the comment on its registration
+/// below for why it is threaded through here rather than fetched back off the bound endpoint.
+fn configure(config: BindConfig, lookup: MemoryLookup) -> Outcome<Builder> {
     let mut builder = builder_for(config.preset)?;
+
+    // Registered unconditionally, for every preset, because `Endpoint.addEndpointAddr` has
+    // nowhere else to put an address: a bound `Endpoint` exposes only the erased
+    // `AddressLookupServices`, so the sole way to still hold a typed `MemoryLookup` afterwards is
+    // to have created it before the bind. `Builder::address_lookup` *appends*, so whatever the
+    // preset configured stays.
+    //
+    // This does not compromise `EndpointPreset.Minimal`'s "talks to nothing it was not explicitly
+    // told about" property — the property the whole offline test suite rests on. A `MemoryLookup`
+    // is a `BTreeMap` behind an `RwLock`: it resolves only from what Kotlin put in it, and it
+    // publishes nowhere at all. An endpoint that never calls `addEndpointAddr` therefore carries
+    // an empty map and sends not one extra packet.
+    builder = builder.address_lookup(lookup);
 
     if let Some(key) = config.secret_key {
         builder = builder.secret_key(key);
@@ -380,6 +445,20 @@ fn configure(config: BindConfig) -> Outcome<Builder> {
     }
     for addr in config.external_addrs {
         builder = builder.external_addr(addr);
+    }
+    if let Some(mdns) = config.mdns {
+        // The *builder* is registered, never a built `MdnsAddressLookup`. Building one calls
+        // `tokio::runtime::Handle::current`, which panics when there is no runtime on the calling
+        // thread — and with `panic = "abort"` that ends the host process rather than the call.
+        // Handing iroh the builder makes it call `build` itself, inside `bind`, where a runtime is
+        // guaranteed. A build that fails there — no usable IPv4 *or* IPv6 multicast on this host —
+        // surfaces out of `Builder::bind` as an ordinary [`ERROR_BIND`], so asking for mDNS can
+        // turn a bind that would have succeeded into one that fails.
+        let mut mdns_lookup = MdnsAddressLookup::builder().advertise(mdns.advertise);
+        if let Some(name) = mdns.service_name {
+            mdns_lookup = mdns_lookup.service_name(name);
+        }
+        builder = builder.address_lookup(mdns_lookup);
     }
     Ok(builder)
 }
@@ -409,6 +488,16 @@ struct EndpointSlot {
     /// Empty until `bind` succeeds, and set at most once: a slot is bound by exactly one `bind`,
     /// and Kotlin discards it if that fails.
     endpoint: OnceLock<Endpoint>,
+
+    /// The in-memory address book this endpoint was built with, filled by the same `bind`.
+    ///
+    /// A second field rather than something read back off [`Self::endpoint`], because iroh offers
+    /// no way to recover a typed `MemoryLookup` from a bound endpoint — `Endpoint::address_lookup`
+    /// answers with the erased `AddressLookupServices`, which can only be added to. What is kept
+    /// here is a *clone* of the one handed to the builder, and a `MemoryLookup` is an
+    /// `Arc<RwLock<..>>` inside, so the two share state: what `add_endpoint_addr` inserts is what
+    /// iroh resolves against.
+    lookup: OnceLock<MemoryLookup>,
 }
 
 /// Endpoint slots still alive.
@@ -423,6 +512,7 @@ impl EndpointSlot {
         LIVE_HANDLES.fetch_add(1, Ordering::Relaxed);
         Self {
             endpoint: OnceLock::new(),
+            lookup: OnceLock::new(),
         }
     }
 }
@@ -482,6 +572,29 @@ unsafe fn with_endpoint(
     }
 }
 
+/// Runs `f` against the address book behind `handle`, or answers [`ERROR_CLOSED`].
+///
+/// [`ERROR_CLOSED`] covers both "released" and "never bound": the address book is filled by the
+/// same `bind` that fills the endpoint, so a slot without one is a slot with no endpoint either,
+/// and both are cases where there is nothing for an address to be added to.
+///
+/// # Safety
+/// As [`borrow_endpoint`].
+unsafe fn with_lookup(
+    handle: *mut c_void,
+    f: impl FnOnce(&MemoryLookup) -> *mut Iroh4kResult,
+) -> *mut Iroh4kResult {
+    unsafe {
+        if handle.is_null() {
+            return closed();
+        }
+        match handle::borrow::<EndpointSlot>(handle).and_then(|slot| slot.lookup.get()) {
+            Some(lookup) => f(lookup),
+            None => closed(),
+        }
+    }
+}
+
 /// Clones the `iroh::Endpoint` behind an endpoint handle, for another domain's operations.
 ///
 /// The hook `connection.rs` needs. An `iroh::Endpoint` is an `Arc` inside, so this is a refcount bump
@@ -525,10 +638,16 @@ fn bound(slot: &Option<EndpointShared>) -> Result<&Endpoint, *mut Iroh4kResult> 
 async fn bind(slot: Option<EndpointShared>, payload: Vec<u8>) -> *mut Iroh4kResult {
     let Some(slot) = slot else { return closed() };
 
-    let builder = match read_bind_config(&payload).and_then(configure) {
-        Ok(builder) => builder,
-        Err(Failure { code, message }) => return error_result(code, message),
-    };
+    // Created here, before the builder, because it has to be in two places at once: registered on
+    // the builder so iroh resolves against it, and kept in the slot so `add_endpoint_addr` can
+    // still write to it afterwards. The clone shares the map — see [`EndpointSlot::lookup`].
+    let lookup = MemoryLookup::new();
+
+    let builder =
+        match read_bind_config(&payload).and_then(|config| configure(config, lookup.clone())) {
+            Ok(builder) => builder,
+            Err(Failure { code, message }) => return error_result(code, message),
+        };
 
     let endpoint = match builder.bind().await {
         Ok(endpoint) => endpoint,
@@ -536,6 +655,11 @@ async fn bind(slot: Option<EndpointShared>, payload: Vec<u8>) -> *mut Iroh4kResu
             return error_result(ERROR_BIND, format!("could not bind an endpoint: {error}"));
         }
     };
+
+    // Filled before the endpoint, so a slot that reports itself bound always has its address book
+    // too. A second `set` is ignored rather than reported: it can only mean the slot was bound
+    // twice, which the `endpoint` set below already reports.
+    let _ = slot.lookup.set(lookup);
 
     if slot.endpoint.set(endpoint).is_err() {
         // Only reachable by binding one slot twice, which the Kotlin API cannot express: a slot is
@@ -589,6 +713,22 @@ fn set_alpns(endpoint: &Endpoint, payload: &[u8]) -> Outcome<()> {
     }
     under(ERROR_BIND, r.finish())?;
     endpoint.set_alpns(alpns);
+    Ok(())
+}
+
+/// Inserts a remote endpoint's address into this endpoint's own address book.
+///
+/// Synchronous, because `MemoryLookup::add_endpoint_info` is: it takes the write lock, inserts into
+/// a `BTreeMap` and returns. There is no dial and no I/O — the address is only recorded, so that a
+/// later `connect` given nothing but an `EndpointId` has somewhere to resolve it from.
+///
+/// The payload is the address and nothing else, so it is decoded with `decode_endpoint_addr`, the
+/// standalone form, which rejects trailing bytes. The inline `read_endpoint_addr` is for an address
+/// that is one field of a larger message and would silently accept a wrong-layout payload here.
+fn add_endpoint_addr(lookup: &MemoryLookup, payload: &[u8]) -> Outcome<()> {
+    let addr =
+        decode_endpoint_addr(payload).map_err(|(code, message)| Failure { code, message })?;
+    lookup.add_endpoint_info(addr);
     Ok(())
 }
 
@@ -792,6 +932,30 @@ pub unsafe extern "C" fn iroh4k_endpoint_set_alpns(
     unsafe {
         let payload = borrowed(payload, payload_len);
         with_endpoint(handle, |endpoint| match set_alpns(endpoint, payload) {
+            Ok(()) => ok_result(),
+            Err(Failure { code, message }) => error_result(code, message),
+        })
+    }
+}
+
+/// Records a remote endpoint's address in this endpoint's address book. Synchronous.
+///
+/// The payload is one standalone `EndpointAddr`. Synchronous because the insert is a map write
+/// under a lock — nothing is dialled — which is also why the payload may be *borrowed* rather than
+/// copied: this returns before the pinned Kotlin array can go away.
+///
+/// # Safety
+/// `handle` must satisfy [`borrow_endpoint`]'s contract, and `payload`/`payload_len` must satisfy
+/// [`borrowed`]'s.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_endpoint_add_endpoint_addr(
+    handle: *mut c_void,
+    payload: *const u8,
+    payload_len: c_int,
+) -> *mut Iroh4kResult {
+    unsafe {
+        let payload = borrowed(payload, payload_len);
+        with_lookup(handle, |lookup| match add_endpoint_addr(lookup, payload) {
             Ok(()) => ok_result(),
             Err(Failure { code, message }) => error_result(code, message),
         })
@@ -1207,6 +1371,25 @@ mod jni_facade {
         let result = unsafe {
             with_endpoint(as_handle(handle), |endpoint| {
                 match set_alpns(endpoint, &payload) {
+                    Ok(()) => ok_result(),
+                    Err(Failure { code, message }) => error_result(code, message),
+                }
+            })
+        };
+        finish(&mut env, result)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_addEndpointAddr(
+        mut env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+        payload: JByteArray,
+    ) -> jbyteArray {
+        let payload = arg(&mut env, &payload);
+        let result = unsafe {
+            with_lookup(as_handle(handle), |lookup| {
+                match add_endpoint_addr(lookup, &payload) {
                     Ok(()) => ok_result(),
                     Err(Failure { code, message }) => error_result(code, message),
                 }

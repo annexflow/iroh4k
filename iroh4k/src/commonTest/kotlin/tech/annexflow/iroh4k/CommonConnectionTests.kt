@@ -921,9 +921,11 @@ class CommonConnectionTests {
  * ## Hermetic
  *
  * [config] binds with [EndpointPreset.Minimal], [RelayMode.Disabled] and `127.0.0.1:0`. That
- * combination has no address lookup and no relay, so nothing here touches anything outside the machine
- * — but two such endpoints *can* still reach each other over loopback, given each other's
- * [Endpoint.addr]. That is the only offline way to have something to accept.
+ * combination has no relay, and its only address lookup is the in-memory book behind
+ * [Endpoint.addEndpointAddr] — which resolves what Kotlin put into it and publishes nowhere — so
+ * nothing here touches anything outside the machine. Two such endpoints *can* still reach each other
+ * over loopback, given each other's [Endpoint.addr]. That is the only offline way to have something
+ * to accept.
  */
 internal object Loopback {
 

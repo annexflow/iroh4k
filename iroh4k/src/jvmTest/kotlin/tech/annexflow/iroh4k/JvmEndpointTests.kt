@@ -59,6 +59,18 @@ class JvmEndpointTests {
         runner.`notifying a network change is harmless`()
 
     @Test
+    fun `an added endpoint address lets an id-only dial resolve`() =
+        runner.`an added endpoint address lets an id-only dial resolve`()
+
+    @Test
+    fun `adding an endpoint address accumulates rather than replacing`() =
+        runner.`adding an endpoint address accumulates rather than replacing`()
+
+    @Test
+    fun `an endpoint address this build cannot re-encode is refused`() =
+        runner.`an endpoint address this build cannot re-encode is refused`()
+
+    @Test
     fun `an unknown remote has no address`() =
         runner.`an unknown remote has no address`()
 
@@ -97,4 +109,8 @@ class JvmEndpointTests {
     @Test
     fun `relay config is a value and hides its token`() =
         runner.`relay config is a value and hides its token`()
+
+    @Test
+    fun `mdns config is a value and is absent unless asked for`() =
+        runner.`mdns config is a value and is absent unless asked for`()
 }

@@ -2,6 +2,7 @@
 
 package tech.annexflow.iroh4k
 
+import iroh4k.ffi.iroh4k_endpoint_add_endpoint_addr
 import iroh4k.ffi.iroh4k_endpoint_add_external_addr
 import iroh4k.ffi.iroh4k_endpoint_addr
 import iroh4k.ffi.iroh4k_endpoint_bind
@@ -101,6 +102,12 @@ internal actual fun nativeEndpointSecretKey(handle: Long): ByteArray =
 
 internal actual fun nativeEndpointSetAlpns(handle: Long, payload: ByteArray) {
     payload.usePtr { ptr, len -> iroh4k_endpoint_set_alpns(handle.asHandle(), ptr, len) }.orThrow()
+}
+
+internal actual fun nativeEndpointAddEndpointAddr(handle: Long, payload: ByteArray) {
+    payload.usePtr { ptr, len ->
+        iroh4k_endpoint_add_endpoint_addr(handle.asHandle(), ptr, len)
+    }.orThrow()
 }
 
 internal actual fun nativeEndpointBoundSockets(handle: Long): ByteArray =
