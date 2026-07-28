@@ -151,4 +151,12 @@ class AndroidEndpointTests {
     @Test
     fun `PublishedAddrs ordinals match the Rust wire contract`() =
         runner.`PublishedAddrs ordinals match the Rust wire contract`()
+
+    @Test
+    fun `transport config is a value and says nothing by default`() =
+        runner.`transport config is a value and says nothing by default`()
+
+    @Test
+    fun `CongestionController ordinals match the Rust wire contract`() =
+        runner.`CongestionController ordinals match the Rust wire contract`()
 }

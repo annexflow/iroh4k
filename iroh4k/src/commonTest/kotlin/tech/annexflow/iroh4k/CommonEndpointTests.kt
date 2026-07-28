@@ -892,4 +892,37 @@ class CommonEndpointTests {
             2 to "Unfiltered",
         )
     }
+
+    fun `transport config is a value and says nothing by default`() {
+        // Every field absent means "I did not say", which leaves iroh's own defaults — including
+        // the six it applies for hole punching before any caller sees the builder. An endpoint that
+        // never mentions transport configuration is therefore unchanged by this feature existing.
+        assertThat(EndpointConfig().transportConfig).isNull()
+        assertThat(TransportConfig().maxIdleTimeout).isNull()
+        assertThat(TransportConfig().congestionController).isNull()
+
+        assertThat(TransportConfig(maxIdleTimeout = 30.seconds))
+            .isEqualTo(TransportConfig(maxIdleTimeout = 30.seconds))
+        assertThat(TransportConfig(maxIdleTimeout = 30.seconds).hashCode())
+            .isEqualTo(TransportConfig(maxIdleTimeout = 30.seconds).hashCode())
+        assertThat(TransportConfig(maxIdleTimeout = 30.seconds))
+            .isNotEqualTo(TransportConfig(maxIdleTimeout = 31.seconds))
+        // A field left unset is not the same request as one set to a value.
+        assertThat(TransportConfig()).isNotEqualTo(TransportConfig(sendFairness = true))
+
+        assertThat(MtuDiscovery(upperBound = 1400)).isEqualTo(MtuDiscovery(upperBound = 1400))
+        assertThat(AckFrequency(reorderingThreshold = 3))
+            .isEqualTo(AckFrequency(reorderingThreshold = 3))
+
+        assertThat(TransportConfig(sendFairness = true).toString())
+            .contains("sendFairness=true")
+    }
+
+    fun `CongestionController ordinals match the Rust wire contract`() {
+        // The ordinals are a wire protocol shared with `transport.rs`. A reorder compiles cleanly on
+        // both sides and would silently select the other algorithm, which is the kind of change
+        // nobody notices until a throughput graph looks wrong months later.
+        assertThat(CongestionController.entries.map { it.name })
+            .containsExactly("Cubic", "NewReno")
+    }
 }

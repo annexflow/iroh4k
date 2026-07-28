@@ -206,6 +206,11 @@ class MdnsConfig(
  *   discovery at all" is not expressible here, because an empty list already means something else —
  *   spell that [EndpointPreset.Minimal] with `relayMode = RelayMode.Default`. [mdns] is separate and
  *   always composes, because it points at no server and no preset installs it.
+ * @property transportConfig the QUIC transport parameters this endpoint applies to every connection
+ *   by default. `null`, the default, leaves iroh's own — including the six it overrides for hole
+ *   punching, see [TransportConfig]'s class documentation. A config set on a single connection
+ *   **replaces** this one outright rather than merging with it, exactly as [TransportConfig] itself
+ *   documents.
  */
 class EndpointConfig(
     val preset: EndpointPreset = EndpointPreset.N0,
@@ -216,6 +221,7 @@ class EndpointConfig(
     val externalAddrs: List<SocketAddr> = emptyList(),
     val mdns: MdnsConfig? = null,
     val discovery: List<Discovery> = emptyList(),
+    val transportConfig: TransportConfig? = null,
 ) {
     // Copied in and copied out, for the reason `CustomAddr` copies: a `ByteArray` is mutable, and a
     // configuration that changed under the caller after being built would be a confusing bug.
