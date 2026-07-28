@@ -69,6 +69,14 @@ class NativeEndpointTests {
         runner.`adding an endpoint address accumulates rather than replacing`()
 
     @Test
+    fun `a removed endpoint address stops resolving an id-only dial`() =
+        runner.`a removed endpoint address stops resolving an id-only dial`()
+
+    @Test
+    fun `removing an endpoint address reports whether there was one`() =
+        runner.`removing an endpoint address reports whether there was one`()
+
+    @Test
     fun `an endpoint address this build cannot re-encode is refused`() =
         runner.`an endpoint address this build cannot re-encode is refused`()
 

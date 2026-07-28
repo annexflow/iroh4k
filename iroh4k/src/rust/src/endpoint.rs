@@ -732,6 +732,26 @@ fn add_endpoint_addr(lookup: &MemoryLookup, payload: &[u8]) -> Outcome<()> {
     Ok(())
 }
 
+/// Removes a remote endpoint's entry from this endpoint's address book, reporting whether there
+/// was one.
+///
+/// Synchronous for the same reason [`add_endpoint_addr`] is, and the necessary counterpart to it:
+/// `add_endpoint_info` *accumulates*, so without this there is no way to retract an address a peer
+/// has moved off.
+///
+/// The removed `EndpointInfo` is dropped rather than encoded back to Kotlin. It carries more than
+/// an `EndpointAddr` — when it was last updated, and the peer's own user data — and iroh4k models
+/// neither, so what could cross the boundary is a lossy half of the entry. Whether there was one to
+/// remove is the whole of what a caller can act on.
+///
+/// The id arrives as its 32 raw bytes and goes through [`parse_endpoint_id`], so a buffer of the
+/// wrong length is an [`ERROR_KEY`] rather than a panic — which matters on the JNI path, where an
+/// unreadable `byte[]` arrives here as an empty slice.
+fn remove_endpoint_addr(lookup: &MemoryLookup, id: &[u8]) -> Outcome<bool> {
+    let id = parse_endpoint_id(id)?;
+    Ok(lookup.remove_endpoint_info(id).is_some())
+}
+
 /// A snapshot of every endpoint metric, keyed `"<group>:<metric>"` as iroh-ffi keys it.
 ///
 /// Values are `i64` rather than iroh-ffi's saturating `u32`. A `u32` silently pins any counter
@@ -957,6 +977,31 @@ pub unsafe extern "C" fn iroh4k_endpoint_add_endpoint_addr(
         let payload = borrowed(payload, payload_len);
         with_lookup(handle, |lookup| match add_endpoint_addr(lookup, payload) {
             Ok(()) => ok_result(),
+            Err(Failure { code, message }) => error_result(code, message),
+        })
+    }
+}
+
+/// Removes a remote endpoint's entry from this endpoint's address book; `1` in `i64_val` if there
+/// was one. Synchronous.
+///
+/// The argument is an endpoint id as its 32 raw bytes rather than a codec payload, as in
+/// [`iroh4k_endpoint_remote_addr`]: an id is fixed-width, so there is nothing to frame. Synchronous
+/// and therefore *borrowing*, for the reason [`iroh4k_endpoint_add_endpoint_addr`] gives.
+///
+/// # Safety
+/// `handle` must satisfy [`borrow_endpoint`]'s contract, and `id`/`id_len` must satisfy
+/// [`borrowed`]'s.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_endpoint_remove_endpoint_addr(
+    handle: *mut c_void,
+    id: *const u8,
+    id_len: c_int,
+) -> *mut Iroh4kResult {
+    unsafe {
+        let id = borrowed(id, id_len);
+        with_lookup(handle, |lookup| match remove_endpoint_addr(lookup, id) {
+            Ok(removed) => i64_result(i64::from(removed)),
             Err(Failure { code, message }) => error_result(code, message),
         })
     }
@@ -1391,6 +1436,25 @@ mod jni_facade {
             with_lookup(as_handle(handle), |lookup| {
                 match add_endpoint_addr(lookup, &payload) {
                     Ok(()) => ok_result(),
+                    Err(Failure { code, message }) => error_result(code, message),
+                }
+            })
+        };
+        finish(&mut env, result)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_EndpointJni_removeEndpointAddr(
+        mut env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+        id: JByteArray,
+    ) -> jbyteArray {
+        let id = arg(&mut env, &id);
+        let result = unsafe {
+            with_lookup(as_handle(handle), |lookup| {
+                match remove_endpoint_addr(lookup, &id) {
+                    Ok(removed) => i64_result(i64::from(removed)),
                     Err(Failure { code, message }) => error_result(code, message),
                 }
             })

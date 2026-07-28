@@ -330,9 +330,10 @@ class Endpoint private constructor(private val guard: NativeHandle) : AutoClosea
      *
      * Calling this twice for the same endpoint **accumulates** rather than replaces, which is
      * upstream's own behaviour and worth knowing before relying on it: the new IP addresses are
-     * added to the ones already recorded, and only the relay URL is overwritten. So this is not a
-     * way to retract an address a peer has moved off — a stale entry stays in the book until the
-     * endpoint is dropped, and iroh simply fails to reach it.
+     * added to the ones already recorded, and only the relay URL is overwritten. So this on its own
+     * is not a way to retract an address a peer has moved off — the stale one stays in the book
+     * alongside the new one, and iroh keeps trying it. [removeEndpointAddr] is how an entry goes
+     * away.
      *
      * Synchronous, unlike its neighbours here, because it genuinely is: the address is inserted into
      * a map and nothing goes on the network.
@@ -344,6 +345,32 @@ class Endpoint private constructor(private val guard: NativeHandle) : AutoClosea
      */
     fun addEndpointAddr(addr: EndpointAddr) = sync {
         nativeEndpointAddEndpointAddr(it, encodeEndpointAddr(addr))
+    }
+
+    /**
+     * Removes what [addEndpointAddr] recorded for [id]. `true` if there was an entry to remove.
+     *
+     * The whole entry goes, not part of it: the address book holds one record per peer, keyed by
+     * id, so every transport address and the relay URL in it disappear together. Since
+     * [addEndpointAddr] accumulates, this is the only way to retract an address — remove the entry
+     * and record the address the peer moved to.
+     *
+     * What was removed is not handed back. An entry is an `EndpointInfo`, which carries more than an
+     * [EndpointAddr] — when it was last updated, and the peer's own user data — and iroh4k models
+     * neither, so the most that could be returned is a lossy half of it. Whether there was an entry
+     * at all is the part a caller can act on.
+     *
+     * Removing an entry does not close connections already established with that peer, and does not
+     * un-learn the path a live connection is using; it only takes away what a *later*
+     * `connect(EndpointAddr.of(id), alpn)` would have resolved the id from.
+     *
+     * Synchronous, like [addEndpointAddr] and for the same reason.
+     *
+     * @throws IrohError with [IrohError.Code.Closed] if this endpoint has been released, or was
+     *   never successfully bound.
+     */
+    fun removeEndpointAddr(id: EndpointId): Boolean = sync {
+        nativeEndpointRemoveEndpointAddr(it, id.toBytes())
     }
 
     /**
@@ -712,6 +739,8 @@ internal expect fun nativeEndpointSecretKey(handle: Long): ByteArray
 internal expect fun nativeEndpointSetAlpns(handle: Long, payload: ByteArray)
 
 internal expect fun nativeEndpointAddEndpointAddr(handle: Long, payload: ByteArray)
+
+internal expect fun nativeEndpointRemoveEndpointAddr(handle: Long, id: ByteArray): Boolean
 
 internal expect fun nativeEndpointBoundSockets(handle: Long): ByteArray
 

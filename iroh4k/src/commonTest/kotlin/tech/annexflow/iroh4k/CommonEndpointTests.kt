@@ -347,8 +347,19 @@ class CommonEndpointTests {
             // an `addEndpointAddr` that did nothing at all, because iroh would have found the
             // server some other way.
             Endpoint.bind(Loopback.config()).use { stranger ->
-                val error = assertFailsWith<IrohError> { stranger.connect(idOnly, Loopback.alpn) }
-                assertThat(error.code).isEqualTo(IrohError.Code.Connect)
+                // The server keeps accepting across the failing dial, for the reason spelled out
+                // in `a removed endpoint address stops resolving an id-only dial`: with nobody
+                // answering, this dial fails on a handshake timeout whatever the address book
+                // holds, and the control would then hold against an `addEndpointAddr` that did
+                // nothing at all — which is the one thing it exists to rule out.
+                val accepting = async { server.acceptOne() }
+                try {
+                    val error =
+                        assertFailsWith<IrohError> { stranger.connect(idOnly, Loopback.alpn) }
+                    assertThat(error.code).isEqualTo(IrohError.Code.Connect)
+                } finally {
+                    accepting.cancelAndJoin()
+                }
             }
         }
     }
@@ -376,6 +387,78 @@ class CommonEndpointTests {
                     }
                 }
             }
+        }
+    }
+
+    fun `a removed endpoint address stops resolving an id-only dial`() = Loopback.bounded {
+        Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+            val idOnly = EndpointAddr.of(server.id)
+
+            // Two clients, differing in exactly one call, rather than one client dialling twice.
+            // A client that has already connected keeps the path it learned for that peer and
+            // resolves the second dial from it whatever the address book now says, so reusing one
+            // would prove nothing about the removal.
+            Endpoint.bind(Loopback.config()).use { keeper ->
+                keeper.addEndpointAddr(server.addr())
+
+                val accepted = async { server.acceptOne() }
+                keeper.connect(idOnly, Loopback.alpn).use { connection ->
+                    accepted.await().use { served ->
+                        assertThat(connection.remoteId()).isEqualTo(server.id)
+                        assertThat(served.remoteId()).isEqualTo(keeper.id)
+                    }
+                }
+            }
+
+            Endpoint.bind(Loopback.config()).use { forgetful ->
+                forgetful.addEndpointAddr(server.addr())
+                // There was an entry to remove, which is what makes the failure below a retraction
+                // rather than an address that was never recorded in the first place.
+                assertThat(forgetful.removeEndpointAddr(server.id)).isTrue()
+
+                // The server keeps accepting across the failing dial, so the failure below is for
+                // want of an address rather than for want of anybody to answer. Without it the dial
+                // fails either way — after thirty seconds, as a handshake timeout — and the
+                // assertion would hold just as well against a `removeEndpointAddr` that did
+                // nothing.
+                val accepting = async { server.acceptOne() }
+                try {
+                    val error =
+                        assertFailsWith<IrohError> { forgetful.connect(idOnly, Loopback.alpn) }
+                    assertThat(error.code).isEqualTo(IrohError.Code.Connect)
+                } finally {
+                    accepting.cancelAndJoin()
+                }
+            }
+        }
+    }
+
+    fun `removing an endpoint address reports whether there was one`() = runTest {
+        val peer = EndpointAddr.of(SecretKey.generate().public())
+            .withIpAddr(SocketAddr.parse("198.51.100.9:4433"))
+        val other = EndpointAddr.of(SecretKey.generate().public())
+            .withIpAddr(SocketAddr.parse("198.51.100.10:4433"))
+
+        Endpoint.bind(config()).use { endpoint ->
+            // Nothing recorded yet, so there is nothing to retract. Not an error — the same answer
+            // `removeExternalAddr` gives for an address that was never advertised.
+            assertThat(endpoint.removeEndpointAddr(peer.id)).isFalse()
+
+            endpoint.addEndpointAddr(peer)
+            assertThat(endpoint.removeEndpointAddr(peer.id)).isTrue()
+            // The book holds one record per peer and the removal takes all of it, so a second
+            // attempt finds nothing rather than a remnant of the first entry.
+            assertThat(endpoint.removeEndpointAddr(peer.id)).isFalse()
+
+            // Entries are keyed by id, so removing one peer's leaves every other peer's alone.
+            endpoint.addEndpointAddr(peer)
+            endpoint.addEndpointAddr(other)
+            assertThat(endpoint.removeEndpointAddr(peer.id)).isTrue()
+            assertThat(endpoint.removeEndpointAddr(other.id)).isTrue()
+
+            // Its own id is not in there either: the address book is about remotes, and nothing
+            // records an endpoint in its own.
+            assertThat(endpoint.removeEndpointAddr(endpoint.id)).isFalse()
         }
     }
 
@@ -474,6 +557,7 @@ class CommonEndpointTests {
             "isClosed" to { endpoint.isClosed },
             "setAlpns" to { endpoint.setAlpns(emptyList()) },
             "addEndpointAddr" to { endpoint.addEndpointAddr(EndpointAddr.of(id)) },
+            "removeEndpointAddr" to { endpoint.removeEndpointAddr(id) },
         )
         for ((name, call) in synchronous) {
             val error = assertFailsWith<IrohError>("expected $name to report Closed") { call() }

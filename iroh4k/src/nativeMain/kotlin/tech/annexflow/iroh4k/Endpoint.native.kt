@@ -16,6 +16,7 @@ import iroh4k.ffi.iroh4k_endpoint_network_change
 import iroh4k.ffi.iroh4k_endpoint_new
 import iroh4k.ffi.iroh4k_endpoint_online
 import iroh4k.ffi.iroh4k_endpoint_remote_addr
+import iroh4k.ffi.iroh4k_endpoint_remove_endpoint_addr
 import iroh4k.ffi.iroh4k_endpoint_remove_external_addr
 import iroh4k.ffi.iroh4k_endpoint_remove_relay
 import iroh4k.ffi.iroh4k_endpoint_secret_key
@@ -109,6 +110,11 @@ internal actual fun nativeEndpointAddEndpointAddr(handle: Long, payload: ByteArr
         iroh4k_endpoint_add_endpoint_addr(handle.asHandle(), ptr, len)
     }.orThrow()
 }
+
+internal actual fun nativeEndpointRemoveEndpointAddr(handle: Long, id: ByteArray): Boolean =
+    id.usePtr { ptr, len ->
+        iroh4k_endpoint_remove_endpoint_addr(handle.asHandle(), ptr, len)
+    }.longOrThrow() != 0L
 
 internal actual fun nativeEndpointBoundSockets(handle: Long): ByteArray =
     iroh4k_endpoint_bound_sockets(handle.asHandle()).bytesOrThrow()
