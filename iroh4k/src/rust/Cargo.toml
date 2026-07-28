@@ -1,6 +1,6 @@
 [package]
 name = "iroh4k"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 # Edition 2024 itself needs 1.85; the floor is higher because `iroh` 1.0 declares 1.91. Edition 2024
 # also selects resolver 3, which is MSRV-aware — so this has to be stated, not inferred.

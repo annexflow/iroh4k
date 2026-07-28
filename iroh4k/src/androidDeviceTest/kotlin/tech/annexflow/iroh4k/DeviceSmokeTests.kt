@@ -53,7 +53,7 @@ class DeviceSmokeTests {
     @Test
     fun versionReportsBothHalves() {
         val version = Iroh4k.version
-        assertTrue(version.startsWith("0.1.0+iroh"), "unexpected version string: $version")
+        assertTrue(version.startsWith("0.2.0+iroh"), "unexpected version string: $version")
     }
 
     /**
