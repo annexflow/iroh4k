@@ -312,6 +312,30 @@ in `iroh4k/src/rust/Cargo.toml` — `Iroh4k.version` is built from `CARGO_PKG_VE
 have to be bumped together, along with the assertions in `CommonSmokeTests` and `DeviceSmokeTests`
 that hardcode it.
 
+### What has to be set up outside this repository
+
+Four repository secrets, read by the publish plugin under its own names:
+`MAVEN_CENTRAL_USERNAME` and `MAVEN_CENTRAL_PASSWORD` (a Central Portal **user token** pair from
+<https://central.sonatype.com/account>, not the account password), and `SIGNING_IN_MEMORY_KEY` with
+`SIGNING_IN_MEMORY_KEY_PASSWORD`. The signing key is the ASCII-armoured private key, and it must be
+**sign-capable as its primary key** — `gpg --full-generate-key` with `(4) RSA (sign only)`. The
+workflow does not pass `signingInMemoryKeyId`, so Gradle takes the first key in the ring; a key
+generated the usual way has a certify-only primary and signs with a subkey, which silently produces
+nothing. Publish the public half to a keyserver or Central rejects the deployment.
+
+Two things on the Portal side, and they are **separate settings**:
+
+  - the namespace has to be verified, and
+  - **SNAPSHOT publishing has to be enabled for it.**
+
+The second is the one that costs an afternoon, because its symptom accuses the wrong component:
+every PUT to `central.sonatype.com/repository/maven-snapshots` returns `403`, while the Portal
+deployments API answers `200` for the same token. That reads like a broken or mis-copied credential,
+and it is not — the token is fine and the account simply may not write snapshots. The tell is `403`
+rather than `401`: the user is known, the privilege is missing. Note also that the release path does
+not touch the snapshot repository at all — it stages locally and uploads a bundle to the Portal API
+— so a tag can succeed while the rehearsal below cannot run.
+
 Rehearse with the snapshot path first. It is the same workflow, the same jobs and the same Gradle
 invocation, missing only the irreversible step:
 
