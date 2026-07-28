@@ -11,9 +11,9 @@ network changing underneath it.
 iroh4k puts that behind `suspend` functions, `Flow`s and `AutoCloseable` handles, on JVM, Android,
 iOS, macOS, Linux and Windows.
 
-> **Not published yet.** There is no release on Maven Central, so there is nothing to add to your
-> build file today — the first one will be `tech.annexflow.iroh4k:iroh4k:0.1.0`. Until then, clone
-> and [build from source](#building-from-source), which needs a Rust toolchain.
+```kotlin
+implementation("tech.annexflow.iroh4k:iroh4k:0.1.0")
+```
 
 **If your app is JVM-only, look at [iroh-ffi](https://github.com/n0-computer/iroh-ffi) first.** It is
 upstream's own binding, maintained by the people who write iroh. iroh4k exists for the case it does
@@ -286,7 +286,7 @@ as is. Without `android` in `-Ptargets`, the Android Gradle plugin is never appl
 
 ## Status
 
-Version `0.1.0-SNAPSHOT`, targeting **iroh 1.0.3**. Dual licensed Apache-2.0 or MIT.
+Version `0.1.0`, the first release, targeting **iroh 1.0.3**. Dual licensed Apache-2.0 or MIT.
 
 The transport itself — endpoints, connections, streams, datagrams, the router — is covered by the
 test suite on every change. Four things around it are in different states, and the difference is
