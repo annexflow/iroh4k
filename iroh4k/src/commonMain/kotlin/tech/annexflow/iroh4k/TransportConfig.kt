@@ -126,8 +126,9 @@ class TransportConfig(
     val ackFrequency: AckFrequency? = null,
     /**
      * Which congestion control algorithm this connection uses. `null` leaves upstream's own
-     * default. See [CongestionController] for what is actually available and why its ordinals
-     * matter.
+     * default, which is [CongestionController.Cubic] — `noq-proto`'s `TransportConfig::default`
+     * constructs its `congestion_controller_factory` from `congestion::CubicConfig::default()`.
+     * See [CongestionController] for what is actually available and why its ordinals matter.
      */
     val congestionController: CongestionController? = null,
     /**
@@ -220,9 +221,14 @@ class TransportConfig(
     /**
      * How many paths this connection may use at once, for iroh's multipath.
      *
-     * **A value below 8 is ignored**, silently — upstream logs a warning and keeps its own. iroh4k
+     * **A value below 9 is ignored**, silently — upstream logs a warning and keeps its own. The
+     * guard in `quic.rs` rejects anything less than `MAX_MULTIPATH_PATHS + 1`, and
+     * `MAX_MULTIPATH_PATHS` is 8, so 8 itself is rejected too, not just values under it. iroh4k
      * passes what you give it rather than rejecting, so that behaviour here matches the same call
-     * from Rust exactly; the consequence is that setting 4 leaves you with 8 and no error.
+     * from Rust exactly; the consequence is that setting 4 — or 8 — leaves you with iroh's own
+     * default of 8 and no error. Upstream's own doc comment on this setter claims the minimum is
+     * 13, which the code it documents does not actually enforce; trust the guard, not that
+     * comment.
      */
     val maxConcurrentMultipathPaths: Int? = null,
     /**
@@ -356,9 +362,36 @@ class TransportConfig(
  * [TransportConfig.mtuDiscovery].
  */
 class MtuDiscovery(
+    /**
+     * How long to wait after MTU discovery completes before it runs again.
+     *
+     * `null` leaves upstream's default of 600 seconds, the interval recommended by RFC 8899.
+     */
     val interval: Duration? = null,
+    /**
+     * The largest UDP payload size MTU discovery will search up to.
+     *
+     * `null` leaves upstream's default of 1452, chosen to stay within Ethernet's MTU under both
+     * IPv4 and IPv6. Upstream accepts values up to 65527, the largest UDP payload IPv6 permits;
+     * setting this arbitrarily high is safe regardless of the path's real MTU, since it only
+     * changes how long discovery takes to finish, not whether it finds the right value.
+     */
     val upperBound: Int? = null,
+    /**
+     * How long to wait after black-hole detection fires before MTU discovery runs again, bypassing
+     * [interval].
+     *
+     * `null` leaves upstream's default of one minute. Black-hole detection can fire spuriously
+     * under ordinary congestion rather than a genuine drop in path MTU, which is why discovery
+     * retries again this soon instead of waiting out the full [interval].
+     */
     val blackHoleCooldown: Duration? = null,
+    /**
+     * The smallest MTU change that keeps MTU discovery's binary search going; anything smaller ends
+     * the current discovery run.
+     *
+     * `null` leaves upstream's default of 20.
+     */
     val minimumChange: Int? = null,
 ) {
     override fun equals(other: Any?): Boolean =
@@ -390,8 +423,32 @@ class MtuDiscovery(
  * [TransportConfig.ackFrequency].
  */
 class AckFrequency(
+    /**
+     * How many ack-eliciting packets the peer may receive before it must send an acknowledgement.
+     *
+     * `0` asks the peer to acknowledge every ack-eliciting packet immediately. `null` leaves
+     * upstream's default of 1, which asks the peer to acknowledge every other one.
+     */
     val ackElicitingThreshold: Long? = null,
+    /**
+     * The longest the peer should wait before acknowledging, once [ackElicitingThreshold] has not
+     * yet been reached.
+     *
+     * The effective delay upstream applies is clamped to at least the peer's own `min_ack_delay`
+     * transport parameter, and at most the greater of the current path round-trip time or 25
+     * milliseconds. `null` leaves the peer's original `max_ack_delay`, taken from its own transport
+     * parameters, in effect rather than requesting a different one.
+     */
     val maxAckDelay: Duration? = null,
+    /**
+     * How many out-of-order packets trigger an immediate acknowledgement, without waiting for
+     * [ackElicitingThreshold] or [maxAckDelay] to be reached.
+     *
+     * `0` disables this trigger entirely. `1` acknowledges any out-of-order packet immediately —
+     * the same behaviour as when the acknowledgement-frequency extension is off. `null` leaves
+     * upstream's default of 2, which upstream derives as one less than
+     * [TransportConfig.packetThreshold]'s own default of 3.
+     */
     val reorderingThreshold: Long? = null,
 ) {
     override fun equals(other: Any?): Boolean =
