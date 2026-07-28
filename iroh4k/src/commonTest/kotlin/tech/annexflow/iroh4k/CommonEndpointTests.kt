@@ -812,17 +812,21 @@ class CommonEndpointTests {
         // stays as offline as the rest of the suite while still exercising the whole encode,
         // decode and build path.
         Endpoint.bind(
-            config().let {
-                EndpointConfig(
-                    preset = EndpointPreset.Minimal,
-                    relayMode = RelayMode.Disabled,
-                    bindAddrs = listOf(loopback),
-                    discovery = listOf(
-                        Discovery.PkarrResolver("https://127.0.0.1:1/pkarr"),
-                        Discovery.Dns("dns.invalid"),
-                    ),
-                )
-            }
+            EndpointConfig(
+                preset = EndpointPreset.Minimal,
+                relayMode = RelayMode.Disabled,
+                bindAddrs = listOf(loopback),
+                discovery = listOf(
+                    // PkarrPublisher is the only variant whose payload carries a third field on
+                    // the wire — a `u8` for `published` after the optional relay URL — so it is
+                    // the one variant whose layout a test can actually pin. `Unfiltered` rather
+                    // than the default `RelayOnly`, so the encoder is caught carrying the real
+                    // ordinal instead of one that happens to match whatever the default already is.
+                    Discovery.PkarrPublisher("https://127.0.0.1:1/pkarr", PublishedAddrs.Unfiltered),
+                    Discovery.PkarrResolver("https://127.0.0.1:1/pkarr"),
+                    Discovery.Dns("dns.invalid"),
+                ),
+            )
         ).use { endpoint ->
             assertThat(endpoint.isClosed).isFalse()
         }

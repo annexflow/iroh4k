@@ -364,7 +364,8 @@ fn read_bind_config(payload: &[u8]) -> Outcome<BindConfig> {
     })
 }
 
-/// Reads the optional mDNS record that closes a bind configuration.
+/// Reads the optional mDNS record, second-to-last on the wire — [`read_discovery`] reads the
+/// field that actually closes a bind configuration.
 ///
 /// The fields are read into named bindings rather than straight into the struct literal, so the
 /// order they are consumed in is the order they appear on the wire no matter how the struct is
@@ -551,6 +552,13 @@ fn configure(config: BindConfig, lookup: MemoryLookup) -> Outcome<Builder> {
         }
         builder = builder.address_lookup(mdns_lookup);
     }
+    // Registration here is append-only: each service is added on top of whatever the preset (and
+    // mDNS, above) already installed, the same way `address_lookup` always behaves. That is a
+    // temporary gap against `EndpointConfig.discovery`'s own KDoc, which already promises that a
+    // non-empty list *replaces* the preset's services — the clearing that makes this loop live up
+    // to that promise arrives separately, with its own test, because it is a behaviour change
+    // worth pinning on its own. This comment describes the loop, not the clearing, so it stays
+    // true once that lands.
     for service in config.discovery {
         builder = match service {
             DiscoverySettings::PkarrPublisher {
