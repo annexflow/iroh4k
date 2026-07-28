@@ -26,12 +26,39 @@ plugins {
 }
 
 extensions.configure<KotlinMultiplatformExtension> {
+    // Pins the compiler itself, so the build does not depend on whichever JDK a contributor happens
+    // to have installed. 17 rather than the 11 this library targets, because a toolchain moves the
+    // JDK *everything* runs on, tests included, and Robolectric refuses to create a sandbox for
+    // Android SDK 34 on anything below 17 — a toolchain of 11 costs the whole `androidHostTest`
+    // suite. The gap between compiling on 17 and promising 11 is closed by `-Xjdk-release=11`
+    // below, not by the toolchain.
+    jvmToolchain(17)
+
     val targets = Utils.targetsOf(project)
     val availableTargets = mapOf(
         Pair("jvm") {
             jvm {
                 compilerOptions {
-                    jvmTarget.set(JvmTarget.JVM_21)
+                    // Java 11 because nothing here needs more, and every version above it is a
+                    // consumer this library would turn away for no gain. The JVM and JNI code
+                    // reaches for `java.io.File`, `AtomicBoolean` and a class loader — the newest
+                    // of those is Java 5 — while everything genuinely modern in the binding is
+                    // Kotlin's own: coroutines, `kotlin.concurrent.atomics`, the codec.
+                    //
+                    jvmTarget.set(JvmTarget.JVM_11)
+
+                    // `jvmTarget` alone only lowers the class-file version; the compiler still sees
+                    // every API of whatever JDK the build runs on, so a call to a Java 12+ method
+                    // would compile here and fail at run time on the Java 11 a consumer was
+                    // promised. This is javac's `--release`: it restricts the visible API surface
+                    // to 11 as well, which is the half that actually keeps the promise.
+                    //
+                    // A `jvmToolchain(11)` would do the same and pin the compiler itself, but it
+                    // pins the *whole* build: Robolectric refuses to create a sandbox for Android
+                    // SDK 34 on anything below Java 17, so a toolchain of 11 silently costs the
+                    // entire `androidHostTest` suite. This flag restricts the API without moving
+                    // the JDK anything runs on, so those tests keep working.
+                    freeCompilerArgs.add("-Xjdk-release=11")
                 }
             }
         },
