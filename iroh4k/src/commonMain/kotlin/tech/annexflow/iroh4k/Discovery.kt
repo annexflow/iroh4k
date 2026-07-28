@@ -128,3 +128,42 @@ enum class PublishedAddrs {
     /** Everything this endpoint knows about itself. */
     Unfiltered,
 }
+
+// ── Wire format ───────────────────────────────────────────────────────────────────────────────
+//
+// Mirrored by `read_discovery` in `endpoint.rs`; the two must be changed together, because the bind
+// payload is positional and nothing on either side would notice a drift.
+//
+// This is its own tag family. It is NOT `Addr.kt`'s `ADDR_TAG_*`, which numbers a different set of
+// payload shapes from the same starting point — reusing one numbering across shapes is how the two
+// ends quietly stop agreeing.
+
+private const val DISCOVERY_TAG_PKARR_PUBLISHER = 0
+private const val DISCOVERY_TAG_PKARR_RESOLVER = 1
+private const val DISCOVERY_TAG_DNS = 2
+
+/**
+ * Writes one discovery service inline: its tag, then that variant's fields.
+ *
+ * An absent URL or domain is the `i32 -1` of [BinaryWriter.optString], which is what tells Rust to
+ * ask upstream for its own default rather than parsing anything.
+ */
+internal fun BinaryWriter.writeDiscovery(service: Discovery) {
+    when (service) {
+        is Discovery.PkarrPublisher -> {
+            u8(DISCOVERY_TAG_PKARR_PUBLISHER)
+            optString(service.relayUrl)
+            u8(service.published.ordinal)
+        }
+
+        is Discovery.PkarrResolver -> {
+            u8(DISCOVERY_TAG_PKARR_RESOLVER)
+            optString(service.relayUrl)
+        }
+
+        is Discovery.Dns -> {
+            u8(DISCOVERY_TAG_DNS)
+            optString(service.originDomain)
+        }
+    }
+}

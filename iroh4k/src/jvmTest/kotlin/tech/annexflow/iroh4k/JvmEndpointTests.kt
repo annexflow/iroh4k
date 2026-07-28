@@ -125,4 +125,12 @@ class JvmEndpointTests {
     @Test
     fun `discovery services are values`() =
         runner.`discovery services are values`()
+
+    @Test
+    fun `an endpoint binds with discovery services configured`() =
+        runner.`an endpoint binds with discovery services configured`()
+
+    @Test
+    fun `a malformed discovery URL is refused`() =
+        runner.`a malformed discovery URL is refused`()
 }

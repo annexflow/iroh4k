@@ -806,4 +806,42 @@ class CommonEndpointTests {
         assertThat(Discovery.PkarrResolver.n0().toString())
             .isEqualTo("Discovery.PkarrResolver(relayUrl=null)")
     }
+
+    fun `an endpoint binds with discovery services configured`() = runTest {
+        // A URL that parses but reaches nothing: port 1 on loopback is refused locally, so this
+        // stays as offline as the rest of the suite while still exercising the whole encode,
+        // decode and build path.
+        Endpoint.bind(
+            config().let {
+                EndpointConfig(
+                    preset = EndpointPreset.Minimal,
+                    relayMode = RelayMode.Disabled,
+                    bindAddrs = listOf(loopback),
+                    discovery = listOf(
+                        Discovery.PkarrResolver("https://127.0.0.1:1/pkarr"),
+                        Discovery.Dns("dns.invalid"),
+                    ),
+                )
+            }
+        ).use { endpoint ->
+            assertThat(endpoint.isClosed).isFalse()
+        }
+    }
+
+    fun `a malformed discovery URL is refused`() = runTest {
+        val error = assertFailsWith<IrohError> {
+            Endpoint.bind(
+                EndpointConfig(
+                    preset = EndpointPreset.Minimal,
+                    relayMode = RelayMode.Disabled,
+                    bindAddrs = listOf(loopback),
+                    discovery = listOf(Discovery.PkarrResolver("not a url")),
+                )
+            )
+        }
+        // Its own code: a pkarr relay is a plain URL upstream, not an iroh `RelayUrl`, so reporting
+        // it as `Relay` would name the wrong thing.
+        assertThat(error.code).isEqualTo(IrohError.Code.Discovery)
+        assertThat(error.message!!).contains("not a url")
+    }
 }
