@@ -1072,6 +1072,30 @@ async fn connecting_zero_rtt(slot: Option<ConnectingShared>) -> OpResult {
     }
 }
 
+/// Converts an accepted handshake into a 0-RTT connection.
+///
+/// Infallible upstream (`iroh-1.0.3/src/endpoint/connection.rs:620`), so unlike [`connecting_zero_rtt`]
+/// there is nothing to put back: the value is taken and never returned to the slot. That asymmetry with
+/// the dialling side is not an oversight here, it is the whole reason this task exists separately —
+/// iroh accepts 0-RTT at the TLS layer on every endpoint (`max_early_data_size` is hardcoded,
+/// `iroh-1.0.3/src/tls.rs:118`), so an accepted handshake can always be converted; only a *dial* can
+/// lack a session ticket to convert with.
+///
+/// Note that upstream's infallibility rests on an internal
+/// `.expect("incoming connections can always be converted to 0-RTT")` (:624). Under this crate's
+/// `panic = "abort"` that would kill the process if noq's behaviour ever changed. The panic is not ours
+/// and breaks none of our rules, but it is worth knowing rather than discovering.
+async fn accepting_zero_rtt(slot: Option<AcceptingShared>) -> OpResult {
+    let Some(slot) = slot else {
+        return OpResult::new(released());
+    };
+    let Some(accepting) = slot.take().await else {
+        return OpResult::new(consumed("accepting connection"));
+    };
+    let handle = handle::into_handle(tracked(accepting.into_0rtt()));
+    OpResult::with_handle(handle_result(handle), iroh4k_incoming_zero_rtt_free)
+}
+
 /// Awaits the handshake behind a 0-RTT connection, reporting whether the early data was accepted.
 ///
 /// Backed by a `Shared` future upstream (`connection.rs:1259`), so this is **re-awaitable**: a
@@ -1106,6 +1130,21 @@ async fn outgoing_zero_rtt_await_handshake(zero: Option<OutgoingZeroRttConnectio
             format!("the 0-RTT handshake failed: {error}"),
         )),
     }
+}
+
+/// Awaits the handshake behind an inbound 0-RTT connection.
+///
+/// No accepted/rejected distinction, unlike [`outgoing_zero_rtt_await_handshake`]:
+/// `IncomingZeroRttConnection::handshake_completed` answers a bare `Connection`
+/// (`iroh-1.0.3/src/endpoint/connection.rs:1217`), because that question is meaningless on this side —
+/// the server is the one who decided to read early data at all, by calling [`accepting_zero_rtt`] in
+/// the first place. Shares the dialling side's re-awaitability and its two-handle lifetime, so
+/// [`finish_handshake`] — already built for exactly this shape — is reused verbatim.
+async fn incoming_zero_rtt_await_handshake(zero: Option<IncomingZeroRttConnection>) -> OpResult {
+    let Some(zero) = zero else {
+        return OpResult::new(released());
+    };
+    finish_handshake(zero.handshake_completed().await)
 }
 
 /// The ALPN negotiated for a handshake still in progress.
@@ -2048,6 +2087,24 @@ pub unsafe extern "C" fn iroh4k_accepting_alpn(
     }
 }
 
+/// Converts an accepted handshake into a 0-RTT connection; the result carries an
+/// `IncomingZeroRttConnection` handle. Asynchronous. Unlike [`iroh4k_connecting_zero_rtt`], never
+/// answers a null handle — see [`accepting_zero_rtt`].
+///
+/// # Safety
+/// As [`iroh4k_accepting_connect`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_accepting_zero_rtt(
+    handle: *mut c_void,
+    callback: *mut c_void,
+    fun: Completion,
+) -> i64 {
+    unsafe {
+        let slot = share::<Once<Accepting>>(handle);
+        ops::spawn_callback(callback, fun, accepting_zero_rtt(slot))
+    }
+}
+
 /// Completes an outbound handshake; the result carries a `Connection` handle. Asynchronous.
 ///
 /// # Safety
@@ -2115,6 +2172,24 @@ pub unsafe extern "C" fn iroh4k_outgoing_zero_rtt_await_handshake(
     unsafe {
         let zero = peek_clone::<OutgoingZeroRttConnection>(handle);
         ops::spawn_callback(callback, fun, outgoing_zero_rtt_await_handshake(zero))
+    }
+}
+
+/// Awaits the handshake behind an inbound 0-RTT connection; the result carries a fresh `Connection`
+/// handle, with no accepted/rejected distinction. Asynchronous. See
+/// [`incoming_zero_rtt_await_handshake`].
+///
+/// # Safety
+/// `handle` must satisfy [`peek_clone`]'s contract for an `IncomingZeroRttConnection` handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_incoming_zero_rtt_await_handshake(
+    handle: *mut c_void,
+    callback: *mut c_void,
+    fun: Completion,
+) -> i64 {
+    unsafe {
+        let zero = peek_clone::<IncomingZeroRttConnection>(handle);
+        ops::spawn_callback(callback, fun, incoming_zero_rtt_await_handshake(zero))
     }
 }
 
@@ -2738,6 +2813,17 @@ mod jni_facade {
         ops::spawn_channel(accepting_alpn(slot))
     }
 
+    /// As [`super::iroh4k_accepting_zero_rtt`].
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_acceptingZeroRttStart(
+        _env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+    ) -> jlong {
+        let slot = unsafe { share::<Once<Accepting>>(as_handle(handle)) };
+        ops::spawn_channel(accepting_zero_rtt(slot))
+    }
+
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectingConnectStart(
         _env: EnvUnowned,
@@ -2778,6 +2864,17 @@ mod jni_facade {
     ) -> jlong {
         let zero = unsafe { peek_clone::<OutgoingZeroRttConnection>(as_handle(handle)) };
         ops::spawn_channel(outgoing_zero_rtt_await_handshake(zero))
+    }
+
+    /// As [`super::iroh4k_incoming_zero_rtt_await_handshake`].
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_incomingZeroRttAwaitHandshakeStart(
+        _env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+    ) -> jlong {
+        let zero = unsafe { peek_clone::<IncomingZeroRttConnection>(as_handle(handle)) };
+        ops::spawn_channel(incoming_zero_rtt_await_handshake(zero))
     }
 
     #[unsafe(no_mangle)]

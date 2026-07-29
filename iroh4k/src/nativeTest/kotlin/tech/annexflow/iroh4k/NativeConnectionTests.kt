@@ -151,4 +151,8 @@ class NativeConnectionTests {
     @Test
     fun `a second dial from the same endpoint sends data before the handshake`() =
         runner.`a second dial from the same endpoint sends data before the handshake`()
+
+    @Test
+    fun `the accepting side reads a stream before its handshake completes`() =
+        runner.`the accepting side reads a stream before its handshake completes`()
 }

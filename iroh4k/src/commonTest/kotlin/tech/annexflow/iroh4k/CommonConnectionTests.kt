@@ -1130,6 +1130,46 @@ class CommonConnectionTests {
             }
         }
     }
+
+    // ── 0-RTT, accepting side ────────────────────────────────────────────────────────────────
+
+    fun `the accepting side reads a stream before its handshake completes`() = bounded {
+        Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+            Endpoint.bind(Loopback.config()).use { client ->
+                val served = async {
+                    val incoming = server.acceptNext() ?: error("the endpoint was shut down")
+                    incoming.use { it.accept() }.use { accepting ->
+                        accepting.zeroRtt().use { early ->
+                            val stream = early.acceptBi()
+                            val received = stream.use { it.recv.readToEnd(64) }
+                            // The handshake settles the identity this side could not know before it.
+                            early.awaitHandshake().use { completed ->
+                                // The handle behind `early` is still open here — this proves the
+                                // absent-preserving `remoteId()` reader (shared with the dialling
+                                // side's `nativeZeroRttRemoteId`) can answer a *present* value once
+                                // the handshake has actually settled, not only ever `null`. Task 3's
+                                // equivalent assertion on the dialling side could not make this claim:
+                                // there, the answer was still racing the certificate's arrival at the
+                                // equivalent point.
+                                assertThat(early.remoteId()).isEqualTo(client.id)
+                                received to completed.remoteId()
+                            }
+                        }
+                    }
+                }
+
+                client.connect(server.addr(), Loopback.alpn).use { outbound ->
+                    outbound.openBi().use { stream ->
+                        stream.send.writeAll("hello".encodeToByteArray())
+                        stream.send.finish()
+                    }
+                    val (received, id) = served.await()
+                    assertThat(received).isEqualTo("hello".encodeToByteArray())
+                    assertThat(id).isEqualTo(client.id)
+                }
+            }
+        }
+    }
 }
 
 /**

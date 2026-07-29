@@ -38,8 +38,9 @@ import tech.annexflow.iroh4k.internal.NativeHandle
  * ## What is not here yet
  *
  * [Connection.paths] is the snapshot form; the streaming form lives in `Watch.kt` as
- * `Connection.watchPaths()` and `Connection.watchPathEvents()`. The dialling side of 0-RTT is below —
- * [Connecting.zeroRtt] and [OutgoingZeroRttConnection] — but the accepting side is not here yet.
+ * `Connection.watchPaths()` and `Connection.watchPathEvents()`. 0-RTT is below, both sides:
+ * [Connecting.zeroRtt] and [OutgoingZeroRttConnection] for the dialling side, [Accepting.zeroRtt] and
+ * [IncomingZeroRttConnection] for the accepting one.
  */
 
 // ── Addresses ─────────────────────────────────────────────────────────────────────────────────
@@ -417,6 +418,14 @@ class Accepting internal constructor(private val guard: NativeHandle) : AutoClos
     override fun close() = guard.close()
 
     override fun toString(): String = if (guard.isReleased) "Accepting(released)" else "Accepting()"
+
+    /**
+     * Runs [block] against this handshake's native handle, holding the guard across it.
+     *
+     * The counterpart of [Connecting.useHandle]: [zeroRtt] needs to reach the handle without [guard]
+     * itself becoming visible outside this class.
+     */
+    internal suspend fun <T> useHandle(block: suspend (Long) -> T): T = guard.useSuspending(block)
 }
 
 /**
@@ -839,6 +848,90 @@ suspend fun OutgoingZeroRttConnection.awaitHandshake(): ZeroRttStatus = withHand
     if (accepted) ZeroRttStatus.Accepted(completed) else ZeroRttStatus.Rejected(completed)
 }
 
+// ── 0-RTT, accepting side ─────────────────────────────────────────────────────────────────────
+
+/**
+ * A connection that may carry application data read before its handshake completed, from the
+ * accepting side.
+ *
+ * From [Accepting.zeroRtt]. Mirrors [OutgoingZeroRttConnection] in nearly everything: [alpn] and
+ * [remoteId] answer `null` until the handshake settles them, for the same reason on both sides — and
+ * are read through the exact same pair of exports [OutgoingZeroRttConnection] already uses
+ * (`iroh4k_zero_rtt_alpn`/`iroh4k_zero_rtt_remote_id`), which probe either 0-RTT handle kind. There is
+ * no `IncomingZeroRttConnection`-specific pair to add.
+ *
+ * ## Two hazards, both upstream's own words
+ *
+ * As on the dialling side, 0-RTT data **is vulnerable to replay attacks and must never invoke
+ * non-idempotent operations**. This side carries a hazard the dialling side does not: because iroh
+ * accepts 0-RTT at the TLS layer unconditionally (see [Accepting.zeroRtt]'s doc), **0.5-RTT data this
+ * side sends back may reach the peer before that peer is authenticated** — this endpoint's own
+ * certificate has already gone out over the wire, but the identity behind the *client's* certificate
+ * has not yet been proven. Code that replies to early data before [awaitHandshake] resolves is
+ * replying to someone it has not yet verified.
+ *
+ * ## Closing
+ *
+ * Once [awaitHandshake] has answered, you hold two handles over one connection — exactly as
+ * [OutgoingZeroRttConnection] documents, and for the same reason: the future behind it caches its own
+ * output, which contains the resulting [Connection]. **Close this handle once you hold the
+ * [Connection]** — releasing only the [Connection] leaves the connection open indefinitely.
+ */
+class IncomingZeroRttConnection internal constructor(guard: NativeHandle) : QuicConnection(guard) {
+    /** The negotiated ALPN, or `null` while the handshake has not settled it. */
+    fun alpn(): ByteArray? = guard.use { nativeZeroRttAlpn(it) }
+
+    /** The peer's [EndpointId], or `null` while the handshake has not established it. */
+    fun remoteId(): EndpointId? = guard.use { nativeZeroRttRemoteId(it)?.let(EndpointId::validated) }
+
+    override fun toString(): String =
+        if (guard.isReleased) "IncomingZeroRttConnection(released)" else "IncomingZeroRttConnection()"
+}
+
+/**
+ * Turns this accepted handshake into a 0-RTT connection, so early data can be read before it
+ * completes.
+ *
+ * **Infallible**, unlike [Connecting.zeroRtt]: iroh accepts 0-RTT at the TLS layer on every endpoint —
+ * `max_early_data_size` is hardcoded (`iroh-1.0.3/src/tls.rs:118`) — so the only decision available to
+ * an application is whether it *reads* the early data at all. There is nothing to configure and
+ * nothing to refuse, which is also why this answers [IncomingZeroRttConnection] directly rather than a
+ * nullable one: unlike a dial, an accepted handshake never has "no ticket" to fail on.
+ *
+ * That infallibility is upstream's own guarantee, not one this binding derives independently: it rests
+ * on an internal `.expect("incoming connections can always be converted to 0-RTT")`
+ * (`iroh-1.0.3/src/endpoint/connection.rs:624`). Under this crate's `panic = "abort"` (see
+ * `AGENTS.md`), that `expect` failing would abort the host process rather than raise a Kotlin
+ * exception — the one place in this operation where a change to upstream's own invariant, not to
+ * anything iroh4k controls, could turn "always succeeds" into "always aborts."
+ *
+ * Consumes this handshake: a later [Accepting.connect] raises [IrohError] with [IrohError.Code.Closed].
+ */
+suspend fun Accepting.zeroRtt(): IncomingZeroRttConnection = useHandle { handle ->
+    IncomingZeroRttConnection(
+        NativeHandle(nativeAcceptingZeroRtt(handle), INCOMING_ZERO_RTT, ::nativeIncomingZeroRttFree),
+    )
+}
+
+/**
+ * Waits for the handshake and answers the established [Connection].
+ *
+ * There is no accepted/rejected distinction here, unlike [OutgoingZeroRttConnection.awaitHandshake]:
+ * that question belongs to the dialling side, which is the one that finds out whether its early data
+ * was actually read. `IncomingZeroRttConnection::handshake_completed` answers a bare `Connection`
+ * upstream (`iroh-1.0.3/src/endpoint/connection.rs:1217`) rather than the two-armed status the dialling
+ * side gets, and this mirrors that shape exactly.
+ *
+ * Re-awaitable and two-handled exactly as [OutgoingZeroRttConnection.awaitHandshake]: the future
+ * behind it is shared, so a cancelled call may simply be made again, and each success mints a fresh
+ * [Connection] handle with its own lifetime — close this handle once you hold the [Connection].
+ *
+ * @throws IrohError with [IrohError.Code.Connect] if the handshake fails.
+ */
+suspend fun IncomingZeroRttConnection.awaitHandshake(): Connection = withHandle { handle ->
+    Connection(NativeHandle(nativeIncomingZeroRttAwaitHandshake(handle), CONNECTION, ::nativeConnectionFree))
+}
+
 // ── The endpoint's accept and dial entry points ────────────────────────────────────────────────
 //
 // Extensions rather than members of `Endpoint`, because the accept chain is this domain's: everything
@@ -938,6 +1031,7 @@ private const val ACCEPTING = "accepting connection"
 private const val CONNECTING = "connection attempt"
 private const val CONNECTION = "connection"
 private const val OUTGOING_ZERO_RTT = "outgoing 0-RTT connection"
+private const val INCOMING_ZERO_RTT = "incoming 0-RTT connection"
 
 // ── The connection codec ──────────────────────────────────────────────────────────────────────
 //
@@ -1043,6 +1137,8 @@ internal expect fun nativeConnectionFree(handle: Long)
 
 internal expect fun nativeOutgoingZeroRttFree(handle: Long)
 
+internal expect fun nativeIncomingZeroRttFree(handle: Long)
+
 /** Returns the handle of the [Accepting] this produced. */
 internal expect fun nativeIncomingAccept(handle: Long): Long
 
@@ -1129,6 +1225,9 @@ internal expect suspend fun nativeAcceptingConnect(handle: Long): Long
 
 internal expect suspend fun nativeAcceptingAlpn(handle: Long): ByteArray
 
+/** Returns the handle of the [IncomingZeroRttConnection] this produced — see [Accepting.zeroRtt]. */
+internal expect suspend fun nativeAcceptingZeroRtt(handle: Long): Long
+
 internal expect suspend fun nativeConnectingConnect(handle: Long): Long
 
 internal expect suspend fun nativeConnectingAlpn(handle: Long): ByteArray
@@ -1138,3 +1237,9 @@ internal expect suspend fun nativeConnectingZeroRtt(handle: Long): Long
 
 /** The handle of the fresh [Connection], and whether the early data was accepted. */
 internal expect suspend fun nativeOutgoingZeroRttAwaitHandshake(handle: Long): Pair<Long, Boolean>
+
+/**
+ * Returns the handle of the fresh [Connection] — see [IncomingZeroRttConnection.awaitHandshake]. No
+ * accepted/rejected pair here: that distinction is the dialling side's alone.
+ */
+internal expect suspend fun nativeIncomingZeroRttAwaitHandshake(handle: Long): Long

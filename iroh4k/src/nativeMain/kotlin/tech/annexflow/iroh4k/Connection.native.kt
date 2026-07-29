@@ -6,6 +6,7 @@ import iroh4k.ffi.Iroh4kResult
 import iroh4k.ffi.iroh4k_accepting_alpn
 import iroh4k.ffi.iroh4k_accepting_connect
 import iroh4k.ffi.iroh4k_accepting_free
+import iroh4k.ffi.iroh4k_accepting_zero_rtt
 import iroh4k.ffi.iroh4k_connecting_alpn
 import iroh4k.ffi.iroh4k_connecting_connect
 import iroh4k.ffi.iroh4k_connecting_free
@@ -44,6 +45,8 @@ import iroh4k.ffi.iroh4k_incoming_refuse
 import iroh4k.ffi.iroh4k_incoming_remote_addr
 import iroh4k.ffi.iroh4k_incoming_remote_addr_validated
 import iroh4k.ffi.iroh4k_incoming_retry
+import iroh4k.ffi.iroh4k_incoming_zero_rtt_await_handshake
+import iroh4k.ffi.iroh4k_incoming_zero_rtt_free
 import iroh4k.ffi.iroh4k_outgoing_zero_rtt_await_handshake
 import iroh4k.ffi.iroh4k_outgoing_zero_rtt_free
 import iroh4k.ffi.iroh4k_zero_rtt_alpn
@@ -153,6 +156,10 @@ internal actual fun nativeConnectionFree(handle: Long) {
 
 internal actual fun nativeOutgoingZeroRttFree(handle: Long) {
     iroh4k_outgoing_zero_rtt_free(handle.asHandle())
+}
+
+internal actual fun nativeIncomingZeroRttFree(handle: Long) {
+    iroh4k_incoming_zero_rtt_free(handle.asHandle())
 }
 
 // ── Incoming — synchronous, as every one of these is in iroh ───────────────────────────────────
@@ -289,6 +296,13 @@ internal actual suspend fun nativeAcceptingConnect(handle: Long): Long =
 internal actual suspend fun nativeAcceptingAlpn(handle: Long): ByteArray =
     iroh { c -> iroh4k_accepting_alpn(handle.asHandle(), c, completion) }.bytesOrThrow()
 
+// Unlike `nativeConnectingZeroRtt`, this never answers `0`: `iroh4k_accepting_zero_rtt` is infallible
+// upstream — see `connection.rs`'s `accepting_zero_rtt` — so the handle it produces is always real.
+internal actual suspend fun nativeAcceptingZeroRtt(handle: Long): Long =
+    iroh(::iroh4k_incoming_zero_rtt_free) { c ->
+        iroh4k_accepting_zero_rtt(handle.asHandle(), c, completion)
+    }.handleOrThrow()
+
 internal actual suspend fun nativeConnectingConnect(handle: Long): Long =
     iroh(::iroh4k_connection_free) { c ->
         iroh4k_connecting_connect(handle.asHandle(), c, completion)
@@ -312,6 +326,13 @@ internal actual suspend fun nativeOutgoingZeroRttAwaitHandshake(handle: Long): P
     iroh(::iroh4k_connection_free) { c ->
         iroh4k_outgoing_zero_rtt_await_handshake(handle.asHandle(), c, completion)
     }.handleAndAcceptedOrThrow()
+
+// No accepted/rejected pair to read here — `incoming_zero_rtt_await_handshake` answers a bare handle
+// through `finish_handshake`, exactly like `nativeAcceptingConnect` and `nativeConnectingConnect`.
+internal actual suspend fun nativeIncomingZeroRttAwaitHandshake(handle: Long): Long =
+    iroh(::iroh4k_connection_free) { c ->
+        iroh4k_incoming_zero_rtt_await_handshake(handle.asHandle(), c, completion)
+    }.handleOrThrow()
 
 internal actual suspend fun nativeEndpointConnect(
     handle: Long,
