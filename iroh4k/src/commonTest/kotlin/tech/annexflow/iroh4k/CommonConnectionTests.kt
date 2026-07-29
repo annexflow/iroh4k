@@ -1225,7 +1225,12 @@ class CommonConnectionTests {
             // still looks like the same peer to the client, which will therefore try 0-RTT and be refused.
             Endpoint.bind(serverConfig()).use { restarted ->
                 val accepted = async { restarted.acceptOne() }
-                val zero = client.startConnect(restarted.addr(), Loopback.alpn).zeroRtt()
+                // Capture the attempt: `zeroRtt()` spends it but the `Connecting` handle wrapping it is
+                // a separate release, exactly as the priming loop above says. `NativeHandle` has no
+                // finalizer, so a discarded one leaks until the process ends.
+                val connecting = client.startConnect(restarted.addr(), Loopback.alpn)
+                val zero = connecting.zeroRtt()
+                connecting.close()
                 assertThat(zero).isNotNull()
                 zero!!.use { early ->
                     val stream = early.openBi()
