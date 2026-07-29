@@ -155,7 +155,7 @@ use iroh::{
         Accepting, ConnectOptions, Connecting, ConnectingError, Connection, ConnectionError,
         ConnectionStats, Incoming, IncomingAddr, IncomingZeroRttConnection, LocalTransportAddr,
         OutgoingZeroRttConnection, Path, QuicTransportConfig, RecvStream, SendDatagramError,
-        SendStream, UdpStats, VarInt,
+        SendStream, UdpStats, VarInt, ZeroRttStatus,
     },
 };
 
@@ -418,6 +418,76 @@ pub(crate) unsafe fn with<T: 'static>(
 /// As [`peek`], for a `Connection` handle.
 pub(crate) unsafe fn connection_clone(handle: *mut c_void) -> Option<Connection> {
     unsafe { peek::<Connection>(handle).map(|payload| (**payload).clone()) }
+}
+
+/// Clones the 0-RTT connection behind a handle, for moving into a spawned future.
+///
+/// The 0-RTT counterpart of [`connection_clone`], generic over which of the two kinds: both
+/// `OutgoingZeroRttConnection` and `IncomingZeroRttConnection` are `Connection<T>`, `Arc` inside
+/// exactly as the completed form is, and both have a `handshake_completed(&self)` that borrows
+/// rather than consumes — so each needs the identical treatment the module header describes: take an
+/// owned clone here (a refcount bump) and create the borrow entirely inside the spawned block. This
+/// task calls it peeking `OutgoingZeroRttConnection`; the server-side handshake await (a later task)
+/// peeks `IncomingZeroRttConnection` instead, through the same function.
+///
+/// # Safety
+/// As [`peek`], for a handle of type `T`.
+pub(crate) unsafe fn zero_rtt_clone<T: Clone + 'static>(handle: *mut c_void) -> Option<T> {
+    unsafe { peek::<T>(handle).map(|payload| (**payload).clone()) }
+}
+
+/// The negotiated ALPN of a 0-RTT connection, or the absent-bytes answer before the handshake has
+/// settled it.
+///
+/// Neither [`with`] nor [`with_any`]: `alpn(&self) -> Option<Vec<u8>>` on `Connection<OutgoingZeroRtt>`
+/// and `Connection<IncomingZeroRtt>` (`iroh-1.0.3/src/endpoint/connection.rs:1201`, `:1236`) already
+/// answers with an absence rather than needing one imposed on it, and that absence is not
+/// [`ERROR_CLOSED`] — it is "not yet", a legitimate value on a handle that is very much still alive.
+/// So this probes the two 0-RTT tags directly instead of going through the `HandshakeCompleted`-only
+/// surface [`with_any`] serves or the strict, `Connection`-only [`with`]. A completed `Connection`
+/// handle is deliberately rejected here: [`iroh4k_connection_alpn`] already serves it, unconditionally.
+///
+/// # Safety
+/// `handle` must be null, or a live `OutgoingZeroRttConnection`/`IncomingZeroRttConnection` handle from
+/// this module that has not been freed.
+unsafe fn zero_rtt_alpn(handle: *mut c_void) -> *mut Iroh4kResult {
+    let alpn = unsafe {
+        if let Some(payload) = peek::<OutgoingZeroRttConnection>(handle) {
+            (**payload).alpn()
+        } else if let Some(payload) = peek::<IncomingZeroRttConnection>(handle) {
+            (**payload).alpn()
+        } else {
+            return released();
+        }
+    };
+    match alpn {
+        Some(alpn) => bytes_result(alpn),
+        None => ok_result(),
+    }
+}
+
+/// The remote's [`EndpointId`], or the absent-bytes answer before the handshake has established it.
+///
+/// As [`zero_rtt_alpn`]: `remote_id(&self)` on both 0-RTT kinds answers
+/// `Result<EndpointId, RemoteEndpointIdError>`, and here an `Err` means only "not yet" — not a fault
+/// worth its own code — so it collapses to the same absent-bytes answer `None` gets.
+///
+/// # Safety
+/// As [`zero_rtt_alpn`].
+unsafe fn zero_rtt_remote_id(handle: *mut c_void) -> *mut Iroh4kResult {
+    let remote_id = unsafe {
+        if let Some(payload) = peek::<OutgoingZeroRttConnection>(handle) {
+            (**payload).remote_id()
+        } else if let Some(payload) = peek::<IncomingZeroRttConnection>(handle) {
+            (**payload).remote_id()
+        } else {
+            return released();
+        }
+    };
+    match remote_id {
+        Ok(id) => bytes_result(id.as_bytes().to_vec()),
+        Err(_) => ok_result(),
+    }
 }
 
 /// A clone of whatever connection a handle holds, whatever handshake state it is in.
@@ -966,6 +1036,72 @@ async fn connecting_connect(slot: Option<ConnectingShared>) -> OpResult {
         return OpResult::new(consumed("connection attempt"));
     };
     finish_handshake(connecting.await)
+}
+
+/// Converts an outbound attempt into a 0-RTT connection, or hands the attempt back untouched.
+///
+/// The two-way branch of `Connecting::into_0rtt` (`iroh-1.0.3/src/endpoint/connection.rs:528`): the
+/// `Err` arm is *not* a failure, it is "no session ticket for this peer", and it returns the same
+/// still-usable `Connecting`. So the `Err` arm puts the value back under the guard it was taken with
+/// and answers with a null handle and no error, which Kotlin reads as `null`.
+///
+/// `into_0rtt` is synchronous, so there is no await point between the `take` and the put-back and a
+/// cancellation cannot observe an empty slot mid-branch. A cancel while awaiting `lock()` is harmless:
+/// nothing has been taken yet.
+async fn connecting_zero_rtt(slot: Option<ConnectingShared>) -> OpResult {
+    let Some(slot) = slot else {
+        return OpResult::new(released());
+    };
+    let mut guard = slot.inner.lock().await;
+    let Some(connecting) = guard.take() else {
+        return OpResult::new(consumed("connection attempt"));
+    };
+    match connecting.into_0rtt() {
+        Ok(zero) => {
+            let handle = handle::into_handle(tracked(zero));
+            OpResult::with_handle(handle_result(handle), iroh4k_outgoing_zero_rtt_free)
+        }
+        Err(connecting) => {
+            *guard = Some(connecting);
+            OpResult::new(handle_result(std::ptr::null_mut()))
+        }
+    }
+}
+
+/// Awaits the handshake behind a 0-RTT connection, reporting whether the early data was accepted.
+///
+/// Backed by a `Shared` future upstream (`connection.rs:1259`), so this is **re-awaitable**: a
+/// cancelled call may simply be made again, unlike `Connecting::connect`. Each success mints a fresh
+/// `Connection` handle with its own lifetime.
+///
+/// Both arms of `ZeroRttStatus` carry a working connection: rejection means the early streams are dead
+/// and their data must be resent, not that there is no connection.
+async fn outgoing_zero_rtt_await_handshake(zero: Option<OutgoingZeroRttConnection>) -> OpResult {
+    let Some(zero) = zero else {
+        return OpResult::new(released());
+    };
+    match zero.handshake_completed().await {
+        Ok(status) => {
+            let (connection, accepted) = match status {
+                ZeroRttStatus::Accepted(connection) => (connection, 1),
+                ZeroRttStatus::Rejected(connection) => (connection, 0),
+            };
+            let handle = handle::into_handle(tracked(connection));
+            // `Iroh4kResult` carries a handle and a scalar at once (`core.rs:68`), so the accepted
+            // bit needs no codec payload of its own.
+            let result = Iroh4kResult {
+                handle,
+                i64_val: accepted,
+                ..Default::default()
+            }
+            .leak();
+            OpResult::with_handle(result, iroh4k_connection_free)
+        }
+        Err(error) => OpResult::new(error_result(
+            ERROR_CONNECT,
+            format!("the 0-RTT handshake failed: {error}"),
+        )),
+    }
 }
 
 /// The ALPN negotiated for a handshake still in progress.
@@ -1558,6 +1694,31 @@ pub unsafe extern "C" fn iroh4k_connecting_remote_id(handle: *mut c_void) -> *mu
 }
 
 // ----------------------------------------------------------------------------
+// 0-RTT — synchronous, and answering both handle kinds
+// ----------------------------------------------------------------------------
+
+/// The negotiated ALPN of a 0-RTT connection, as an optional bytes payload — absent before the
+/// handshake has settled it.
+///
+/// # Safety
+/// `handle` must be null, or a live `OutgoingZeroRttConnection`/`IncomingZeroRttConnection` handle
+/// from this module that has not been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_zero_rtt_alpn(handle: *mut c_void) -> *mut Iroh4kResult {
+    unsafe { zero_rtt_alpn(handle) }
+}
+
+/// The remote's endpoint id of a 0-RTT connection, as an optional bytes payload — absent before the
+/// handshake has established it.
+///
+/// # Safety
+/// As [`iroh4k_zero_rtt_alpn`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_zero_rtt_remote_id(handle: *mut c_void) -> *mut Iroh4kResult {
+    unsafe { zero_rtt_remote_id(handle) }
+}
+
+// ----------------------------------------------------------------------------
 // Connection — synchronous
 // ----------------------------------------------------------------------------
 
@@ -1915,6 +2076,44 @@ pub unsafe extern "C" fn iroh4k_connecting_alpn(
     }
 }
 
+/// Converts an outbound attempt into a 0-RTT connection, or hands it back untouched; the result
+/// carries an `OutgoingZeroRttConnection` handle, or a null handle when this endpoint holds no TLS
+/// session ticket for the peer. Asynchronous. See [`connecting_zero_rtt`].
+///
+/// # Safety
+/// As [`iroh4k_connecting_connect`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_connecting_zero_rtt(
+    handle: *mut c_void,
+    callback: *mut c_void,
+    fun: Completion,
+) -> i64 {
+    unsafe {
+        let slot = share::<ConnectingSlot>(handle);
+        ops::spawn_callback(callback, fun, connecting_zero_rtt(slot))
+    }
+}
+
+/// Awaits the handshake behind a 0-RTT connection; the result carries a fresh `Connection` handle,
+/// with the accepted bit in `i64_val`. Asynchronous. See [`outgoing_zero_rtt_await_handshake`].
+///
+/// # Safety
+/// `handle` must satisfy [`zero_rtt_clone`]'s contract for an `OutgoingZeroRttConnection` handle.
+/// Resolved through [`zero_rtt_clone`] rather than [`share`]: `handshake_completed` borrows rather
+/// than consumes, so — as every other borrowed future in this module — an owned clone is taken here
+/// and the borrow is created entirely inside the spawned task.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_outgoing_zero_rtt_await_handshake(
+    handle: *mut c_void,
+    callback: *mut c_void,
+    fun: Completion,
+) -> i64 {
+    unsafe {
+        let zero = zero_rtt_clone::<OutgoingZeroRttConnection>(handle);
+        ops::spawn_callback(callback, fun, outgoing_zero_rtt_await_handshake(zero))
+    }
+}
+
 /// Dials `addr` and completes the handshake; the result carries a `Connection` handle. Asynchronous.
 ///
 /// # Safety
@@ -2230,6 +2429,30 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
+    // ── 0-RTT — synchronous, answering both handle kinds ─────────────────────────────────────
+
+    /// As [`super::iroh4k_zero_rtt_alpn`].
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_zeroRttAlpn(
+        mut env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+    ) -> jbyteArray {
+        let result = unsafe { zero_rtt_alpn(as_handle(handle)) };
+        finish(&mut env, result)
+    }
+
+    /// As [`super::iroh4k_zero_rtt_remote_id`].
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_zeroRttRemoteId(
+        mut env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+    ) -> jbyteArray {
+        let result = unsafe { zero_rtt_remote_id(as_handle(handle)) };
+        finish(&mut env, result)
+    }
+
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionAlpn(
         mut env: EnvUnowned,
@@ -2529,6 +2752,28 @@ mod jni_facade {
     ) -> jlong {
         let slot = unsafe { share::<ConnectingSlot>(as_handle(handle)) };
         ops::spawn_channel(connecting_alpn(slot))
+    }
+
+    /// As [`super::iroh4k_connecting_zero_rtt`].
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectingZeroRttStart(
+        _env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+    ) -> jlong {
+        let slot = unsafe { share::<ConnectingSlot>(as_handle(handle)) };
+        ops::spawn_channel(connecting_zero_rtt(slot))
+    }
+
+    /// As [`super::iroh4k_outgoing_zero_rtt_await_handshake`].
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_outgoingZeroRttAwaitHandshakeStart(
+        _env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+    ) -> jlong {
+        let zero = unsafe { zero_rtt_clone::<OutgoingZeroRttConnection>(as_handle(handle)) };
+        ops::spawn_channel(outgoing_zero_rtt_await_handshake(zero))
     }
 
     #[unsafe(no_mangle)]

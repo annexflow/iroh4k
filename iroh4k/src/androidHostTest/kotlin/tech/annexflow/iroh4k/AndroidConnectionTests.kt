@@ -150,4 +150,12 @@ class AndroidConnectionTests {
     @Test
     fun `acceptWith refuses an empty ALPN list without touching the incoming connection`() =
         runner.`acceptWith refuses an empty ALPN list without touching the incoming connection`()
+
+    @Test
+    fun `the first dial has no ticket and leaves the attempt usable`() =
+        runner.`the first dial has no ticket and leaves the attempt usable`()
+
+    @Test
+    fun `a second dial from the same endpoint sends data before the handshake`() =
+        runner.`a second dial from the same endpoint sends data before the handshake`()
 }

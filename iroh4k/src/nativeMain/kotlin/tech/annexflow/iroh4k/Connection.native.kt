@@ -10,6 +10,7 @@ import iroh4k.ffi.iroh4k_connecting_alpn
 import iroh4k.ffi.iroh4k_connecting_connect
 import iroh4k.ffi.iroh4k_connecting_free
 import iroh4k.ffi.iroh4k_connecting_remote_id
+import iroh4k.ffi.iroh4k_connecting_zero_rtt
 import iroh4k.ffi.iroh4k_connection_alpn
 import iroh4k.ffi.iroh4k_connection_close
 import iroh4k.ffi.iroh4k_connection_close_reason
@@ -43,6 +44,10 @@ import iroh4k.ffi.iroh4k_incoming_refuse
 import iroh4k.ffi.iroh4k_incoming_remote_addr
 import iroh4k.ffi.iroh4k_incoming_remote_addr_validated
 import iroh4k.ffi.iroh4k_incoming_retry
+import iroh4k.ffi.iroh4k_outgoing_zero_rtt_await_handshake
+import iroh4k.ffi.iroh4k_outgoing_zero_rtt_free
+import iroh4k.ffi.iroh4k_zero_rtt_alpn
+import iroh4k.ffi.iroh4k_zero_rtt_remote_id
 import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.CPointed
 import kotlinx.cinterop.CPointer
@@ -111,6 +116,48 @@ private fun CPointer<Iroh4kResult>?.handleOrThrow(): Long {
     }
 }
 
+/**
+ * As [handleOrThrow], but named for what [Connecting.zeroRtt] needs from it: a null handle is the
+ * answer here — "no session ticket for this peer" — rather than a fault, and `iroh4k_connecting_zero_rtt`
+ * never sets an error for it, so there is nothing this reads differently at the byte level. A Rust
+ * error is still raised exactly as [handleOrThrow] raises one; the two only disagree about how their
+ * *caller* should read a `0`. Kept as its own function, not a call to [handleOrThrow], so the two never
+ * drift onto the same meaning by accident: a future change to what "null handle" implies for one must
+ * not silently change the other.
+ */
+private fun CPointer<Iroh4kResult>?.handleOrZero(): Long {
+    try {
+        val result = this?.pointed
+            ?: throw IllegalStateException("Invalid Iroh4kResult pointer: cannot dereference null")
+        if (result.error != IrohError.OK) {
+            IrohError(IrohError.Code.of(result.error), result.error_message?.toKString()).raise()
+        }
+        return result.handle?.toLong() ?: 0L
+    } finally {
+        iroh4k_free_result(this)
+    }
+}
+
+/**
+ * Reads `handle` and `i64_val` from the same result and frees it once — what
+ * [nativeOutgoingZeroRttAwaitHandshake] needs, since `outgoing_zero_rtt_await_handshake` answers with
+ * both the fresh [Connection] handle and the accepted bit in the one envelope. Chaining [handleOrThrow]
+ * with a second read of `i64_val` would free the result after the first call's `finally` and then read
+ * a field on the now-freed pointer, so both fields are taken here before the single free.
+ */
+private fun CPointer<Iroh4kResult>?.handleAndAcceptedOrThrow(): Pair<Long, Boolean> {
+    try {
+        val result = this?.pointed
+            ?: throw IllegalStateException("Invalid Iroh4kResult pointer: cannot dereference null")
+        if (result.error != IrohError.OK) {
+            IrohError(IrohError.Code.of(result.error), result.error_message?.toKString()).raise()
+        }
+        return (result.handle?.toLong() ?: 0L) to (result.i64_val != 0L)
+    } finally {
+        iroh4k_free_result(this)
+    }
+}
+
 // ── Handle lifecycle ──────────────────────────────────────────────────────────────────────────
 
 internal actual fun nativeConnectionLiveHandleCount(): Long = iroh4k_connection_live_handle_count()
@@ -129,6 +176,10 @@ internal actual fun nativeConnectingFree(handle: Long) {
 
 internal actual fun nativeConnectionFree(handle: Long) {
     iroh4k_connection_free(handle.asHandle())
+}
+
+internal actual fun nativeOutgoingZeroRttFree(handle: Long) {
+    iroh4k_outgoing_zero_rtt_free(handle.asHandle())
 }
 
 // ── Incoming — synchronous, as every one of these is in iroh ───────────────────────────────────
@@ -166,6 +217,12 @@ internal actual fun nativeIncomingAcceptWith(handle: Long, endpoint: Long, opts:
 
 internal actual fun nativeConnectingRemoteId(handle: Long): ByteArray =
     iroh4k_connecting_remote_id(handle.asHandle()).bytesOrThrow()
+
+internal actual fun nativeZeroRttAlpn(handle: Long): ByteArray? =
+    iroh4k_zero_rtt_alpn(handle.asHandle()).bytesOrNull()
+
+internal actual fun nativeZeroRttRemoteId(handle: Long): ByteArray? =
+    iroh4k_zero_rtt_remote_id(handle.asHandle()).bytesOrNull()
 
 internal actual fun nativeConnectionAlpn(handle: Long): ByteArray =
     iroh4k_connection_alpn(handle.asHandle()).bytesOrThrow()
@@ -266,6 +323,16 @@ internal actual suspend fun nativeConnectingConnect(handle: Long): Long =
 
 internal actual suspend fun nativeConnectingAlpn(handle: Long): ByteArray =
     iroh { c -> iroh4k_connecting_alpn(handle.asHandle(), c, completion) }.bytesOrThrow()
+
+internal actual suspend fun nativeConnectingZeroRtt(handle: Long): Long =
+    iroh(::iroh4k_outgoing_zero_rtt_free) { c ->
+        iroh4k_connecting_zero_rtt(handle.asHandle(), c, completion)
+    }.handleOrZero()
+
+internal actual suspend fun nativeOutgoingZeroRttAwaitHandshake(handle: Long): Pair<Long, Boolean> =
+    iroh(::iroh4k_connection_free) { c ->
+        iroh4k_outgoing_zero_rtt_await_handshake(handle.asHandle(), c, completion)
+    }.handleAndAcceptedOrThrow()
 
 internal actual suspend fun nativeEndpointConnect(
     handle: Long,

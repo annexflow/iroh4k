@@ -57,6 +57,22 @@ internal fun CPointer<Iroh4kResult>?.bytesOrThrow(): ByteArray = use {
 }
 
 /**
+ * The `bytes` payload, or `null` when Rust sent none.
+ *
+ * [bytesOrThrow] collapses that distinction to an empty array, which is right for every payload that
+ * was never optional in the first place. The connection domain's 0-RTT `alpn`/`remoteId` need the
+ * distinction kept, and on this facade it is simpler than [bytesOrThrow]'s own floor of zero: cinterop
+ * reads the `Iroh4kResult` struct's `bytes` field directly rather than through the length-prefixed
+ * wire format `core::serialize_result` writes for JNI, and `bytes_result` always leaks a non-null
+ * pointer — even for an empty payload, `Box::into_raw` on an empty boxed slice is still non-null — so
+ * a null pointer here can only be the absent case, never a genuinely empty one.
+ */
+internal fun CPointer<Iroh4kResult>?.bytesOrNull(): ByteArray? = use {
+    it.throwIfError()
+    it.bytes?.readBytes(it.bytes_len)
+}
+
+/**
  * Suspends until the Rust side invokes the completion callback, propagating cancellation.
  *
  * The `Continuation` is pinned with a [StableRef] so the Kotlin GC cannot move or collect it

@@ -61,6 +61,20 @@ internal fun ByteArray.jniBytesOrThrow(): ByteArray = decodeResult().let {
     it.bytes ?: ByteArray(0)
 }
 
+/**
+ * The codec payload, or `null` when Rust sent none.
+ *
+ * [jniBytesOrThrow] and [payload] both collapse that case to an empty array, which is right for a
+ * payload that was never optional. The connection domain's 0-RTT `alpn`/`remoteId` need the
+ * distinction kept — [JniResult.bytes] is already `ByteArray?`, decoded from `serialize_result`'s `i32
+ * -1` for a null `bytes` pointer (`core.rs:184`), so this is the one reader that answers with it
+ * rather than flattening it away.
+ */
+internal fun ByteArray.jniBytesOrNull(): ByteArray? = decodeResult().let {
+    it.throwIfError()
+    it.bytes
+}
+
 /** The `i64_val` field. */
 internal fun ByteArray.jniLongOrThrow(): Long = decodeResult().let {
     it.throwIfError()

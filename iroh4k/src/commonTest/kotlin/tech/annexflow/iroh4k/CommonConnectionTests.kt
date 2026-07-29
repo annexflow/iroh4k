@@ -1042,6 +1042,72 @@ class CommonConnectionTests {
 
     /** Polls [condition] on a real clock — see [Loopback.awaitUntil]. */
     private suspend fun awaitUntil(condition: () -> Boolean) = Loopback.awaitUntil(condition)
+
+    // ── 0-RTT, dialling side ─────────────────────────────────────────────────────────────────
+
+    fun `the first dial has no ticket and leaves the attempt usable`() = bounded {
+        Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+            Endpoint.bind(Loopback.config()).use { client ->
+                val accepted = async { server.acceptOne() }
+                val connecting = client.startConnect(server.addr(), Loopback.alpn)
+
+                // No session ticket for this peer yet, so upstream hands the attempt straight back.
+                assertThat(connecting.zeroRtt()).isNull()
+
+                // The whole point of the null: the attempt was NOT consumed and still completes. This is
+                // the only behavioural proof that the Err arm put the Connecting back into its slot.
+                connecting.connect().use { outbound ->
+                    assertThat(outbound.remoteId()).isEqualTo(server.id)
+                }
+                accepted.await().close()
+            }
+        }
+    }
+
+    fun `a second dial from the same endpoint sends data before the handshake`() = bounded {
+        Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+            // ONE client endpoint for both dials: the TLS ticket cache is per-endpoint and in memory,
+            // so a fresh endpoint here could never resume and this body would pass for the wrong reason.
+            Endpoint.bind(Loopback.config()).use { client ->
+                val first = async { server.acceptOne() }
+                client.startConnect(server.addr(), Loopback.alpn).let { connecting ->
+                    assertThat(connecting.zeroRtt()).isNull()
+                    val outbound = connecting.connect()
+                    // The server's session ticket is ordinary post-handshake application data, sent
+                    // asynchronously right after the handshake completes rather than bundled into it —
+                    // so it is still in flight, not yet processed, at the instant `connect()` returns.
+                    // Closing immediately races that delivery: closing transitions the connection to
+                    // draining and further inbound packets — including this one — are dropped rather
+                    // than queued. iroh's own 0-RTT tests (`connect_client_0rtt_expect_err` in
+                    // `iroh::endpoint::connection`) never hit this race because they always exchange a
+                    // request and response before closing, which takes longer than ticket delivery as a
+                    // side effect. There is nothing in iroh4k's surface to await instead — no handle on
+                    // "the ticket arrived" — so this is a real wait, not a substitute for one.
+                    delay(300)
+                    outbound.close()
+                }
+                first.await().close()
+
+                val second = async { server.acceptOne() }
+                val connecting = client.startConnect(server.addr(), Loopback.alpn)
+                val zero = connecting.zeroRtt()
+                assertThat(zero).isNotNull()
+                zero!!.use { early ->
+                    // Sending early data IS opening a stream — this is what the widened receiver bought.
+                    early.openBi().use { stream -> stream.send.writeAll("early".encodeToByteArray()) }
+
+                    when (val status = early.awaitHandshake()) {
+                        is ZeroRttStatus.Accepted -> status.connection.use {
+                            assertThat(it.remoteId()).isEqualTo(server.id)
+                        }
+                        is ZeroRttStatus.Rejected ->
+                            error("a server that never restarted must not reject: $status")
+                    }
+                }
+                second.await().close()
+            }
+        }
+    }
 }
 
 /**

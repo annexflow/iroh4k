@@ -38,7 +38,8 @@ import tech.annexflow.iroh4k.internal.NativeHandle
  * ## What is not here yet
  *
  * [Connection.paths] is the snapshot form; the streaming form lives in `Watch.kt` as
- * `Connection.watchPaths()` and `Connection.watchPathEvents()`. Still absent: 0-RTT.
+ * `Connection.watchPaths()` and `Connection.watchPathEvents()`. The dialling side of 0-RTT is below —
+ * [Connecting.zeroRtt] and [OutgoingZeroRttConnection] — but the accepting side is not here yet.
  */
 
 // ── Addresses ─────────────────────────────────────────────────────────────────────────────────
@@ -456,6 +457,15 @@ class Connecting internal constructor(private val guard: NativeHandle) : AutoClo
 
     override fun toString(): String =
         runCatching { "Connecting(${remoteId()})" }.getOrElse { "Connecting(released)" }
+
+    /**
+     * Runs [block] against this attempt's native handle, holding the guard across it.
+     *
+     * The hook [zeroRtt] needs to reach the handle without [guard] itself becoming visible outside
+     * this class — the exact counterpart of [QuicConnection.withHandle], which does the same job for
+     * [Connection]'s own extension functions.
+     */
+    internal suspend fun <T> useHandle(block: suspend (Long) -> T): T = guard.useSuspending(block)
 }
 
 // ── Connection ────────────────────────────────────────────────────────────────────────────────
@@ -744,6 +754,91 @@ class Connection internal constructor(guard: NativeHandle) : QuicConnection(guar
     }
 }
 
+// ── 0-RTT, dialling side ──────────────────────────────────────────────────────────────────────
+
+/**
+ * A connection that may carry application data sent before the handshake completed.
+ *
+ * From [Connecting.zeroRtt]. Everything on [QuicConnection] works — streams above all, since sending
+ * early data *is* opening a stream — and [alpn] and [remoteId] answer `null` until the handshake
+ * settles them, which is exactly why this is not a [Connection].
+ *
+ * ## Two hazards, both upstream's own words
+ *
+ * 0-RTT data **is vulnerable to replay attacks and must never invoke non-idempotent operations**. And a
+ * server may reject it at its discretion: accepting requires resumption state the server may limit or
+ * lose, and [awaitHandshake] is where you find out.
+ *
+ * ## Closing
+ *
+ * Once [awaitHandshake] has answered, you hold two handles over one connection, and this one keeps it
+ * alive: the future behind it caches its own output, which contains that [Connection]. **Close this
+ * handle once you hold the [Connection]** — releasing only the [Connection] leaves the connection open
+ * indefinitely. [close] with an error code closes it for both.
+ */
+class OutgoingZeroRttConnection internal constructor(guard: NativeHandle) : QuicConnection(guard) {
+    /** The negotiated ALPN, or `null` while the handshake has not settled it. */
+    fun alpn(): ByteArray? = guard.use { nativeZeroRttAlpn(it) }
+
+    /** The peer's [EndpointId], or `null` while the handshake has not established it. */
+    fun remoteId(): EndpointId? = guard.use { nativeZeroRttRemoteId(it)?.let(EndpointId::validated) }
+
+    override fun toString(): String =
+        if (guard.isReleased) "OutgoingZeroRttConnection(released)" else "OutgoingZeroRttConnection()"
+}
+
+/** What the handshake decided about the early data — see [OutgoingZeroRttConnection.awaitHandshake]. */
+sealed interface ZeroRttStatus {
+    /** The connection, established either way. */
+    val connection: Connection
+
+    /** The peer read the early data. Streams opened before the handshake stay usable. */
+    data class Accepted(override val connection: Connection) : ZeroRttStatus
+
+    /**
+     * The peer refused the early data — it had lost the resumption state, most likely by restarting.
+     * Streams opened before the handshake are dead and everything written on them must be resent on
+     * [connection]; reading or writing one raises [IrohError.Code.ZeroRttRejected].
+     */
+    data class Rejected(override val connection: Connection) : ZeroRttStatus
+}
+
+/**
+ * Turns this attempt into a 0-RTT connection, or answers `null` when 0-RTT is not available.
+ *
+ * `null` means this endpoint holds no TLS session ticket for the peer — it has not spoken to it before,
+ * or the ticket has been evicted (see [EndpointConfig.maxTlsTickets]). **This attempt is then untouched
+ * and [Connecting.connect] still completes it**, which is the whole reason the answer is nullable rather
+ * than an error. A non-null answer consumes the attempt: a later [Connecting.connect] raises
+ * [IrohError] with [IrohError.Code.Closed]. [Connecting.remoteId] answers either way.
+ *
+ * The ticket cache lives in the [Endpoint] and dies with it, so 0-RTT is only ever available on a second
+ * or later dial **from the same endpoint**.
+ */
+suspend fun Connecting.zeroRtt(): OutgoingZeroRttConnection? = useHandle { handle ->
+    val zero = nativeConnectingZeroRtt(handle)
+    if (zero == 0L) null
+    else OutgoingZeroRttConnection(
+        NativeHandle(zero, OUTGOING_ZERO_RTT, ::nativeOutgoingZeroRttFree),
+    )
+}
+
+/**
+ * Waits for the handshake and reports what became of the early data.
+ *
+ * **Re-awaitable**, unlike every other transition in this domain: the future behind it is shared, so a
+ * cancelled call may simply be made again where [Connecting.connect] would answer
+ * [IrohError.Code.Closed]. Each success mints a **fresh** [Connection] handle with its own lifetime —
+ * close each one you take.
+ *
+ * @throws IrohError with [IrohError.Code.Connect] if the handshake fails outright.
+ */
+suspend fun OutgoingZeroRttConnection.awaitHandshake(): ZeroRttStatus = withHandle { handle ->
+    val (connection, accepted) = nativeOutgoingZeroRttAwaitHandshake(handle)
+    val completed = Connection(NativeHandle(connection, CONNECTION, ::nativeConnectionFree))
+    if (accepted) ZeroRttStatus.Accepted(completed) else ZeroRttStatus.Rejected(completed)
+}
+
 // ── The endpoint's accept and dial entry points ────────────────────────────────────────────────
 //
 // Extensions rather than members of `Endpoint`, because the accept chain is this domain's: everything
@@ -842,6 +937,7 @@ private const val INCOMING = "incoming connection"
 private const val ACCEPTING = "accepting connection"
 private const val CONNECTING = "connection attempt"
 private const val CONNECTION = "connection"
+private const val OUTGOING_ZERO_RTT = "outgoing 0-RTT connection"
 
 // ── The connection codec ──────────────────────────────────────────────────────────────────────
 //
@@ -945,6 +1041,8 @@ internal expect fun nativeConnectingFree(handle: Long)
 
 internal expect fun nativeConnectionFree(handle: Long)
 
+internal expect fun nativeOutgoingZeroRttFree(handle: Long)
+
 /** Returns the handle of the [Accepting] this produced. */
 internal expect fun nativeIncomingAccept(handle: Long): Long
 
@@ -964,6 +1062,12 @@ internal expect fun nativeIncomingRemoteAddrValidated(handle: Long): Boolean
 internal expect fun nativeIncomingAcceptWith(handle: Long, endpoint: Long, opts: ByteArray): Long
 
 internal expect fun nativeConnectingRemoteId(handle: Long): ByteArray
+
+/** The negotiated ALPN of a 0-RTT connection, or `null` while the handshake has not settled it. */
+internal expect fun nativeZeroRttAlpn(handle: Long): ByteArray?
+
+/** The remote's endpoint id of a 0-RTT connection, or `null` while the handshake has not settled it. */
+internal expect fun nativeZeroRttRemoteId(handle: Long): ByteArray?
 
 internal expect fun nativeConnectionAlpn(handle: Long): ByteArray
 
@@ -1028,3 +1132,9 @@ internal expect suspend fun nativeAcceptingAlpn(handle: Long): ByteArray
 internal expect suspend fun nativeConnectingConnect(handle: Long): Long
 
 internal expect suspend fun nativeConnectingAlpn(handle: Long): ByteArray
+
+/** `0` when this endpoint holds no TLS session ticket for the peer — see [Connecting.zeroRtt]. */
+internal expect suspend fun nativeConnectingZeroRtt(handle: Long): Long
+
+/** The handle of the fresh [Connection], and whether the early data was accepted. */
+internal expect suspend fun nativeOutgoingZeroRttAwaitHandshake(handle: Long): Pair<Long, Boolean>
