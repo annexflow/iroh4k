@@ -172,7 +172,10 @@ class TransportConfig(
      * same thing operationally. A caller who writes `0` expecting a very small buffer gets something
      * else.
      *
-     * With datagrams refused, the peer's [Connection.maxDatagramSize] reports `null`.
+     * With datagrams refused, the peer's [Connection.maxDatagramSize] reports `0` — not `null`. The
+     * distinction is upstream's and worth knowing if you branch on it: `null` means the peer's
+     * transport does not carry datagrams at all, while `0` means it does and this endpoint has
+     * advertised that it will accept none of them. Either way nothing sent arrives.
      */
     val datagramReceiveBufferSize: Int? = null,
     /**

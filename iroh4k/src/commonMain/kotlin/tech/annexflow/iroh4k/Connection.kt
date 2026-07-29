@@ -725,17 +725,28 @@ suspend fun Endpoint.connect(addr: EndpointAddr, alpn: ByteArray): Connection = 
  * can simply be abandoned by releasing it — which is the whole reason both exist. Prefer [connect]
  * when neither of those matters.
  *
- * Maps onto iroh's `connect_with_opts` with default options, so there is no 0-RTT and no per-attempt
- * transport configuration here yet; when those arrive they belong on this call rather than on [connect].
+ * Maps onto iroh's `connect_with_opts`, which is also why [transportConfig] lives here and not on
+ * [connect]: upstream offers per-attempt options on that call alone. 0-RTT is the other thing that
+ * belongs here, and it has not arrived yet.
  *
+ * @param transportConfig QUIC transport parameters for this connection alone. It **replaces** the
+ *   endpoint's own [EndpointConfig.transportConfig] rather than merging with it — upstream's
+ *   behaviour, and the opposite of what most people expect, so a caller who wants the endpoint's
+ *   settings plus one change has to restate the settings. `null`, the default, uses the endpoint's.
  * @throws IrohError as [connect], except that a handshake failure surfaces from [Connecting.connect]
  *   rather than from here.
+ * @throws IrohError with [IrohError.Code.InvalidArgument] if [transportConfig] holds a value iroh
+ *   refuses — a negative duration, say.
  */
-suspend fun Endpoint.startConnect(addr: EndpointAddr, alpn: ByteArray): Connecting =
-    withHandle { handle ->
-        val started = nativeEndpointStartConnect(handle, encodeEndpointAddr(addr), alpn)
-        Connecting(NativeHandle(started, CONNECTING, ::nativeConnectingFree))
-    }
+suspend fun Endpoint.startConnect(
+    addr: EndpointAddr,
+    alpn: ByteArray,
+    transportConfig: TransportConfig? = null,
+): Connecting = withHandle { handle ->
+    val opts = BinaryWriter().apply { writeOptionalTransportConfig(transportConfig) }.finish()
+    val started = nativeEndpointStartConnect(handle, encodeEndpointAddr(addr), alpn, opts)
+    Connecting(NativeHandle(started, CONNECTING, ::nativeConnectingFree))
+}
 
 // ── The guard ─────────────────────────────────────────────────────────────────────────────────
 //
@@ -908,6 +919,7 @@ internal expect suspend fun nativeEndpointStartConnect(
     handle: Long,
     addr: ByteArray,
     alpn: ByteArray,
+    opts: ByteArray,
 ): Long
 
 /** Returns the handle of the established [Connection]. */

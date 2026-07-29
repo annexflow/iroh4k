@@ -149,13 +149,14 @@ use iroh::{
 use crate::addr::{
     TAG_CUSTOM, TAG_IP, TAG_RELAY, TAG_UNKNOWN, decode_endpoint_addr, write_transport_addr,
 };
-use crate::codec::Writer;
+use crate::codec::{Reader, Writer};
 use crate::core::{
     ERROR_ACCEPT, ERROR_CLOSED, ERROR_CONNECT, ERROR_INVALID_ARGUMENT, ERROR_WRITE, Iroh4kPtr,
     Iroh4kResult, bytes_result, error_result, handle_result, i64_result, ok_result, owned_bytes,
 };
 use crate::handle::{self, Consumed, Tagged};
 use crate::ops::{self, OpResult};
+use crate::transport;
 
 /// The completion callback every async C export takes — see [`crate::ffi`].
 pub(crate) type Completion = extern "C" fn(Iroh4kPtr, *mut Iroh4kResult);
@@ -618,7 +619,12 @@ async fn accept_next(endpoint: Option<Endpoint>) -> OpResult {
 /// be exercised — or used — without something to accept, and one loopback dial is the smallest thing
 /// that provides it. Only `connect_with_opts` with default options is wired up: no 0-RTT, no
 /// transport configuration, no additional ALPNs.
-async fn start_connect(endpoint: Option<Endpoint>, addr: Vec<u8>, alpn: Vec<u8>) -> OpResult {
+async fn start_connect(
+    endpoint: Option<Endpoint>,
+    addr: Vec<u8>,
+    alpn: Vec<u8>,
+    opts: Vec<u8>,
+) -> OpResult {
     let Some(endpoint) = endpoint else {
         return OpResult::new(released());
     };
@@ -626,10 +632,29 @@ async fn start_connect(endpoint: Option<Endpoint>, addr: Vec<u8>, alpn: Vec<u8>)
         Ok(addr) => addr,
         Err((code, message)) => return OpResult::new(error_result(code, message)),
     };
-    match endpoint
-        .connect_with_opts(addr, &alpn, ConnectOptions::default())
-        .await
-    {
+    // Decoded here rather than in either facade's export, because both call this one function and
+    // a second copy of the decode is a second place for the two ends to drift apart.
+    let transport_config = {
+        let mut r = Reader::new(&opts);
+        match transport::read_optional(&mut r).and_then(|config| r.finish().map(|()| config)) {
+            Ok(config) => config,
+            Err(message) => {
+                return OpResult::new(error_result(
+                    ERROR_INVALID_ARGUMENT,
+                    format!("malformed connect options: {message}"),
+                ));
+            }
+        }
+    };
+
+    // A transport configuration given here replaces the endpoint's own outright — that is upstream's
+    // behaviour, not a choice made here, and `Endpoint.startConnect`'s documentation says so.
+    let mut options = ConnectOptions::new();
+    if let Some(transport) = transport_config {
+        options = options.with_transport_config(transport);
+    }
+
+    match endpoint.connect_with_opts(addr, &alpn, options).await {
         Ok(connecting) => {
             let slot = ConnectingSlot {
                 remote_id: connecting.remote_id(),
@@ -1436,6 +1461,8 @@ pub unsafe extern "C" fn iroh4k_endpoint_start_connect(
     addr_len: c_int,
     alpn: *const u8,
     alpn_len: c_int,
+    opts: *const u8,
+    opts_len: c_int,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
@@ -1443,7 +1470,10 @@ pub unsafe extern "C" fn iroh4k_endpoint_start_connect(
         let endpoint = crate::endpoint::endpoint_clone(endpoint);
         let addr = owned_bytes(addr, addr_len);
         let alpn = owned_bytes(alpn, alpn_len);
-        ops::spawn_callback(callback, fun, start_connect(endpoint, addr, alpn))
+        // Copied, not borrowed: this is an asynchronous operation, so the pinned Kotlin array is
+        // gone long before the spawned future reads the payload.
+        let opts = owned_bytes(opts, opts_len);
+        ops::spawn_callback(callback, fun, start_connect(endpoint, addr, alpn, opts))
     }
 }
 
@@ -2028,11 +2058,13 @@ mod jni_facade {
         endpoint: jlong,
         addr: JByteArray,
         alpn: JByteArray,
+        opts: JByteArray,
     ) -> jlong {
         let endpoint = unsafe { crate::endpoint::endpoint_clone(as_handle(endpoint)) };
         let addr = arg(&mut env, &addr);
         let alpn = arg(&mut env, &alpn);
-        ops::spawn_channel(start_connect(endpoint, addr, alpn))
+        let opts = arg(&mut env, &opts);
+        ops::spawn_channel(start_connect(endpoint, addr, alpn, opts))
     }
 
     #[unsafe(no_mangle)]

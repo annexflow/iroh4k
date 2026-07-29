@@ -230,13 +230,17 @@ internal actual suspend fun nativeEndpointStartConnect(
     handle: Long,
     addr: ByteArray,
     alpn: ByteArray,
+    opts: ByteArray,
 ): Long = iroh(::iroh4k_connecting_free) { c ->
-    // Both buffers are pinned only for the call: Rust copies them before spawning the future.
+    // All three buffers are pinned only for the call: Rust copies them before spawning the future.
     addr.usePtr { addrPtr, addrLen ->
         alpn.usePtr { alpnPtr, alpnLen ->
-            iroh4k_endpoint_start_connect(
-                handle.asHandle(), addrPtr, addrLen, alpnPtr, alpnLen, c, completion,
-            )
+            opts.usePtr { optsPtr, optsLen ->
+                iroh4k_endpoint_start_connect(
+                    handle.asHandle(), addrPtr, addrLen, alpnPtr, alpnLen, optsPtr, optsLen,
+                    c, completion,
+                )
+            }
         }
     }
 }.handleOrThrow()

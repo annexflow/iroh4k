@@ -906,6 +906,36 @@ class CommonConnectionTests {
         }
     }
 
+    // ── Per-connection transport configuration ───────────────────────────────────────────────
+
+    fun `a connection made with datagrams refused reports no datagram size`() = Loopback.bounded {
+        Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+            Endpoint.bind(Loopback.config()).use { client ->
+                val accepted = async { server.acceptOne() }
+                // The client refuses datagrams for this connection only — its endpoint says nothing
+                // about them. The server therefore has nowhere to send one and reports no size,
+                // which is the one transport setting whose effect the other end can observe without
+                // traffic analysis, and so the only one a hermetic test can pin.
+                val connecting = client.startConnect(
+                    server.addr(),
+                    Loopback.alpn,
+                    TransportConfig(datagramReceiveBufferSize = 0),
+                )
+                connecting.connect().use { connection ->
+                    accepted.await().use { served ->
+                        // Zero rather than null, and the difference is the point: null is reserved
+                        // for a peer whose transport does not do datagrams at all, while this peer
+                        // does and has advertised that it will accept none. Anything the server
+                        // sent would be dropped, so the two answers mean the same thing to a
+                        // caller and different things to whoever reads the connection.
+                        assertThat(served.maxDatagramSize()).isEqualTo(0L)
+                        assertThat(connection.remoteId()).isEqualTo(server.id)
+                    }
+                }
+            }
+        }
+    }
+
     /** Polls [condition] on a real clock — see [Loopback.awaitUntil]. */
     private suspend fun awaitUntil(condition: () -> Boolean) = Loopback.awaitUntil(condition)
 }

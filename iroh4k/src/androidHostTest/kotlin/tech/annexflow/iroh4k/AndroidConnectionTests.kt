@@ -130,4 +130,8 @@ class AndroidConnectionTests {
     @Test
     fun `incoming and local addresses are values`() =
         runner.`incoming and local addresses are values`()
+
+    @Test
+    fun `a connection made with datagrams refused reports no datagram size`() =
+        runner.`a connection made with datagrams refused reports no datagram size`()
 }
