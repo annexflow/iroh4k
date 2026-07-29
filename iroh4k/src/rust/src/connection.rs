@@ -417,22 +417,26 @@ pub(crate) unsafe fn with<T: 'static>(
 /// # Safety
 /// As [`peek`], for a `Connection` handle.
 pub(crate) unsafe fn connection_clone(handle: *mut c_void) -> Option<Connection> {
-    unsafe { peek::<Connection>(handle).map(|payload| (**payload).clone()) }
+    unsafe { peek_clone::<Connection>(handle) }
 }
 
-/// Clones the 0-RTT connection behind a handle, for moving into a spawned future.
+/// Clones the payload behind a handle of any type, for moving into a spawned future.
 ///
-/// The 0-RTT counterpart of [`connection_clone`], generic over which of the two kinds: both
-/// `OutgoingZeroRttConnection` and `IncomingZeroRttConnection` are `Connection<T>`, `Arc` inside
-/// exactly as the completed form is, and both have a `handshake_completed(&self)` that borrows
-/// rather than consumes — so each needs the identical treatment the module header describes: take an
-/// owned clone here (a refcount bump) and create the borrow entirely inside the spawned block. This
-/// task calls it peeking `OutgoingZeroRttConnection`; the server-side handshake await (a later task)
-/// peeks `IncomingZeroRttConnection` instead, through the same function.
+/// Nothing here is specific to `Connection` or to 0-RTT: every long-lived operation across this
+/// module's handle kinds — the completed `Connection` and both `OutgoingZeroRttConnection` /
+/// `IncomingZeroRttConnection` tags — needs the identical treatment the module header describes,
+/// because each is an `Arc` inside (a refcount bump, not a copy) and each has at least one accessor
+/// that borrows rather than consumes (`handshake_completed`, `paths_stream`, `path_events`, …), so the
+/// only way to await one from a `'static` task is to own a clone here and create the borrow entirely
+/// inside the spawned block. [`connection_clone`] is this function specialised to `Connection` and
+/// kept as its own name: most call sites want that one concrete type, and its own doc explains which
+/// of them must stay on the strict form rather than going through [`connection_clone_any`]. The
+/// 0-RTT handshake awaits — dialling-side here, the server-side accept in a later task — peek
+/// `OutgoingZeroRttConnection` and `IncomingZeroRttConnection` straight through this function instead.
 ///
 /// # Safety
 /// As [`peek`], for a handle of type `T`.
-pub(crate) unsafe fn zero_rtt_clone<T: Clone + 'static>(handle: *mut c_void) -> Option<T> {
+pub(crate) unsafe fn peek_clone<T: Clone + 'static>(handle: *mut c_void) -> Option<T> {
     unsafe { peek::<T>(handle).map(|payload| (**payload).clone()) }
 }
 
@@ -2098,8 +2102,8 @@ pub unsafe extern "C" fn iroh4k_connecting_zero_rtt(
 /// with the accepted bit in `i64_val`. Asynchronous. See [`outgoing_zero_rtt_await_handshake`].
 ///
 /// # Safety
-/// `handle` must satisfy [`zero_rtt_clone`]'s contract for an `OutgoingZeroRttConnection` handle.
-/// Resolved through [`zero_rtt_clone`] rather than [`share`]: `handshake_completed` borrows rather
+/// `handle` must satisfy [`peek_clone`]'s contract for an `OutgoingZeroRttConnection` handle.
+/// Resolved through [`peek_clone`] rather than [`share`]: `handshake_completed` borrows rather
 /// than consumes, so — as every other borrowed future in this module — an owned clone is taken here
 /// and the borrow is created entirely inside the spawned task.
 #[unsafe(no_mangle)]
@@ -2109,7 +2113,7 @@ pub unsafe extern "C" fn iroh4k_outgoing_zero_rtt_await_handshake(
     fun: Completion,
 ) -> i64 {
     unsafe {
-        let zero = zero_rtt_clone::<OutgoingZeroRttConnection>(handle);
+        let zero = peek_clone::<OutgoingZeroRttConnection>(handle);
         ops::spawn_callback(callback, fun, outgoing_zero_rtt_await_handshake(zero))
     }
 }
@@ -2772,7 +2776,7 @@ mod jni_facade {
         _class: JClass,
         handle: jlong,
     ) -> jlong {
-        let zero = unsafe { zero_rtt_clone::<OutgoingZeroRttConnection>(as_handle(handle)) };
+        let zero = unsafe { peek_clone::<OutgoingZeroRttConnection>(as_handle(handle)) };
         ops::spawn_channel(outgoing_zero_rtt_await_handshake(zero))
     }
 

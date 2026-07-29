@@ -1049,15 +1049,17 @@ class CommonConnectionTests {
         Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
             Endpoint.bind(Loopback.config()).use { client ->
                 val accepted = async { server.acceptOne() }
-                val connecting = client.startConnect(server.addr(), Loopback.alpn)
+                client.startConnect(server.addr(), Loopback.alpn).use { connecting ->
+                    // No session ticket for this peer yet, so upstream hands the attempt straight back.
+                    // Unconditional, not a loop: this is the put-back's proof, and it only holds for a
+                    // dial that is genuinely the first one this endpoint has ever made to this peer.
+                    assertThat(connecting.zeroRtt()).isNull()
 
-                // No session ticket for this peer yet, so upstream hands the attempt straight back.
-                assertThat(connecting.zeroRtt()).isNull()
-
-                // The whole point of the null: the attempt was NOT consumed and still completes. This is
-                // the only behavioural proof that the Err arm put the Connecting back into its slot.
-                connecting.connect().use { outbound ->
-                    assertThat(outbound.remoteId()).isEqualTo(server.id)
+                    // The whole point of the null: the attempt was NOT consumed and still completes. This is
+                    // the only behavioural proof that the Err arm put the Connecting back into its slot.
+                    connecting.connect().use { outbound ->
+                        assertThat(outbound.remoteId()).isEqualTo(server.id)
+                    }
                 }
                 accepted.await().close()
             }
@@ -1069,30 +1071,50 @@ class CommonConnectionTests {
             // ONE client endpoint for both dials: the TLS ticket cache is per-endpoint and in memory,
             // so a fresh endpoint here could never resume and this body would pass for the wrong reason.
             Endpoint.bind(Loopback.config()).use { client ->
-                val first = async { server.acceptOne() }
-                client.startConnect(server.addr(), Loopback.alpn).let { connecting ->
-                    assertThat(connecting.zeroRtt()).isNull()
-                    val outbound = connecting.connect()
-                    // The server's session ticket is ordinary post-handshake application data, sent
-                    // asynchronously right after the handshake completes rather than bundled into it —
-                    // so it is still in flight, not yet processed, at the instant `connect()` returns.
-                    // Closing immediately races that delivery: closing transitions the connection to
-                    // draining and further inbound packets — including this one — are dropped rather
-                    // than queued. iroh's own 0-RTT tests (`connect_client_0rtt_expect_err` in
-                    // `iroh::endpoint::connection`) never hit this race because they always exchange a
-                    // request and response before closing, which takes longer than ticket delivery as a
-                    // side effect. There is nothing in iroh4k's surface to await instead — no handle on
-                    // "the ticket arrived" — so this is a real wait, not a substitute for one.
-                    delay(300)
-                    outbound.close()
-                }
-                first.await().close()
+                // The server's session ticket is ordinary post-handshake application data, sent
+                // asynchronously right after the handshake completes rather than bundled into it — so it
+                // can still be in flight, not yet processed, the instant a priming dial's `connect()`
+                // returns. iroh's own 0-RTT tests (`connect_client_0rtt_expect_err` in
+                // `iroh::endpoint::connection`) never hit this race because they always exchange a
+                // request and response before closing, which takes longer than ticket delivery as a side
+                // effect; there is nothing in iroh4k's surface to await instead — no handle on "the
+                // ticket arrived". So this dials repeatedly, completing and releasing each attempt
+                // normally, until `zeroRtt()` itself reports a ticket on a fresh attempt — the earliest
+                // instant priming is provably done, and a real wait rather than a fixed-length substitute
+                // for one. The enclosing `bounded`'s 60s real-time timeout is the backstop: a regression
+                // that never gets a ticket fails by timing out rather than looping forever.
+                var zero: OutgoingZeroRttConnection? = null
+                lateinit var accepted: Deferred<Connection>
+                do {
+                    accepted = async { server.acceptOne() }
+                    val connecting = client.startConnect(server.addr(), Loopback.alpn)
+                    zero = connecting.zeroRtt()
+                    if (zero == null) {
+                        // Not primed yet: finish this attempt like any ordinary connection, and
+                        // release both ends, so the loop's unsuccessful iterations cannot strand
+                        // connection-domain handles across a retry.
+                        connecting.connect().close()
+                        connecting.close()
+                        accepted.await().close()
+                    } else {
+                        // Primed: the attempt itself is spent (see `Connecting.zeroRtt`'s doc), but the
+                        // `Connecting` handle wrapping it is a separate release from the `zero` handle
+                        // just produced, so it still needs its own close.
+                        connecting.close()
+                    }
+                } while (zero == null)
 
-                val second = async { server.acceptOne() }
-                val connecting = client.startConnect(server.addr(), Loopback.alpn)
-                val zero = connecting.zeroRtt()
-                assertThat(zero).isNotNull()
-                zero!!.use { early ->
+                zero.use { early ->
+                    // Verified empirically rather than trusted from the class doc: whether `remoteId()`
+                    // has already settled here, before `awaitHandshake()` below has run, turns out to be
+                    // a genuine race rather than a fixed fact — on the JVM facade the certificate had
+                    // already arrived by this point in the same test; on the cinterop facade, running
+                    // this whole sequence with far less overhead per call, it consistently had not. So
+                    // this only asserts the part that IS true on every facade: `null` is still the
+                    // documented "not yet", and whenever an answer does exist that early, it is not a
+                    // stale or wrong one.
+                    early.remoteId()?.let { assertThat(it).isEqualTo(server.id) }
+
                     // Sending early data IS opening a stream — this is what the widened receiver bought.
                     early.openBi().use { stream -> stream.send.writeAll("early".encodeToByteArray()) }
 
@@ -1104,7 +1126,7 @@ class CommonConnectionTests {
                             error("a server that never restarted must not reject: $status")
                     }
                 }
-                second.await().close()
+                accepted.await().close()
             }
         }
     }

@@ -798,7 +798,7 @@ sealed interface ZeroRttStatus {
     /**
      * The peer refused the early data — it had lost the resumption state, most likely by restarting.
      * Streams opened before the handshake are dead and everything written on them must be resent on
-     * [connection]; reading or writing one raises [IrohError.Code.ZeroRttRejected].
+     * [connection]; reading or writing one raises an `IrohError` naming the rejection.
      */
     data class Rejected(override val connection: Connection) : ZeroRttStatus
 }
@@ -807,7 +807,7 @@ sealed interface ZeroRttStatus {
  * Turns this attempt into a 0-RTT connection, or answers `null` when 0-RTT is not available.
  *
  * `null` means this endpoint holds no TLS session ticket for the peer — it has not spoken to it before,
- * or the ticket has been evicted (see [EndpointConfig.maxTlsTickets]). **This attempt is then untouched
+ * or the ticket has been evicted from the endpoint's ticket cache. **This attempt is then untouched
  * and [Connecting.connect] still completes it**, which is the whole reason the answer is nullable rather
  * than an error. A non-null answer consumes the attempt: a later [Connecting.connect] raises
  * [IrohError] with [IrohError.Code.Closed]. [Connecting.remoteId] answers either way.

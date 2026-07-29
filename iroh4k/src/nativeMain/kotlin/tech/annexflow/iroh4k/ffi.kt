@@ -33,11 +33,18 @@ private fun Iroh4kResult.throwIfError() {
 /**
  * Reads the result, then frees it — always, even if [block] throws. Kotlin owns every result
  * pointer handed to it and `iroh4k_free_result` is the only way to release it.
+ *
+ * The null check is on the receiver alone, never on what [block] returns. [bytesOrNull] legitimately
+ * answers `null` from a perfectly valid, non-null result — that is the whole point of it — so folding
+ * the two into one `this?.pointed?.let(block) ?: throw …` chain would raise "cannot dereference null"
+ * on a live result purely because its own answer happened to be `null`, which is exactly the "absent"
+ * case [bytesOrNull] exists to report.
  */
 private inline fun <T> CPointer<Iroh4kResult>?.use(block: (Iroh4kResult) -> T): T {
+    val pointer = this
+        ?: throw IllegalStateException("Invalid Iroh4kResult pointer: cannot dereference null")
     try {
-        return this?.pointed?.let(block)
-            ?: throw IllegalStateException("Invalid Iroh4kResult pointer: cannot dereference null")
+        return block(pointer.pointed)
     } finally {
         iroh4k_free_result(this)
     }
@@ -61,15 +68,21 @@ internal fun CPointer<Iroh4kResult>?.bytesOrThrow(): ByteArray = use {
  *
  * [bytesOrThrow] collapses that distinction to an empty array, which is right for every payload that
  * was never optional in the first place. The connection domain's 0-RTT `alpn`/`remoteId` need the
- * distinction kept, and on this facade it is simpler than [bytesOrThrow]'s own floor of zero: cinterop
- * reads the `Iroh4kResult` struct's `bytes` field directly rather than through the length-prefixed
- * wire format `core::serialize_result` writes for JNI, and `bytes_result` always leaks a non-null
- * pointer — even for an empty payload, `Box::into_raw` on an empty boxed slice is still non-null — so
- * a null pointer here can only be the absent case, never a genuinely empty one.
+ * distinction kept: cinterop reads the `Iroh4kResult` struct's `bytes` field directly rather than
+ * through the length-prefixed wire format `core::serialize_result` writes for JNI, and `bytes_result`
+ * always leaks a non-null pointer — even for an empty payload, `Box::into_raw` on an empty boxed slice
+ * is still non-null — so a null pointer here can only be the absent case, never a genuinely empty one.
+ *
+ * `bytes_len` still gets [bytesOrThrow]'s own floor of zero rather than being trusted as-is once the
+ * pointer is non-null. Nothing on the Rust side sends a negative length today — `core.rs:117` derives
+ * it from `bytes.len()` — but this file's whole job is not to trust the boundary, and a raw
+ * `readBytes(negative)` would throw `NegativeArraySizeException` instead of the `IrohError` every
+ * other malformed result raises here.
  */
-internal fun CPointer<Iroh4kResult>?.bytesOrNull(): ByteArray? = use {
-    it.throwIfError()
-    it.bytes?.readBytes(it.bytes_len)
+internal fun CPointer<Iroh4kResult>?.bytesOrNull(): ByteArray? = use { result ->
+    result.throwIfError()
+    val len = result.bytes_len
+    result.bytes?.let { ptr -> if (len <= 0) ByteArray(0) else ptr.readBytes(len) }
 }
 
 /**

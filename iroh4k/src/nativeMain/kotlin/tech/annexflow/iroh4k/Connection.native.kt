@@ -94,56 +94,16 @@ private inline fun <T> ByteArray.usePtr(block: (CPointer<UByteVar>?, Int) -> T):
     }
 
 /**
- * Reads the `handle` field of a result, then frees the result — always, even on failure.
- *
- * `ffi.kt` has `orThrow`, `longOrThrow` and `bytesOrThrow` but no handle reader, because until this
- * domain nothing produced a handle from an operation. It belongs beside those three; it is here for
- * now because they share a private `use { }` helper this file cannot reach.
- *
- * `0` for a null handle. That is not an error: it is how `acceptNext` reports iroh's `None` for an
- * endpoint that has been shut down.
- */
-private fun CPointer<Iroh4kResult>?.handleOrThrow(): Long {
-    try {
-        val result = this?.pointed
-            ?: throw IllegalStateException("Invalid Iroh4kResult pointer: cannot dereference null")
-        if (result.error != IrohError.OK) {
-            IrohError(IrohError.Code.of(result.error), result.error_message?.toKString()).raise()
-        }
-        return result.handle?.toLong() ?: 0L
-    } finally {
-        iroh4k_free_result(this)
-    }
-}
-
-/**
- * As [handleOrThrow], but named for what [Connecting.zeroRtt] needs from it: a null handle is the
- * answer here — "no session ticket for this peer" — rather than a fault, and `iroh4k_connecting_zero_rtt`
- * never sets an error for it, so there is nothing this reads differently at the byte level. A Rust
- * error is still raised exactly as [handleOrThrow] raises one; the two only disagree about how their
- * *caller* should read a `0`. Kept as its own function, not a call to [handleOrThrow], so the two never
- * drift onto the same meaning by accident: a future change to what "null handle" implies for one must
- * not silently change the other.
- */
-private fun CPointer<Iroh4kResult>?.handleOrZero(): Long {
-    try {
-        val result = this?.pointed
-            ?: throw IllegalStateException("Invalid Iroh4kResult pointer: cannot dereference null")
-        if (result.error != IrohError.OK) {
-            IrohError(IrohError.Code.of(result.error), result.error_message?.toKString()).raise()
-        }
-        return result.handle?.toLong() ?: 0L
-    } finally {
-        iroh4k_free_result(this)
-    }
-}
-
-/**
  * Reads `handle` and `i64_val` from the same result and frees it once — what
  * [nativeOutgoingZeroRttAwaitHandshake] needs, since `outgoing_zero_rtt_await_handshake` answers with
  * both the fresh [Connection] handle and the accepted bit in the one envelope. Chaining [handleOrThrow]
  * with a second read of `i64_val` would free the result after the first call's `finally` and then read
  * a field on the now-freed pointer, so both fields are taken here before the single free.
+ *
+ * This is also the only place in the file that performs the null-check / error-raise / free sequence
+ * on a handle-bearing result — [handleOrThrow] is expressed over it rather than repeating that
+ * sequence a second time, so a future fix to the teardown (a different free ordering, a new guard on
+ * a null handle) only has one place to land.
  */
 private fun CPointer<Iroh4kResult>?.handleAndAcceptedOrThrow(): Pair<Long, Boolean> {
     try {
@@ -157,6 +117,19 @@ private fun CPointer<Iroh4kResult>?.handleAndAcceptedOrThrow(): Pair<Long, Boole
         iroh4k_free_result(this)
     }
 }
+
+/**
+ * Reads the `handle` field of a result, then frees the result — always, even on failure.
+ *
+ * `ffi.kt` has `orThrow`, `longOrThrow` and `bytesOrThrow` but no handle reader, because until this
+ * domain nothing produced a handle from an operation. It belongs beside those three; it is here for
+ * now because they share a private `use { }` helper this file cannot reach.
+ *
+ * `0` for a null handle. That is not an error: it is how `acceptNext` reports iroh's `None` for an
+ * endpoint that has been shut down — and, for [nativeConnectingZeroRtt], how a peer with no cached
+ * session ticket is reported; see the comment there.
+ */
+private fun CPointer<Iroh4kResult>?.handleOrThrow(): Long = handleAndAcceptedOrThrow().first
 
 // ── Handle lifecycle ──────────────────────────────────────────────────────────────────────────
 
@@ -324,10 +297,16 @@ internal actual suspend fun nativeConnectingConnect(handle: Long): Long =
 internal actual suspend fun nativeConnectingAlpn(handle: Long): ByteArray =
     iroh { c -> iroh4k_connecting_alpn(handle.asHandle(), c, completion) }.bytesOrThrow()
 
+// A `0` handle from `handleOrThrow()` here is the answer, not a fault: `iroh4k_connecting_zero_rtt`
+// never sets an error for "no session ticket for this peer", it just leaves the result's `handle`
+// null, so `handleOrThrow`'s ordinary null-handle-means-zero reading already says exactly what
+// [Connecting.zeroRtt] needs — the caller is the one that decides a `0` here means "try `connect`
+// instead" rather than "shut down", the same way it already reads `acceptNext`'s `0` as "endpoint
+// closed" and not the other way round.
 internal actual suspend fun nativeConnectingZeroRtt(handle: Long): Long =
     iroh(::iroh4k_outgoing_zero_rtt_free) { c ->
         iroh4k_connecting_zero_rtt(handle.asHandle(), c, completion)
-    }.handleOrZero()
+    }.handleOrThrow()
 
 internal actual suspend fun nativeOutgoingZeroRttAwaitHandshake(handle: Long): Pair<Long, Boolean> =
     iroh(::iroh4k_connection_free) { c ->
