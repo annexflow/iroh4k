@@ -360,7 +360,11 @@ fn tracked<T>(value: T) -> Tracked<T> {
 /// # Safety
 /// `handle` must be null, or a live handle produced by this module or [`crate::stream`] for `T` and
 /// not yet freed. Kotlin's guard guarantees the second part: it releases a handle only once every
-/// call inside it has returned.
+/// call inside it has returned. A live handle tagged for a *different* type than `T` is also a
+/// supported input, not a violation of this contract: `handle::borrow` gates on `is::<T>(handle)`
+/// before casting (`handle.rs:81-88`) and answers `None` rather than reinterpreting the payload.
+/// [`connection_clone_any`] relies on exactly this, probing a handle against three different tagged
+/// types in turn.
 pub(crate) unsafe fn peek<'a, T: 'static>(handle: *mut c_void) -> Option<&'a Tracked<T>> {
     unsafe {
         if handle.is_null() {
@@ -401,7 +405,14 @@ pub(crate) unsafe fn with<T: 'static>(
 /// task is to own a clone and create the borrow inside the task. `Connection` is an `Arc` inside, so
 /// this is a refcount bump rather than a copy of anything.
 ///
-/// Shared with [`crate::stream`], whose four stream openers all need it.
+/// The remaining caller is [`crate::watch`]'s path watchers (`iroh4k_connection_watch_paths` and
+/// `iroh4k_connection_watch_path_events`, plus their JNI twins): they stay on this strict clone
+/// rather than [`connection_clone_any`] because `paths_stream()` and `path_events()` only exist on
+/// `Connection<HandshakeCompleted>` upstream (`iroh-1.0.3/src/endpoint/connection.rs:1157` and
+/// `:1176`) — the `PathStateReceiver` they read lives in `HandshakeCompletedData`, and a 0-RTT
+/// connection has no such data yet. The five synchronous exports below are strict for the same
+/// reason: `connection_alpn`, `connection_remote_id`, `connection_side`, `connection_paths` and
+/// `connection_rtt`.
 ///
 /// # Safety
 /// As [`peek`], for a `Connection` handle.
@@ -571,8 +582,9 @@ pub(crate) unsafe fn connection_clone_any(handle: *mut c_void) -> Option<AnyConn
 ///
 /// The [`with`] of the shared surface: it resolves through [`connection_clone_any`] rather than
 /// [`peek`], because the shared exports must accept a completed connection as well as either 0-RTT
-/// handle. The clone this takes is an `Arc` refcount bump, not a copy, so it costs no more than the
-/// borrow `with` takes.
+/// handle. The clone this takes is an `Arc` refcount bump — an atomic increment paired with the
+/// eventual decrement on drop — rather than a copy of anything, so it is negligible next to the FFI
+/// crossing itself, the same way this crate accounts for `Connection`'s clone cost elsewhere.
 ///
 /// # Safety
 /// As [`connection_clone_any`].
@@ -1390,10 +1402,12 @@ pub unsafe extern "C" fn iroh4k_connection_free(handle: *mut c_void) {
 ///
 /// Dropping the last reference closes the connection with error code `0` and an empty reason, which
 /// is iroh's own behaviour — exactly as [`iroh4k_connection_free`] documents. The distinction worth
-/// having in mind here: a 0-RTT handle is *not* the last reference once `handshake_completed` has
-/// produced a `Connection` — that call clones the underlying state rather than consuming it, so this
-/// handle and the `Connection` handle it led to are two independent references, and both must be
-/// released before the connection actually closes.
+/// having in mind here: `Connection<OutgoingZeroRtt>::handshake_completed(&self)` borrows rather than
+/// consumes (`iroh-1.0.3/src/endpoint/connection.rs:1259`), and the `Connection` it produces arrives
+/// *inside* the returned `ZeroRttStatus::Accepted` or `ZeroRttStatus::Rejected` (`:693`-`:701`), not
+/// in place of this handle. So a 0-RTT handle is never the last reference once that call has
+/// succeeded — this handle and the `Connection` handle wrapped in its `ZeroRttStatus` are two
+/// independent references, and both must be released before the connection actually closes.
 ///
 /// # Safety
 /// As [`iroh4k_incoming_free`], for an `OutgoingZeroRttConnection` handle.
