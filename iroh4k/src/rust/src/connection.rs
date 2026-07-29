@@ -142,7 +142,8 @@ use iroh::{
     Endpoint, EndpointId,
     endpoint::{
         Accepting, ConnectOptions, Connecting, ConnectingError, Connection, ConnectionStats,
-        Incoming, IncomingAddr, LocalTransportAddr, Path, SendDatagramError, UdpStats, VarInt,
+        Incoming, IncomingAddr, LocalTransportAddr, Path, QuicTransportConfig, SendDatagramError,
+        UdpStats, VarInt,
     },
 };
 
@@ -488,6 +489,65 @@ fn incoming_accept(slot: &Consumed<Incoming>) -> *mut Iroh4kResult {
         return consumed("incoming connection");
     };
     match in_runtime(|| incoming.accept()) {
+        Ok(accepting) => handle_result(handle::into_handle(tracked(Once::new(accepting)))),
+        Err(error) => error_result(
+            ERROR_ACCEPT,
+            format!("could not accept an incoming connection: {error}"),
+        ),
+    }
+}
+
+/// Decodes an `acceptWith` options payload: the ALPN list plus an optional transport
+/// configuration.
+///
+/// Mirrors `Incoming.acceptWith`'s writer in `Connection.kt`: `i32` count then that many
+/// length-prefixed ALPNs, followed by the same optional-`TransportConfig` record
+/// `Endpoint.startConnect`'s options payload ends with.
+fn decode_accept_with_opts(
+    opts: &[u8],
+) -> Result<(Vec<Vec<u8>>, Option<QuicTransportConfig>), String> {
+    let mut r = Reader::new(opts);
+    let count = r.count()?;
+    let mut alpns = Vec::with_capacity(count);
+    for _ in 0..count {
+        alpns.push(r.bytes()?.to_vec());
+    }
+    let transport = transport::read_optional(&mut r)?;
+    r.finish()?;
+    Ok((alpns, transport))
+}
+
+/// Accepts an incoming connection with a transport configuration for this connection alone,
+/// producing an `Accepting` handle.
+///
+/// A sibling of [`incoming_accept`] rather than a parameter added to it: `accept_with` needs an
+/// `Arc<ServerConfig>`, which upstream can only build through `endpoint`'s own
+/// `create_server_config_builder`, so this operation additionally takes the endpoint the incoming
+/// connection came from. `alpns` is not inferred from the incoming connection's own negotiated
+/// protocol: `ServerConfigBuilder` has no way to add an ALPN after it is created, so the caller
+/// states the list explicitly and Kotlin's `acceptWith` documents why a list that omits the
+/// negotiated protocol accepts a connection that agrees on nothing.
+///
+/// The slot is taken *after* `alpns`/`transport` have already been decoded by the caller, so a
+/// malformed payload never consumes the incoming connection — only a well-formed one reaches this
+/// function at all. Taking it here, before the server configuration is built, is what makes a
+/// second use of the same handle report [`ERROR_CLOSED`] rather than building a config for nothing,
+/// exactly as [`incoming_accept`] does.
+fn incoming_accept_with(
+    slot: &Consumed<Incoming>,
+    endpoint: &Endpoint,
+    alpns: Vec<Vec<u8>>,
+    transport: Option<QuicTransportConfig>,
+) -> *mut Iroh4kResult {
+    let Some(incoming) = slot.take() else {
+        return consumed("incoming connection");
+    };
+    let mut builder = endpoint.create_server_config_builder(alpns);
+    if let Some(transport) = transport {
+        builder = builder.set_transport_config(transport);
+    }
+    let server_config = Arc::new(builder.build());
+    match in_runtime(|| incoming.accept_with(server_config)) {
         Ok(accepting) => handle_result(handle::into_handle(tracked(Once::new(accepting)))),
         Err(error) => error_result(
             ERROR_ACCEPT,
@@ -1169,6 +1229,43 @@ pub unsafe extern "C" fn iroh4k_incoming_remote_addr_validated(
     unsafe { with::<Consumed<Incoming>>(handle, |slot| incoming_remote_addr_validated(slot)) }
 }
 
+/// Accepts an incoming connection with its own ALPN list and transport configuration; the result
+/// carries an `Accepting` handle.
+///
+/// Synchronous, like [`iroh4k_incoming_accept`]: `accept_with` is synchronous in iroh too, so
+/// `opts` is borrowed rather than copied — it need only survive this one call.
+///
+/// # Safety
+/// `handle` must satisfy [`peek`]'s contract for an `Incoming` handle. `endpoint` must satisfy
+/// [`crate::endpoint::endpoint_clone`]'s contract for an endpoint handle. `opts`/`opts_len` must
+/// satisfy [`borrowed`]'s contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_incoming_accept_with(
+    handle: *mut c_void,
+    endpoint: *mut c_void,
+    opts: *const u8,
+    opts_len: c_int,
+) -> *mut Iroh4kResult {
+    unsafe {
+        let opts = borrowed(opts, opts_len);
+        let (alpns, transport) = match decode_accept_with_opts(opts) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                return error_result(
+                    ERROR_INVALID_ARGUMENT,
+                    format!("malformed accept options: {message}"),
+                );
+            }
+        };
+        let Some(endpoint) = crate::endpoint::endpoint_clone(endpoint) else {
+            return released();
+        };
+        with::<Consumed<Incoming>>(handle, |slot| {
+            incoming_accept_with(slot, &endpoint, alpns, transport)
+        })
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Connecting — the one synchronous accessor
 // ----------------------------------------------------------------------------
@@ -1786,6 +1883,34 @@ mod jni_facade {
             with::<Consumed<Incoming>>(as_handle(handle), |slot| {
                 incoming_remote_addr_validated(slot)
             })
+        };
+        finish(&mut env, result)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_incomingAcceptWith(
+        mut env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+        endpoint: jlong,
+        opts: JByteArray,
+    ) -> jbyteArray {
+        let opts = arg(&mut env, &opts);
+        let result = match decode_accept_with_opts(&opts) {
+            Ok((alpns, transport)) => {
+                match unsafe { crate::endpoint::endpoint_clone(as_handle(endpoint)) } {
+                    Some(endpoint) => unsafe {
+                        with::<Consumed<Incoming>>(as_handle(handle), |slot| {
+                            incoming_accept_with(slot, &endpoint, alpns, transport)
+                        })
+                    },
+                    None => released(),
+                }
+            }
+            Err(message) => error_result(
+                ERROR_INVALID_ARGUMENT,
+                format!("malformed accept options: {message}"),
+            ),
         };
         finish(&mut env, result)
     }

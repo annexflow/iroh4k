@@ -127,4 +127,8 @@ class NativeConnectionTests {
     @Test
     fun `a connection made with datagrams refused reports no datagram size`() =
         runner.`a connection made with datagrams refused reports no datagram size`()
+
+    @Test
+    fun `an incoming connection can be accepted with its own transport configuration`() =
+        runner.`an incoming connection can be accepted with its own transport configuration`()
 }

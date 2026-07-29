@@ -568,6 +568,16 @@ class Endpoint private constructor(private val guard: NativeHandle) : AutoClosea
      */
     internal suspend fun <T> withHandle(block: suspend (Long) -> T): T = suspending(block)
 
+    /**
+     * Runs a synchronous native call against this endpoint's handle, from another domain.
+     *
+     * The non-suspending twin of [withHandle], for the one caller that needs an endpoint handle
+     * inside a synchronous operation: `Incoming.acceptWith` has to build a server configuration from
+     * the endpoint that produced it. Guarded exactly as every other access is, so racing it against
+     * [close] reports [IrohError.Code.Closed] rather than dereferencing a freed pointer.
+     */
+    internal fun <T> useHandle(block: (Long) -> T): T = sync(block)
+
     companion object {
         /**
          * Binds an endpoint according to [config].

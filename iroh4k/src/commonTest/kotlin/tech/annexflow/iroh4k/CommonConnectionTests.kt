@@ -936,6 +936,34 @@ class CommonConnectionTests {
         }
     }
 
+    fun `an incoming connection can be accepted with its own transport configuration`() =
+        Loopback.bounded {
+            Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+                Endpoint.bind(Loopback.config()).use { client ->
+                    val accepted = async {
+                        val incoming = server.acceptNext() ?: error("shut down while accepting")
+                        incoming.use { pending ->
+                            // The server refuses datagrams for this connection alone.
+                            pending.acceptWith(
+                                listOf(Loopback.alpn),
+                                TransportConfig(datagramReceiveBufferSize = 0),
+                            ).use { accepting -> accepting.connect() }
+                        }
+                    }
+                    client.connect(server.addr(), Loopback.alpn).use { connection ->
+                        accepted.await().use { served ->
+                            // Zero rather than null, for the same reason as the sibling test above:
+                            // the server accepted this connection with an empty receive buffer, so
+                            // the client has nowhere to send a datagram, but datagrams are not
+                            // unsupported by the peer — they are advertised at size zero.
+                            assertThat(connection.maxDatagramSize()).isEqualTo(0L)
+                            assertThat(served.remoteId()).isEqualTo(client.id)
+                        }
+                    }
+                }
+            }
+        }
+
     /** Polls [condition] on a real clock — see [Loopback.awaitUntil]. */
     private suspend fun awaitUntil(condition: () -> Boolean) = Loopback.awaitUntil(condition)
 }

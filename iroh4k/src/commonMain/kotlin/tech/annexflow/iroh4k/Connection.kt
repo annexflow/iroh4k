@@ -38,8 +38,7 @@ import tech.annexflow.iroh4k.internal.NativeHandle
  * ## What is not here yet
  *
  * [Connection.paths] is the snapshot form; the streaming form lives in `Watch.kt` as
- * `Connection.watchPaths()` and `Connection.watchPathEvents()`. Still absent: 0-RTT and a custom
- * `ServerConfig` per accepted connection.
+ * `Connection.watchPaths()` and `Connection.watchPathEvents()`. Still absent: 0-RTT.
  */
 
 // ── Addresses ─────────────────────────────────────────────────────────────────────────────────
@@ -224,7 +223,10 @@ data class PathSnapshot(
  * Releasing an `Incoming` that was never answered *refuses* the connection, because that is what
  * dropping an `Incoming` means in iroh.
  */
-class Incoming internal constructor(private val guard: NativeHandle) : AutoCloseable {
+class Incoming internal constructor(
+    private val guard: NativeHandle,
+    private val endpoint: Endpoint,
+) : AutoCloseable {
 
     /**
      * Begins this endpoint's half of the handshake, yielding an [Accepting] to await.
@@ -240,6 +242,44 @@ class Incoming internal constructor(private val guard: NativeHandle) : AutoClose
      */
     fun accept(): Accepting = guard.use { handle ->
         Accepting(NativeHandle(nativeIncomingAccept(handle), ACCEPTING, ::nativeAcceptingFree))
+    }
+
+    /**
+     * Begins this endpoint's half of the handshake with a transport configuration for this
+     * connection alone, yielding an [Accepting] to await.
+     *
+     * Consumes this incoming connection, exactly as [accept] does: every later [accept], [refuse],
+     * [retry] or [ignore] raises [IrohError] with [IrohError.Code.Closed].
+     *
+     * [transportConfig] applies to this connection alone — it changes nothing about any other
+     * connection this endpoint accepts or dials.
+     *
+     * [alpns] must include the protocol this connection actually negotiated. Accepting with a
+     * configuration means building a fresh `ServerConfig` through the endpoint's own
+     * `create_server_config_builder`, and that builder has no way to add an ALPN afterwards — its
+     * list is fixed at creation. A list that omits the negotiated protocol therefore accepts a
+     * connection whose two sides agree on nothing, and does so silently.
+     *
+     * @throws IrohError with [IrohError.Code.Accept] if iroh refuses the attempt, as [accept]
+     *   describes.
+     * @throws IrohError with [IrohError.Code.Closed] if this incoming connection was already used,
+     *   or if the endpoint it came from has been released.
+     */
+    fun acceptWith(
+        alpns: List<ByteArray>,
+        transportConfig: TransportConfig? = null,
+    ): Accepting = guard.use { handle ->
+        val w = BinaryWriter()
+        w.i32(alpns.size)
+        for (alpn in alpns) w.bytes(alpn)
+        w.writeOptionalTransportConfig(transportConfig)
+        Accepting(
+            NativeHandle(
+                endpoint.useHandle { ep -> nativeIncomingAcceptWith(handle, ep, w.finish()) },
+                ACCEPTING,
+                ::nativeAcceptingFree,
+            )
+        )
     }
 
     /**
@@ -688,7 +728,7 @@ suspend fun Endpoint.acceptNext(): Incoming? = withHandle { handle ->
     val incoming = nativeEndpointAcceptNext(handle)
     // A null handle is the `None` iroh answers with for a closed endpoint, not an error.
     if (incoming == 0L) null
-    else Incoming(NativeHandle(incoming, INCOMING, ::nativeIncomingFree))
+    else Incoming(NativeHandle(incoming, INCOMING, ::nativeIncomingFree), this)
 }
 
 /**
@@ -876,6 +916,9 @@ internal expect fun nativeIncomingLocalAddr(handle: Long): ByteArray
 internal expect fun nativeIncomingRemoteAddr(handle: Long): ByteArray
 
 internal expect fun nativeIncomingRemoteAddrValidated(handle: Long): Boolean
+
+/** Returns the handle of the [Accepting] this produced; `endpoint` is the endpoint's own handle. */
+internal expect fun nativeIncomingAcceptWith(handle: Long, endpoint: Long, opts: ByteArray): Long
 
 internal expect fun nativeConnectingRemoteId(handle: Long): ByteArray
 

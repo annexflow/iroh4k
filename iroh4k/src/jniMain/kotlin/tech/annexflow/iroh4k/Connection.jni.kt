@@ -50,6 +50,8 @@ internal object ConnectionJni {
 
     external fun incomingRemoteAddrValidated(handle: Long): ByteArray
 
+    external fun incomingAcceptWith(handle: Long, endpoint: Long, opts: ByteArray): ByteArray
+
     // ── Connecting and Connection — synchronous ──────────────────────────────────────────────
 
     external fun connectingRemoteId(handle: Long): ByteArray
@@ -160,6 +162,9 @@ internal actual fun nativeIncomingRemoteAddr(handle: Long): ByteArray =
 
 internal actual fun nativeIncomingRemoteAddrValidated(handle: Long): Boolean =
     ConnectionJni.incomingRemoteAddrValidated(handle).jniLongOrThrow() != 0L
+
+internal actual fun nativeIncomingAcceptWith(handle: Long, endpoint: Long, opts: ByteArray): Long =
+    ConnectionJni.incomingAcceptWith(handle, endpoint, opts).jniHandleOrThrow()
 
 // ── Connecting and Connection — synchronous ───────────────────────────────────────────────────
 
