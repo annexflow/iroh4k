@@ -282,6 +282,31 @@ class RecvStream internal constructor(private val guard: NativeHandle) : AutoClo
      */
     fun bytesRead(): Long = guard.use { nativeRecvStreamBytesRead(it) }
 
+    /**
+     * Whether this side obtained this stream while its handshake was still in progress.
+     *
+     * `true` means the data this stream carries arrived as 0-RTT early data, before the handshake
+     * vouched for the peer's identity — it **is vulnerable to replay attacks and must never drive
+     * non-idempotent work** until the connection it belongs to has authenticated. See [ZeroRttStatus]
+     * for the same hazard on the connection as a whole.
+     *
+     * The flag is decided once and only ever read back afterwards — for a stream from
+     * [Connection.acceptBi]/[Connection.acceptUni], at the moment this side *accepted* it; for one
+     * from [Connection.openBi], at the moment this side *opened* it. Either way `noq` samples whether
+     * the handshake was still running right then, not when the stream was first created on the wire.
+     * For the accepting case in particular that timing means **`false` does not prove the data was not
+     * sent early**: the peer can write to a stream before its own handshake completes, and if this side
+     * does not get around to accepting it until after its own handshake has settled, this reports
+     * `false` for data that genuinely raced the handshake. It only proves this side accepted the stream
+     * once its own handshake had already settled — which on a fast loopback connection is the common
+     * case, so most ordinary streams read `false` even when nothing was ever rejected.
+     *
+     * Unlike [bytesRead], reading this never fails because the stream was stopped or finished — `noq`
+     * remembers the flag on the `RecvStream` value itself rather than asking the connection for it, so
+     * the only way to raise [IrohError.Code.Closed] here is calling it after [close].
+     */
+    fun is0Rtt(): Boolean = guard.use { nativeRecvStreamIs0Rtt(it) }
+
     /** This stream's QUIC id — see [SendStream.id]. For a [BiStream] it is the same id on both halves. */
     fun id(): Long = guard.use { nativeRecvStreamId(it) }
 
@@ -466,6 +491,8 @@ internal expect fun nativeSendStreamId(handle: Long): Long
 internal expect fun nativeRecvStreamStop(handle: Long, errorCode: Long)
 
 internal expect fun nativeRecvStreamBytesRead(handle: Long): Long
+
+internal expect fun nativeRecvStreamIs0Rtt(handle: Long): Boolean
 
 internal expect fun nativeRecvStreamId(handle: Long): Long
 

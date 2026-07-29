@@ -316,6 +316,24 @@ class CommonStreamTests {
         }
     }
 
+    // ── 0-RTT ────────────────────────────────────────────────────────────────────────────────
+
+    fun `an ordinary stream is not a 0-RTT stream`() = Loopback.bounded {
+        Loopback.connected { client, server ->
+            val opened = async { server.acceptBi() }
+            client.openBi().use { outbound ->
+                outbound.send.writeAll("x".encodeToByteArray())
+                opened.await().use { inbound ->
+                    // Only the negative is deterministic here. `poll_accept` samples `is_handshaking()`
+                    // at the moment the stream is accepted (noq-1.1.0/src/connection.rs:1094), not when
+                    // it was created, so a loopback server that accepts after the handshake completed
+                    // sees `false` even for data the client sent early. Asserting `true` would be a race.
+                    assertThat(inbound.recv.is0Rtt()).isFalse()
+                }
+            }
+        }
+    }
+
     // ── Argument validation ──────────────────────────────────────────────────────────────────
 
     fun `impossible read sizes and stream codes are rejected`() = Loopback.bounded {
@@ -520,6 +538,7 @@ class CommonStreamTests {
                 val members: List<Pair<String, () -> Any?>> = listOf(
                     "stop" to { recv.stop(0L) },
                     "bytesRead" to { recv.bytesRead() },
+                    "is0Rtt" to { recv.is0Rtt() },
                     "id" to { recv.id() },
                 )
                 for ((name, call) in members) {

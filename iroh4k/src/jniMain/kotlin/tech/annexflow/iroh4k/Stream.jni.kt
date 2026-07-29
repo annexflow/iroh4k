@@ -48,6 +48,8 @@ internal object StreamJni {
 
     external fun recvBytesRead(handle: Long): ByteArray
 
+    external fun recvIs0Rtt(handle: Long): ByteArray
+
     external fun recvId(handle: Long): ByteArray
 
     // ── Asynchronous — each returns an operation id for Iroh4kJni.opAwait/opCancel ─────────────
@@ -117,6 +119,9 @@ internal actual fun nativeRecvStreamStop(handle: Long, errorCode: Long) =
 
 internal actual fun nativeRecvStreamBytesRead(handle: Long): Long =
     StreamJni.recvBytesRead(handle).jniLongOrThrow()
+
+internal actual fun nativeRecvStreamIs0Rtt(handle: Long): Boolean =
+    StreamJni.recvIs0Rtt(handle).jniLongOrThrow() != 0L
 
 internal actual fun nativeRecvStreamId(handle: Long): Long =
     StreamJni.recvId(handle).jniLongOrThrow()

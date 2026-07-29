@@ -630,6 +630,23 @@ fn recv_id(slot: &StreamSlot) -> *mut Iroh4kResult {
     i64_result(stream_id(u64::from(recv.id())))
 }
 
+/// Whether this stream was accepted while the handshake was still in progress.
+///
+/// `noq` decides this once, at the moment the stream is created (`open_bi`/`open_uni` on the
+/// dialling side) or accepted (`accept_bi`/`accept_uni` on the accepting one), and `RecvStream`
+/// just remembers the bit — see `is_0rtt` on `noq-1.1.0`'s `RecvStream`/`UnorderedRecvStream`. A
+/// `true` here is the caller's signal that whatever this stream carries arrived before the
+/// handshake vouched for the peer's identity, and is therefore replayable.
+fn recv_is_0rtt(slot: &StreamSlot) -> *mut Iroh4kResult {
+    let Some(recv) = slot.recv.as_ref() else {
+        return wrong_half(RECEIVE);
+    };
+    let Ok(recv) = recv.try_lock() else {
+        return busy(ERROR_READ, RECEIVE);
+    };
+    i64_result(i64::from(recv.is_0rtt()))
+}
+
 // ============================================================================
 // Small shared pieces
 // ============================================================================
@@ -786,6 +803,16 @@ pub unsafe extern "C" fn iroh4k_recv_stream_stop(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_recv_stream_bytes_read(handle: *mut c_void) -> *mut Iroh4kResult {
     unsafe { with::<StreamSlot>(handle, |slot| recv_bytes_read(slot)) }
+}
+
+/// Whether this stream was accepted while the handshake was still in progress, `0`/`1` in
+/// `i64_val`. See [`recv_is_0rtt`].
+///
+/// # Safety
+/// As [`iroh4k_send_stream_finish`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_recv_stream_is_0rtt(handle: *mut c_void) -> *mut Iroh4kResult {
+    unsafe { with::<StreamSlot>(handle, |slot| recv_is_0rtt(slot)) }
 }
 
 /// This stream's QUIC id, in `i64_val`.
@@ -1136,6 +1163,16 @@ mod jni_facade {
         handle: jlong,
     ) -> jbyteArray {
         let result = unsafe { with::<StreamSlot>(as_handle(handle), |slot| recv_bytes_read(slot)) };
+        finish(&mut env, result)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_recvIs0Rtt(
+        mut env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+    ) -> jbyteArray {
+        let result = unsafe { with::<StreamSlot>(as_handle(handle), |slot| recv_is_0rtt(slot)) };
         finish(&mut env, result)
     }
 
