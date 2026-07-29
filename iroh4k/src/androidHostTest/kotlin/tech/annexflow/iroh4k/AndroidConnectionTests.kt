@@ -76,6 +76,10 @@ class AndroidConnectionTests {
         runner.`connect refuses the impossible rather than leaving it hanging`()
 
     @Test
+    fun `a connection is a QuicConnection and streams open through the supertype`() =
+        runner.`a connection is a QuicConnection and streams open through the supertype`()
+
+    @Test
     fun `side tells the two ends of one connection apart`() =
         runner.`side tells the two ends of one connection apart`()
 

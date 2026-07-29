@@ -467,6 +467,21 @@ class CommonConnectionTests {
 
     // ── Identity, measurement and paths ──────────────────────────────────────────────────────
 
+    fun `a connection is a QuicConnection and streams open through the supertype`() = bounded {
+        Loopback.connected { client, _ ->
+            // The type relationship is the whole point of the base class: it is what lets a 0-RTT
+            // connection open a stream without Connection's handshake-completed surface.
+            val shared: QuicConnection = client
+            assertThat(shared.stableId()).isEqualTo(client.stableId())
+
+            // And the stream openers must resolve on the supertype, not just on Connection.
+            val opener: suspend (QuicConnection) -> BiStream = { it.openBi() }
+            opener(shared).use { stream ->
+                assertThat(stream.send.id()).isNotEqualTo(-1L)
+            }
+        }
+    }
+
     fun `side tells the two ends of one connection apart`() = bounded {
         Loopback.connected { client, server ->
             assertThat(client.side()).isEqualTo(ConnectionSide.Client)

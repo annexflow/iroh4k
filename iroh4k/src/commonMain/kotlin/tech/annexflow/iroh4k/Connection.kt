@@ -461,45 +461,20 @@ class Connecting internal constructor(private val guard: NativeHandle) : AutoClo
 // ── Connection ────────────────────────────────────────────────────────────────────────────────
 
 /**
- * An established QUIC connection to another endpoint.
+ * What every QUIC connection can do, whatever state its handshake is in.
  *
- * Carries identity ([alpn], [remoteId], [stableId], [side]), lifecycle ([close], [isClosed],
- * [closeReason], [closed]), measurement ([stats], [rtt], [paths]), unreliable datagrams
- * ([sendDatagram], [readDatagram]), and — through `openBi`, `acceptBi`, `openUni` and `acceptUni` in
- * `Stream.kt` — the reliable ordered byte streams most applications actually use.
+ * This is upstream's `impl<T: ConnectionState> Connection<T>` (`iroh-1.0.3/src/endpoint/connection.rs:811`)
+ * expressed in Kotlin: the members here are exactly the ones that do not need a completed handshake, and
+ * they are therefore the ones a 0-RTT connection can offer. [Connection] adds what only a completed
+ * handshake has — identity, side and paths.
  *
- * **Thread-safe**, as every handle-owning type here is: any member may be called from any thread or
- * coroutine, including concurrently with [close].
+ * A **class** rather than an interface, deliberately: Kotlin forbids `internal` interface members, and
+ * `Stream.kt` reaches the handle through [withHandle], which must not be public API. Sealed, so the three
+ * subclasses below are the whole world and a `when` over them is exhaustive.
  *
- * Note the two `close`es, the same split [Endpoint] makes and for the same reason:
- * [close(errorCode, reason)][close] is iroh's `Connection::close`, which tells the peer why; the
- * no-argument [close] is [AutoCloseable]'s, which releases the handle. Releasing without closing
- * first is legal — iroh then closes with error code `0` and an empty reason — but says nothing.
- *
- * ## Streams or datagrams
- *
- * A stream is reliable, ordered and flow-controlled, and there is no cost to opening one — QUIC
- * multiplexes as many as wanted onto the connection without head-of-line blocking between them. A
- * datagram is none of those things: it may be lost, may arrive out of order, and must fit in a single
- * packet ([maxDatagramSize]). Reach for a stream unless losing the data is genuinely acceptable.
+ * **Thread-safe**, as every handle-owning type here is.
  */
-class Connection internal constructor(private val guard: NativeHandle) : AutoCloseable {
-
-    /**
-     * The negotiated ALPN protocol, as raw bytes.
-     *
-     * Always present: iroh refuses a connection that completed without one, so an established
-     * [Connection] always has an ALPN both sides agreed on.
-     */
-    fun alpn(): ByteArray = guard.use { nativeConnectionAlpn(it) }
-
-    /**
-     * The remote's [EndpointId], taken from the certificate it presented during the handshake.
-     *
-     * Cryptographically established rather than claimed, which is what makes it the identity to
-     * authorise against.
-     */
-    fun remoteId(): EndpointId = guard.use { EndpointId.validated(nativeConnectionRemoteId(it)) }
+sealed class QuicConnection protected constructor(internal val guard: NativeHandle) : AutoCloseable {
 
     /**
      * An identifier that stays fixed for the connection's whole life.
@@ -565,15 +540,6 @@ class Connection internal constructor(private val guard: NativeHandle) : AutoClo
     suspend fun closed(): String = guard.useSuspending { nativeConnectionClosed(it) }
 
     /**
-     * Which end of the connection this is.
-     *
-     * [ConnectionSide.Client] for the side that dialled, [ConnectionSide.Server] for the side that
-     * accepted. Worth knowing because QUIC stream ids encode it, and because a protocol usually gives
-     * the two sides different jobs.
-     */
-    fun side(): ConnectionSide = guard.use { ConnectionSide.of(nativeConnectionSide(it)) }
-
-    /**
      * The connection's totals so far.
      *
      * A snapshot: read it twice to measure an interval. Covers all traffic on the connection, not only
@@ -581,31 +547,6 @@ class Connection internal constructor(private val guard: NativeHandle) : AutoClo
      */
     fun stats(): ConnectionStats = guard.use { handle ->
         decodeConnectionStats(BinaryReader(nativeConnectionStats(handle)))
-    }
-
-    /**
-     * Current round-trip-time estimate for the path traffic is taking, or `null` if no path reports
-     * one yet.
-     *
-     * iroh's own `rtt` takes a path id; this one uses the *selected* path — the one application data is
-     * actually going over — falling back to the first open path when nothing is selected yet. Per-path
-     * figures are in [paths].
-     */
-    fun rtt(): Duration? = guard.use { handle ->
-        nativeConnectionRtt(handle).takeIf { it >= 0 }?.microseconds
-    }
-
-    /**
-     * The connection's open network paths, as they are right now.
-     *
-     * Usually one — a direct loopback or LAN connection has nothing else — and up to two once a relayed
-     * connection has hole-punched its way to a direct path. Empty for a connection that has closed.
-     *
-     * A snapshot, not a subscription: paths that open or close afterwards are not in it. Use
-     * `Connection.watchPaths()` in `Watch.kt` to observe the changes over time.
-     */
-    fun paths(): List<PathSnapshot> = guard.use { handle ->
-        BinaryReader(nativeConnectionPaths(handle)).seq { decodePathSnapshot(it) }
     }
 
     /**
@@ -700,10 +641,6 @@ class Connection internal constructor(private val guard: NativeHandle) : AutoClo
      */
     override fun close() = guard.close()
 
-    override fun toString(): String =
-        runCatching { "Connection(${remoteId()}, ${stableId()})" }
-            .getOrElse { "Connection(released)" }
-
     /**
      * Runs [block] against this connection's native handle, holding the guard across it.
      *
@@ -714,6 +651,86 @@ class Connection internal constructor(private val guard: NativeHandle) : AutoClo
      * while an `acceptBi` is suspended is therefore as safe as closing it while [closed] is.
      */
     internal suspend fun <T> withHandle(block: suspend (Long) -> T): T = guard.useSuspending(block)
+}
+
+/**
+ * An established QUIC connection to another endpoint.
+ *
+ * Carries identity ([alpn], [remoteId], [stableId], [side]), lifecycle ([close], [isClosed],
+ * [closeReason], [closed]), measurement ([stats], [rtt], [paths]), unreliable datagrams
+ * ([sendDatagram], [readDatagram]), and — through `openBi`, `acceptBi`, `openUni` and `acceptUni` in
+ * `Stream.kt` — the reliable ordered byte streams most applications actually use.
+ *
+ * **Thread-safe**, as every handle-owning type here is: any member may be called from any thread or
+ * coroutine, including concurrently with [close].
+ *
+ * Note the two `close`es, the same split [Endpoint] makes and for the same reason:
+ * [close(errorCode, reason)][close] is iroh's `Connection::close`, which tells the peer why; the
+ * no-argument [close] is [AutoCloseable]'s, which releases the handle. Releasing without closing
+ * first is legal — iroh then closes with error code `0` and an empty reason — but says nothing.
+ *
+ * ## Streams or datagrams
+ *
+ * A stream is reliable, ordered and flow-controlled, and there is no cost to opening one — QUIC
+ * multiplexes as many as wanted onto the connection without head-of-line blocking between them. A
+ * datagram is none of those things: it may be lost, may arrive out of order, and must fit in a single
+ * packet ([maxDatagramSize]). Reach for a stream unless losing the data is genuinely acceptable.
+ */
+class Connection internal constructor(guard: NativeHandle) : QuicConnection(guard) {
+
+    /**
+     * The negotiated ALPN protocol, as raw bytes.
+     *
+     * Always present: iroh refuses a connection that completed without one, so an established
+     * [Connection] always has an ALPN both sides agreed on.
+     */
+    fun alpn(): ByteArray = guard.use { nativeConnectionAlpn(it) }
+
+    /**
+     * The remote's [EndpointId], taken from the certificate it presented during the handshake.
+     *
+     * Cryptographically established rather than claimed, which is what makes it the identity to
+     * authorise against.
+     */
+    fun remoteId(): EndpointId = guard.use { EndpointId.validated(nativeConnectionRemoteId(it)) }
+
+    /**
+     * Which end of the connection this is.
+     *
+     * [ConnectionSide.Client] for the side that dialled, [ConnectionSide.Server] for the side that
+     * accepted. Worth knowing because QUIC stream ids encode it, and because a protocol usually gives
+     * the two sides different jobs.
+     */
+    fun side(): ConnectionSide = guard.use { ConnectionSide.of(nativeConnectionSide(it)) }
+
+    /**
+     * Current round-trip-time estimate for the path traffic is taking, or `null` if no path reports
+     * one yet.
+     *
+     * iroh's own `rtt` takes a path id; this one uses the *selected* path — the one application data is
+     * actually going over — falling back to the first open path when nothing is selected yet. Per-path
+     * figures are in [paths].
+     */
+    fun rtt(): Duration? = guard.use { handle ->
+        nativeConnectionRtt(handle).takeIf { it >= 0 }?.microseconds
+    }
+
+    /**
+     * The connection's open network paths, as they are right now.
+     *
+     * Usually one — a direct loopback or LAN connection has nothing else — and up to two once a relayed
+     * connection has hole-punched its way to a direct path. Empty for a connection that has closed.
+     *
+     * A snapshot, not a subscription: paths that open or close afterwards are not in it. Use
+     * `Connection.watchPaths()` in `Watch.kt` to observe the changes over time.
+     */
+    fun paths(): List<PathSnapshot> = guard.use { handle ->
+        BinaryReader(nativeConnectionPaths(handle)).seq { decodePathSnapshot(it) }
+    }
+
+    override fun toString(): String =
+        runCatching { "Connection(${remoteId()}, ${stableId()})" }
+            .getOrElse { "Connection(released)" }
 
     companion object {
         /**

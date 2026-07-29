@@ -364,13 +364,13 @@ internal object Streams {
 
 // ── The connection's stream entry points ───────────────────────────────────────────────────────
 //
-// Extensions rather than members of `Connection`, because everything they produce belongs to this
-// domain: all they need from a connection is its handle, which `Connection.withHandle` lends under the
-// connection's own guard. So closing a connection while an `acceptBi` is suspended is as safe as
+// Extensions rather than members of `QuicConnection`, because everything they produce belongs to this
+// domain: all they need from a connection is its handle, which `QuicConnection.withHandle` lends under
+// the connection's own guard. So closing a connection while an `acceptBi` is suspended is as safe as
 // closing it while `closed()` is — the handle survives until the call returns.
 
 /**
- * Opens a bidirectional stream.
+ * Opens a bidirectional stream. Works on any connection, 0-RTT included.
  *
  * Returns as soon as QUIC has an id for it — no round trip is involved, and the peer does not learn the
  * stream exists until data is written to it. Which means an [openBi] followed by nothing will never
@@ -382,12 +382,13 @@ internal object Streams {
  * @throws IrohError with [IrohError.Code.Closed] if the connection has ended or its handle has been
  *   released.
  */
-suspend fun Connection.openBi(): BiStream = withHandle { handle ->
+suspend fun QuicConnection.openBi(): BiStream = withHandle { handle ->
     biStream(nativeConnectionOpenBi(handle))
 }
 
 /**
- * Suspends until the peer opens a bidirectional stream, and answers with it.
+ * Suspends until the peer opens a bidirectional stream, and answers with it. Works on any connection,
+ * 0-RTT included.
  *
  * **This suspends indefinitely** while the peer opens none. Cancellation ends it and aborts the Rust
  * task; a stream that had just been accepted is released rather than stranded.
@@ -395,27 +396,29 @@ suspend fun Connection.openBi(): BiStream = withHandle { handle ->
  * @throws IrohError with [IrohError.Code.Closed] when the connection ends, which is how an accept loop
  *   terminates.
  */
-suspend fun Connection.acceptBi(): BiStream = withHandle { handle ->
+suspend fun QuicConnection.acceptBi(): BiStream = withHandle { handle ->
     biStream(nativeConnectionAcceptBi(handle))
 }
 
 /**
- * Opens a unidirectional stream, which this side can only write to.
+ * Opens a unidirectional stream, which this side can only write to. Works on any connection, 0-RTT
+ * included.
  *
  * As [openBi] in every other respect, including that the peer learns nothing until data is written.
  *
  * @throws IrohError with [IrohError.Code.Closed] as [openBi].
  */
-suspend fun Connection.openUni(): SendStream = withHandle { handle ->
+suspend fun QuicConnection.openUni(): SendStream = withHandle { handle ->
     SendStream(NativeHandle(nativeConnectionOpenUni(handle), SEND_STREAM, ::nativeStreamFree))
 }
 
 /**
  * Suspends until the peer opens a unidirectional stream, and answers with the end this side reads.
+ * Works on any connection, 0-RTT included.
  *
  * @throws IrohError with [IrohError.Code.Closed] as [acceptBi].
  */
-suspend fun Connection.acceptUni(): RecvStream = withHandle { handle ->
+suspend fun QuicConnection.acceptUni(): RecvStream = withHandle { handle ->
     RecvStream(NativeHandle(nativeConnectionAcceptUni(handle), RECV_STREAM, ::nativeStreamFree))
 }
 
