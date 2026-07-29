@@ -588,8 +588,9 @@ class Endpoint private constructor(private val guard: NativeHandle) : AutoClosea
          * @throws IrohError with [IrohError.Code.Bind] if iroh refuses to bind — a port already in
          *   use, no crypto provider ([EndpointPreset.Empty] never has one), or a malformed
          *   configuration. A bad piece of [config] reports the code that fits it instead:
-         *   [IrohError.Code.Key] for the secret key, [IrohError.Code.Addr] for an address and
-         *   [IrohError.Code.Relay] for a relay URL.
+         *   [IrohError.Code.Key] for the secret key, [IrohError.Code.Addr] for an address,
+         *   [IrohError.Code.Relay] for a relay URL, [IrohError.Code.Discovery] for a discovery
+         *   service, and [IrohError.Code.InvalidArgument] for [EndpointConfig.transportConfig].
          */
         suspend fun bind(config: EndpointConfig = EndpointConfig()): Endpoint {
             // The handle is created *before* the bind, so Kotlin owns it no matter how the bind

@@ -14,6 +14,7 @@ import assertk.assertions.isNull
 import assertk.assertions.isTrue
 import kotlin.test.assertFailsWith
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.measureTime
 import kotlinx.coroutines.Dispatchers
@@ -1013,4 +1014,87 @@ class CommonEndpointTests {
             }
             assertThat(error.code).isEqualTo(IrohError.Code.InvalidArgument)
         }
+
+    fun `every transport configuration tag round-trips through the codec`() = runTest {
+        // The other transport-configuration bodies in this class each set a handful of fields —
+        // enough to prove the shape works, not enough to prove the wire agrees on every tag. Between
+        // all of them, only 8 of `TransportConfig`'s 29 top-level tags and one field in each nested
+        // record are ever written, so a wrong tag constant on either side for any of the other 21
+        // would compile cleanly on both ends and never be caught by anything here.
+        //
+        // This body sets every one of the 29 top-level fields, plus every field of the nested
+        // `MtuDiscovery` and `AckFrequency` records, and binds an endpoint with it. The values below
+        // are individually plausible, not meaningful as a combination — some pairs (`initialMtu`
+        // versus `minMtu`, the four fields whose KDoc says values outside a range are silently
+        // clamped or ignored) are chosen to land *inside* whatever bound applies, specifically so
+        // that a successful bind is not secretly exercising the "ignored" path for one of them
+        // instead of the tag it is meant to cover.
+        //
+        // The assertion is the bind succeeding at all: `writeTransportConfig` writes 29 tagged
+        // entries plus the nested `MtuDiscovery` (4 tags) and `AckFrequency` (3 tags) records, and
+        // `read_transport_config`/`read_mtu_discovery`/`read_ack_frequency` in `transport.rs` read
+        // them back. Every reader there consumes exactly the bytes its matching writer produced, an
+        // unrecognised tag on either side is a hard decode error rather than something skipped, and
+        // `Reader::finish()` rejects anything left over. A tag constant that drifted between
+        // `TransportConfig.kt` and `transport.rs` — for any of the 21 fields nothing else here
+        // touches — would misalign the reader and fail this bind, either with a decode error or by
+        // reading the wrong field's value into the wrong builder call. It says nothing about whether
+        // any individual value changed iroh's behaviour beyond landing in its config object — see
+        // `datagramReceiveBufferSize` elsewhere in this class for the one knob that is checked that
+        // way.
+        Endpoint.bind(
+            EndpointConfig(
+                preset = EndpointPreset.Minimal,
+                relayMode = RelayMode.Disabled,
+                bindAddrs = listOf(loopback),
+                transportConfig = TransportConfig(
+                    maxConcurrentBidiStreams = 128L,
+                    maxConcurrentUniStreams = 128L,
+                    streamReceiveWindow = 1_000_000L,
+                    receiveWindow = 2_000_000L,
+                    sendWindow = 4_000_000L,
+                    sendFairness = true,
+                    maxIdleTimeout = 45.seconds,
+                    keepAliveInterval = 5.seconds,
+                    initialRtt = 200.milliseconds,
+                    packetThreshold = 5,
+                    timeThreshold = 1.5f,
+                    persistentCongestionThreshold = 4,
+                    ackFrequency = AckFrequency(
+                        ackElicitingThreshold = 2L,
+                        maxAckDelay = 25.milliseconds,
+                        reorderingThreshold = 1L,
+                    ),
+                    congestionController = CongestionController.NewReno,
+                    initialMtu = 1400,
+                    minMtu = 1200,
+                    mtuDiscovery = MtuDiscovery(
+                        interval = 300.seconds,
+                        upperBound = 1480,
+                        blackHoleCooldown = 30.seconds,
+                        minimumChange = 10,
+                    ),
+                    padToMtu = true,
+                    datagramReceiveBufferSize = 131072,
+                    datagramSendBufferSize = 131072,
+                    cryptoBufferSize = 16384,
+                    allowSpin = true,
+                    enableSegmentationOffload = false,
+                    sendObservedAddressReports = true,
+                    receiveObservedAddressReports = true,
+                    // Below 9 is silently ignored (upstream rejects anything under
+                    // `MAX_MULTIPATH_PATHS + 1`, which is 8, so 8 itself is rejected too).
+                    maxConcurrentMultipathPaths = 9,
+                    // Above 15 seconds is silently clamped.
+                    defaultPathMaxIdleTimeout = 10.seconds,
+                    // Above 5 seconds is silently ignored.
+                    defaultPathKeepAliveInterval = 3.seconds,
+                    // Below 8 is silently ignored.
+                    maxRemoteNatTraversalAddresses = 16,
+                ),
+            )
+        ).use { endpoint ->
+            assertThat(endpoint.isClosed).isFalse()
+        }
+    }
 }

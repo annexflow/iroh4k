@@ -163,4 +163,8 @@ class NativeEndpointTests {
     @Test
     fun `the largest transport duration a caller can express is accepted and a negative one is refused`() =
         runner.`the largest transport duration a caller can express is accepted and a negative one is refused`()
+
+    @Test
+    fun `every transport configuration tag round-trips through the codec`() =
+        runner.`every transport configuration tag round-trips through the codec`()
 }

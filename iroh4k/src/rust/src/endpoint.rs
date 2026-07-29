@@ -298,8 +298,7 @@ struct BindConfig {
     discovery: Vec<DiscoverySettings>,
     /// The QUIC transport parameters this endpoint applies to every connection by default.
     /// `None` leaves iroh's own — including the six it overrides for hole punching before any
-    /// caller sees the builder. Last on the wire and last here, appended in this task after
-    /// everything Task 1 shipped.
+    /// caller sees the builder. Last on the wire and last here — see `read_bind_config`.
     transport_config: Option<QuicTransportConfig>,
 }
 
@@ -381,8 +380,9 @@ fn read_bind_config(payload: &[u8]) -> Outcome<BindConfig> {
     })
 }
 
-/// Reads the optional mDNS record, second-to-last on the wire — [`read_discovery`] reads the
-/// field that actually closes a bind configuration.
+/// Reads the optional mDNS record. Neither last nor second-to-last on the wire any more:
+/// [`read_discovery`] and then `transport::read_optional` follow it before a bind configuration
+/// ends — see `read_bind_config`.
 ///
 /// The fields are read into named bindings rather than straight into the struct literal, so the
 /// order they are consumed in is the order they appear on the wire no matter how the struct is
@@ -407,7 +407,9 @@ fn read_mdns(r: &mut Reader) -> Outcome<Option<MdnsSettings>> {
     })
 }
 
-/// Reads the counted sequence of discovery services that closes a bind configuration.
+/// Reads the counted sequence of discovery services. It no longer closes a bind configuration —
+/// `transport::read_optional` reads the trailing transport configuration after it, see
+/// `read_bind_config`.
 ///
 /// An unknown tag is an error rather than a skipped record. This payload only ever travels from
 /// Kotlin to Rust, and both ends ship in one artifact, so a tag this build does not know is version

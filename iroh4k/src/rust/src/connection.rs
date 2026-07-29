@@ -118,6 +118,17 @@
 //! EndpointAddr  (Kotlin → Rust)   — the layout `addr.rs` documents and reads
 //!   bytes id
 //!   i32   count             then count × TransportAddr, tags as above
+//!
+//! start_connect options  (Kotlin → Rust)   — `Endpoint.startConnect`'s `opts` argument
+//!   u8    transport config  0 absent — the endpoint's own default — or 1 present, then a
+//!                           `TransportConfig`: the counted, tagged, sparse sequence `transport.rs`
+//!                           documents in full. Read by `transport::read_optional`, and the whole
+//!                           of `opts` — `Reader::finish()` rejects anything left over.
+//!
+//! acceptWith options  (Kotlin → Rust)   — `Incoming.acceptWith`'s `opts` argument
+//!   i32   ALPN count        then count × bytes (one ALPN each)
+//!   u8    transport config  as `start_connect options` above, and likewise the rest of the
+//!                           buffer — see `decode_accept_with_opts`.
 //! ```
 //!
 //! ## Scalars with an absent value
@@ -675,10 +686,13 @@ async fn accept_next(endpoint: Option<Endpoint>) -> OpResult {
 
 /// Starts an outbound connection attempt, producing a `Connecting` handle.
 ///
-/// **Deliberately minimal.** The outbound side is M5's; this exists because the accept chain cannot
-/// be exercised — or used — without something to accept, and one loopback dial is the smallest thing
-/// that provides it. Only `connect_with_opts` with default options is wired up: no 0-RTT, no
-/// transport configuration, no additional ALPNs.
+/// The outbound side is M5's; this exists because the accept chain cannot be exercised — or used —
+/// without something to accept, and one loopback dial is the smallest thing that provides it.
+/// `opts` carries an optional transport configuration — the same `writeOptionalTransportConfig`
+/// payload `endpoint.rs`'s bind configuration ends with — decoded below and, when present, handed
+/// to `connect_with_opts` through `ConnectOptions::with_transport_config`, replacing the
+/// endpoint's own default outright rather than merging with it. Still not wired up: 0-RTT and
+/// additional ALPNs, the other options `connect_with_opts` takes.
 async fn start_connect(
     endpoint: Option<Endpoint>,
     addr: Vec<u8>,

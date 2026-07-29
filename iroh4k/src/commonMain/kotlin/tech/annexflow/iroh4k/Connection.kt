@@ -214,8 +214,8 @@ data class PathSnapshot(
 /**
  * An inbound connection attempt that has not been answered yet.
  *
- * Produced by [Endpoint.acceptNext]. Exactly one of [accept], [refuse], [retry] and [ignore] decides
- * what happens to it; the inspectors below are what that decision can be based on.
+ * Produced by [Endpoint.acceptNext]. Exactly one of [accept], [acceptWith], [refuse], [retry] and
+ * [ignore] decides what happens to it; the inspectors below are what that decision can be based on.
  *
  * **Thread-safe**, as [Endpoint] is: any member may be called from any thread or coroutine,
  * including concurrently with [close], and a released handle is never dereferenced.
@@ -231,8 +231,8 @@ class Incoming internal constructor(
     /**
      * Begins this endpoint's half of the handshake, yielding an [Accepting] to await.
      *
-     * Consumes this incoming connection: every later [accept], [refuse], [retry] or [ignore] raises
-     * [IrohError] with [IrohError.Code.Closed].
+     * Consumes this incoming connection: every later [accept], [acceptWith], [refuse], [retry] or
+     * [ignore] raises [IrohError] with [IrohError.Code.Closed].
      *
      * @throws IrohError with [IrohError.Code.Accept] if iroh refuses the attempt. That is routine
      *   rather than alarming: a QUIC endpoint listens on an ordinary UDP socket, anything on the
@@ -248,11 +248,14 @@ class Incoming internal constructor(
      * Begins this endpoint's half of the handshake with a transport configuration for this
      * connection alone, yielding an [Accepting] to await.
      *
-     * Consumes this incoming connection, exactly as [accept] does: every later [accept], [refuse],
-     * [retry] or [ignore] raises [IrohError] with [IrohError.Code.Closed].
+     * Consumes this incoming connection, exactly as [accept] does: every later [accept],
+     * [acceptWith], [refuse], [retry] or [ignore] raises [IrohError] with [IrohError.Code.Closed].
      *
      * [transportConfig] applies to this connection alone — it changes nothing about any other
-     * connection this endpoint accepts or dials.
+     * connection this endpoint accepts or dials. It **replaces** the endpoint's own
+     * [EndpointConfig.transportConfig] outright rather than merging with it, exactly as
+     * [Endpoint.startConnect]'s does: setting one field here does not inherit the other 28 from
+     * whatever the endpoint was given.
      *
      * [alpns] must include the protocol this connection actually negotiated. Accepting with a
      * configuration means building a fresh `ServerConfig` through the endpoint's own
@@ -264,6 +267,8 @@ class Incoming internal constructor(
      *   describes.
      * @throws IrohError with [IrohError.Code.Closed] if this incoming connection was already used,
      *   or if the endpoint it came from has been released.
+     * @throws IrohError with [IrohError.Code.InvalidArgument] if [transportConfig] holds a value
+     *   iroh refuses — a negative duration, say.
      */
     fun acceptWith(
         alpns: List<ByteArray>,
@@ -341,7 +346,8 @@ class Incoming internal constructor(
     /**
      * Releases the handle. Idempotent, and safe to call while other threads are inside it.
      *
-     * Required even after [accept]: consuming the value empties the handle but does not free it.
+     * Required even after [accept] or [acceptWith]: consuming the value empties the handle but does
+     * not free it.
      */
     override fun close() = guard.close()
 

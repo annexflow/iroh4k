@@ -2,10 +2,11 @@
 //! `AckFrequency`, and the decoder that turns it into an `iroh::endpoint::QuicTransportConfig`.
 //!
 //! Owned by the transport domain, but it has no handle and no exports of its own: a transport
-//! configuration only ever rides inside a larger payload — the bind configuration today
-//! (`endpoint.rs`), a per-connection options payload in a later task (`connection.rs`) — so this
-//! module owns the codec and the decode logic and nothing else. Every caller decodes with
-//! [`read_transport_config`] or [`read_optional`] and applies the result itself.
+//! configuration only ever rides inside a larger payload — the bind configuration
+//! (`endpoint.rs`) and the per-connection options payloads for `startConnect` and `acceptWith`
+//! (`connection.rs`) — so this module owns the codec and the decode logic and nothing else.
+//! Every caller decodes with [`read_transport_config`] or [`read_optional`] and applies the
+//! result itself.
 //!
 //! ## Codec layout
 //!
@@ -18,7 +19,8 @@
 //!
 //! TransportConfig  (Kotlin -> Rust) — a counted, tagged, sparse sequence
 //!   i32  count      then count x one entry:
-//!     u8 tag  then the field's value. Tags 0..=28, in the order of Task 1's field table:
+//!     u8 tag  then the field's value. Tags 0..=28, in the order `TransportConfig`'s constructor
+//!     declares its fields:
 //!       0  maxConcurrentBidiStreams          i64  a QUIC varint
 //!       1  maxConcurrentUniStreams           i64  a QUIC varint
 //!       2  streamReceiveWindow               i64  a QUIC varint

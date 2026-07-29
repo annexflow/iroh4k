@@ -134,7 +134,7 @@ strategy.
 
 iroh4k is that different strategy: one Rust crate built twice — a `staticlib` linked into
 Kotlin/Native through cinterop, and a `cdylib` reached from the JVM and Android through hand-written
-JNI. Both facades call the same core through the same codec, and the same 223 shared test bodies run
+JNI. Both facades call the same core through the same codec, and the same 224 shared test bodies run
 against each.
 
 Writing the binding by hand rather than generating it also changed three things. They are trade-offs,
@@ -302,13 +302,14 @@ the point of binding, but no pkarr relay and no DNS zone was ever stood up. Like
 domain is tested only against its failure path; the successful round trips to services.iroh.computer
 are not covered.
 
-**Configured, but rarely shown to reach the wire.** Per-connection transport configuration — an
-endpoint's default, one outgoing connection's, one incoming connection's — covers all twenty-nine of
-iroh's QUIC transport knobs. The suite proves the value types, the encoding, and that a bind, a
-connect and an accept each succeed with a configuration set. For twenty-eight of the twenty-nine, that
-round trip into iroh's own config object is all that is shown — confirming more needs traffic analysis
-the suite does not do. The exception is `datagramReceiveBufferSize`, whose effect the other end can
-observe directly.
+**Every tag round-trips; rarely shown to reach the wire.** Per-connection transport configuration —
+an endpoint's default, one outgoing connection's, one incoming connection's — covers all twenty-nine
+of iroh's QUIC transport knobs. The suite proves the value types, the encoding, that every one of the
+twenty-nine top-level fields and both nested records decodes back correctly when all of them are set
+at once, and that a bind, a connect and an accept each succeed with a configuration set. For
+twenty-eight of the twenty-nine, that round trip into iroh's own config object is all that is shown —
+confirming more needs traffic analysis the suite does not do. The exception is
+`datagramReceiveBufferSize`, whose effect the other end can observe directly.
 
 **Not implemented.** No 0-RTT. `Endpoint.startConnect` maps onto iroh's `connect_with_opts`, and
 0-RTT is upstream's option there, waiting for a place in it.

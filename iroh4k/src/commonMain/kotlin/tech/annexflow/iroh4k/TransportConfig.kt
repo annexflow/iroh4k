@@ -487,9 +487,9 @@ enum class CongestionController { Cubic, NewReno }
 
 // ── Wire format ───────────────────────────────────────────────────────────────────────────────
 //
-// Mirrored by `transport.rs`; the two must be changed together, because the bind payload (and,
-// later, the per-connection options payload) is positional at its outer level and nothing on
-// either side would notice a drift.
+// Mirrored by `transport.rs`; the two must be changed together, because the bind payload and the
+// per-connection options payload (`startConnect`'s and `acceptWith`'s) are each positional at
+// their outer level and nothing on either side would notice a drift.
 //
 // This is its own tag family, in three parts. `TRANSPORT_TAG_*` is NOT `Addr.kt`'s `TAG_*`
 // and NOT `Discovery.kt`'s `DISCOVERY_TAG_*`, both of which number different payload shapes from
@@ -666,10 +666,11 @@ private fun BinaryWriter.writeAckFrequency(config: AckFrequency) {
 /**
  * Writes `u8 present` then [writeTransportConfig], or `u8 absent` for `null`.
  *
- * The endpoint-wide default ([EndpointConfig.transportConfig]) and, later, a per-connection
- * override both cross as this: an *optional* record, not a tag with an "unset" value like
- * `relayMode`'s — there is no preset choice to leave alone here, so absent always means "iroh's
- * own defaults" and never anything else.
+ * The endpoint-wide default ([EndpointConfig.transportConfig]) and a per-connection override
+ * (`startConnect`'s and `acceptWith`'s `transportConfig` parameters) both cross as this: an
+ * *optional* record, not a tag with an "unset" value like `relayMode`'s — there is no preset
+ * choice to leave alone here, so absent always means "iroh's own defaults" and never anything
+ * else.
  */
 internal fun BinaryWriter.writeOptionalTransportConfig(config: TransportConfig?) {
     if (config == null) {

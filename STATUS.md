@@ -15,8 +15,8 @@ Android — are held to identical behaviour by the same shared test bodies.
 
 | Target | What is actually run |
 | --- | --- |
-| `macosArm64`, `jvm` | 446 test bodies, 223 per facade, on every change |
-| `android` (AAR) | The same 223 shared bodies under Robolectric, plus 6 Android-only tests for `Iroh4kAndroid.multicastLock`, which exists on no other target — 229 in all. Plus 6 instrumented tests, the only ones that exercise the packaged `.so` |
+| `macosArm64`, `jvm` | 448 test bodies, 224 per facade, on every change |
+| `android` (AAR) | The same 224 shared bodies under Robolectric, plus 6 Android-only tests for `Iroh4kAndroid.multicastLock`, which exists on no other target — 230 in all. Plus 6 instrumented tests, the only ones that exercise the packaged `.so` |
 | `iosArm64`, `iosSimulatorArm64` | Compiles and links; cinterop verified in CI |
 | `linuxX64` | Test suite configured in CI on `ubuntu-latest`; not verified locally |
 | `linuxArm64`, `mingwX64` | Cross-compiled and assembled in CI; never executed |
@@ -92,7 +92,7 @@ this binding does not expose it yet. `Endpoint.watchNetworkChange()` is also der
 changes rather than from iroh's own net-report watcher, which is unstable upstream — read its
 documentation before relying on it.
 
-### Per-connection transport configuration: mostly set, rarely shown to reach the wire
+### Per-connection transport configuration: every tag round-trips, rarely shown to reach the wire
 
 `EndpointConfig.transportConfig`, `Endpoint.startConnect`'s `transportConfig` parameter and
 `Incoming.acceptWith`'s `transportConfig` parameter cover all twenty-nine of iroh's QUIC transport
@@ -101,17 +101,23 @@ the value types — every field absent by default, equality and `hashCode` sensi
 actually set, the ordinals for `CongestionController` pinned against the Rust wire contract — the
 encoding for every kind the codec carries (a duration, a boolean, a float, an ordinal, both nested
 records), and that an endpoint binds, a connection is made with `startConnect`'s `transportConfig`,
-and one is accepted with `acceptWith`'s, each with a configuration set.
+and one is accepted with `acceptWith`'s, each with a configuration set. One body,
+`every transport configuration tag round-trips through the codec` in `CommonEndpointTests`, sets all
+twenty-nine top-level fields and every field of both nested records at once and binds successfully —
+the only way that bind can succeed is if all thirty-six tag numbers involved agree between
+`TransportConfig.kt` and `transport.rs` and every reader consumes exactly what its writer produced, so
+that body is what actually establishes that every tag round-trips, not only the handful the other
+bodies happen to set.
 
-What it does not show, for twenty-eight of the twenty-nine, is that the value changed anything beyond
-round-tripping through the codec into iroh's own config object. Confirming more than that generally
-needs traffic analysis this suite does not do. The one exception is `datagramReceiveBufferSize`:
-setting it to zero makes the *other end's* `maxDatagramSize()` report `0` instead of iroh's default —
-transport parameters travel inside the QUIC handshake, so the peer observing a different value is
-evidence the setting reached the wire, not just the local config object. That is demonstrated in both
-directions — the dialling side setting it in `startConnect`, the accepting side setting it in
-`acceptWith` — because it is the one setting a hermetic loopback test can observe without capturing
-packets.
+What round-tripping through the codec does not show, for twenty-eight of the twenty-nine knobs, is
+that the value changed anything beyond landing in iroh's own config object. Confirming more than that
+generally needs traffic analysis this suite does not do. The one exception is
+`datagramReceiveBufferSize`: setting it to zero makes the *other end's* `maxDatagramSize()` report `0`
+instead of iroh's default — transport parameters travel inside the QUIC handshake, so the peer
+observing a different value is evidence the setting reached the wire, not just the local config
+object. That is demonstrated in both directions — the dialling side setting it in `startConnect`, the
+accepting side setting it in `acceptWith` — because it is the one setting a hermetic loopback test can
+observe without capturing packets.
 
 ### No logger of its own
 
