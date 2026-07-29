@@ -15,8 +15,8 @@ Android — are held to identical behaviour by the same shared test bodies.
 
 | Target | What is actually run |
 | --- | --- |
-| `macosArm64`, `jvm` | 432 test bodies, 216 per facade, on every change |
-| `android` (AAR) | The same 216 shared bodies under Robolectric, plus 6 Android-only tests for `Iroh4kAndroid.multicastLock`, which exists on no other target — 222 in all. Plus 6 instrumented tests, the only ones that exercise the packaged `.so` |
+| `macosArm64`, `jvm` | 446 test bodies, 223 per facade, on every change |
+| `android` (AAR) | The same 223 shared bodies under Robolectric, plus 6 Android-only tests for `Iroh4kAndroid.multicastLock`, which exists on no other target — 229 in all. Plus 6 instrumented tests, the only ones that exercise the packaged `.so` |
 | `iosArm64`, `iosSimulatorArm64` | Compiles and links; cinterop verified in CI |
 | `linuxX64` | Test suite configured in CI on `ubuntu-latest`; not verified locally |
 | `linuxArm64`, `mingwX64` | Cross-compiled and assembled in CI; never executed |
@@ -85,12 +85,33 @@ postcard encoding of a `SocketAddr` has nowhere to put one. So an address that g
 `EndpointTicket` comes back unzoned. This is upstream's encoding, pinned by a test rather than
 hidden — do not rely on a zone surviving a round trip.
 
-### No 0-RTT, and no per-connection transport configuration
+### No 0-RTT
 
-`Endpoint.startConnect` maps onto iroh's `connect_with_opts` with default options; when 0-RTT and a
-per-accepted-connection `ServerConfig` arrive they belong there. `Endpoint.watchNetworkChange()` is
-also derived from address changes rather than from iroh's own net-report watcher, which is unstable
-upstream — read its documentation before relying on it.
+`Endpoint.startConnect` maps onto iroh's `connect_with_opts`; 0-RTT is upstream's option there and
+this binding does not expose it yet. `Endpoint.watchNetworkChange()` is also derived from address
+changes rather than from iroh's own net-report watcher, which is unstable upstream — read its
+documentation before relying on it.
+
+### Per-connection transport configuration: mostly set, rarely shown to reach the wire
+
+`EndpointConfig.transportConfig`, `Endpoint.startConnect`'s `transportConfig` parameter and
+`Incoming.acceptWith`'s `transportConfig` parameter cover all twenty-nine of iroh's QUIC transport
+knobs as one sparse tagged payload shared by `TransportConfig.kt` and `transport.rs`. The suite covers
+the value types — every field absent by default, equality and `hashCode` sensitive to what was
+actually set, the ordinals for `CongestionController` pinned against the Rust wire contract — the
+encoding for every kind the codec carries (a duration, a boolean, a float, an ordinal, both nested
+records), and that an endpoint binds, a connection is made with `startConnect`'s `transportConfig`,
+and one is accepted with `acceptWith`'s, each with a configuration set.
+
+What it does not show, for twenty-eight of the twenty-nine, is that the value changed anything beyond
+round-tripping through the codec into iroh's own config object. Confirming more than that generally
+needs traffic analysis this suite does not do. The one exception is `datagramReceiveBufferSize`:
+setting it to zero makes the *other end's* `maxDatagramSize()` report `0` instead of iroh's default —
+transport parameters travel inside the QUIC handshake, so the peer observing a different value is
+evidence the setting reached the wire, not just the local config object. That is demonstrated in both
+directions — the dialling side setting it in `startConnect`, the accepting side setting it in
+`acceptWith` — because it is the one setting a hermetic loopback test can observe without capturing
+packets.
 
 ### No logger of its own
 
