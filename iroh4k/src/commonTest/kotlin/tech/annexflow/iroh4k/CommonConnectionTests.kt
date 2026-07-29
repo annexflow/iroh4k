@@ -1258,6 +1258,102 @@ class CommonConnectionTests {
             }
         }
     }
+
+    // ── 0-RTT, two properties nothing else pins ─────────────────────────────────────────────
+
+    fun `awaiting the 0-RTT handshake survives a cancelled await`() = bounded {
+        Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+            Endpoint.bind(Loopback.config()).use { client ->
+                // Prime the ticket cache exactly as "a second dial from the same endpoint sends
+                // data before the handshake" does above: the session ticket is ordinary
+                // post-handshake application data delivered asynchronously, so this dials
+                // repeatedly — completing and releasing each attempt normally — until `zeroRtt()`
+                // itself reports a ticket on a fresh attempt, the earliest instant priming is
+                // provably done. `bounded`'s 60s real-time timeout is the backstop.
+                var zero: OutgoingZeroRttConnection? = null
+                lateinit var accepted: Deferred<Connection>
+                do {
+                    accepted = async { server.acceptOne() }
+                    val connecting = client.startConnect(server.addr(), Loopback.alpn)
+                    zero = connecting.zeroRtt()
+                    if (zero == null) {
+                        // Not primed yet: finish this attempt like any ordinary connection, and
+                        // release both ends, so the loop's unsuccessful iterations cannot strand
+                        // connection-domain handles across a retry.
+                        connecting.connect().close()
+                        connecting.close()
+                        accepted.await().close()
+                    } else {
+                        // Primed: the attempt itself is spent (`zeroRtt()`'s doc), but the
+                        // `Connecting` handle wrapping it is a separate release from the `zero`
+                        // handle just produced, so it still needs its own close.
+                        connecting.close()
+                    }
+                } while (zero == null)
+
+                zero.use { early ->
+                    // Cancel one await outright. Every other transition in this domain would be
+                    // spent by this: a second `Connecting.connect()` answers `Closed`, and so does
+                    // one made after the first was cancelled — `awaitHandshake` is the one
+                    // exception, because upstream backs it with a `Shared` future.
+                    val abandoned = async { early.awaitHandshake() }
+                    abandoned.cancelAndJoin()
+
+                    // The future behind it is shared, so a second await simply works — and mints
+                    // its own fresh `Connection` handle, which is why the two are closed
+                    // separately rather than being the same object reused.
+                    early.awaitHandshake().connection.use { first ->
+                        early.awaitHandshake().connection.use { second ->
+                            // Both handles describe the one connection the shared future settled
+                            // on, not two different ones — this is the actual claim "re-awaitable"
+                            // makes, beyond merely "does not throw".
+                            assertThat(first.stableId()).isEqualTo(second.stableId())
+                        }
+                    }
+                }
+                accepted.await().close()
+            }
+        }
+    }
+
+    fun `0-RTT handles are released`() = bounded {
+        val connections = LiveCounters.connectionHandles
+        // Quiescent baseline first, or the ceiling below is slack by whatever the previous body
+        // was still dropping — which is how a leak detector quietly stops detecting.
+        LiveCounters.settle()
+        val baseline = connections.value
+
+        Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+            Endpoint.bind(Loopback.config()).use { client ->
+                // Same priming loop as the test above: dial repeatedly, completing and releasing
+                // every unsuccessful attempt, until a fresh attempt reports a ticket.
+                var zero: OutgoingZeroRttConnection? = null
+                lateinit var accepted: Deferred<Connection>
+                do {
+                    accepted = async { server.acceptOne() }
+                    val connecting = client.startConnect(server.addr(), Loopback.alpn)
+                    zero = connecting.zeroRtt()
+                    if (zero == null) {
+                        connecting.connect().close()
+                        connecting.close()
+                        accepted.await().close()
+                    } else {
+                        connecting.close()
+                    }
+                } while (zero == null)
+
+                // Both handles must be closed: the 0-RTT one holds a clone of the same connection
+                // — upstream's `Shared` future caches its own output, which contains that
+                // `Connection` — so releasing only the `Connection` would leave it open and this
+                // counter above its baseline forever.
+                zero.awaitHandshake().connection.close()
+                zero.close()
+                accepted.await().close()
+            }
+        }
+
+        connections.awaitAtMost(baseline)
+    }
 }
 
 /**

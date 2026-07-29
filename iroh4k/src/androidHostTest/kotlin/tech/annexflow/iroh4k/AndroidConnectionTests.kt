@@ -166,4 +166,12 @@ class AndroidConnectionTests {
     @Test
     fun `a restarted server rejects the early data and the stream says so`() =
         runner.`a restarted server rejects the early data and the stream says so`()
+
+    @Test
+    fun `awaiting the 0-RTT handshake survives a cancelled await`() =
+        runner.`awaiting the 0-RTT handshake survives a cancelled await`()
+
+    @Test
+    fun `0-RTT handles are released`() =
+        runner.`0-RTT handles are released`()
 }
