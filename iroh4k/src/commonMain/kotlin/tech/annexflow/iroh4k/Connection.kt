@@ -753,8 +753,8 @@ class Connection internal constructor(guard: NativeHandle) : QuicConnection(guar
 
     companion object {
         /**
-         * Connection-domain handles still alive in Rust — [Incoming], [Accepting], [Connecting] and
-         * [Connection] together.
+         * Connection-domain handles still alive in Rust — [Incoming], [Accepting], [Connecting],
+         * [Connection], [OutgoingZeroRttConnection] and [IncomingZeroRttConnection] together.
          *
          * Exposed for tests, as [Endpoint.liveHandleCount] is: it must return to its baseline once
          * every handle is closed, which is how a leak in the accept chain would be caught.
@@ -997,8 +997,9 @@ suspend fun Endpoint.connect(addr: EndpointAddr, alpn: ByteArray): Connection = 
  * when neither of those matters.
  *
  * Maps onto iroh's `connect_with_opts`, which is also why [transportConfig] lives here and not on
- * [connect]: upstream offers per-attempt options on that call alone. 0-RTT is the other thing that
- * belongs here, and it has not arrived yet.
+ * [connect]: upstream offers per-attempt options on that call alone. 0-RTT does not travel through
+ * `connect_with_opts` or [transportConfig] at all — call [Connecting.zeroRtt] on what this returns,
+ * before [Connecting.connect].
  *
  * @param transportConfig QUIC transport parameters for this connection alone. It **replaces** the
  *   endpoint's own [EndpointConfig.transportConfig] rather than merging with it — upstream's

@@ -287,9 +287,18 @@ impl<T> Deref for Tracked<T> {
 /// so the future would not be spawnable, and holding a blocking lock across an await invites
 /// deadlock — hence a `tokio::sync::Mutex` here.
 ///
-/// Note this is the same *shape* as `Consumed`, not a second policy: `take` still hands the value to
-/// exactly one caller and every later caller gets `None`. Worth hoisting into `handle.rs` as an
-/// async sibling of `Consumed` once a second domain needs it.
+/// Note this is the same *shape* as `Consumed`, not a second policy: `take` hands the value to one
+/// caller, and every caller that finds the slot already empty gets `None`. Worth hoisting into
+/// `handle.rs` as an async sibling of `Consumed` once a second domain needs it.
+///
+/// One user breaks the "every *later* caller gets `None`" half of that, though not the safety
+/// property it exists for: [`ConnectingSlot`]'s [`connecting_zero_rtt`] takes the value to try
+/// `into_0rtt()`, and on the no-ticket branch puts the same value back rather than leaving the slot
+/// empty, so the next caller sees `Some` again rather than a permanently spent attempt. That is safe
+/// only because `into_0rtt` is synchronous — there is no `await` between the `take` and the put-back,
+/// so a cancellation lands either before the take (nothing taken yet) or after the put-back (the slot
+/// already holds the value again); it can never observe the slot empty. A second, genuinely
+/// asynchronous user of `Once` could not do this and would need its own reasoning.
 struct Once<T> {
     slot: tokio::sync::Mutex<Option<T>>,
 }
@@ -967,8 +976,11 @@ async fn accept_next(endpoint: Option<Endpoint>) -> OpResult {
 /// `opts` carries an optional transport configuration — the same `writeOptionalTransportConfig`
 /// payload `endpoint.rs`'s bind configuration ends with — decoded below and, when present, handed
 /// to `connect_with_opts` through `ConnectOptions::with_transport_config`, replacing the
-/// endpoint's own default outright rather than merging with it. Still not wired up: 0-RTT and
-/// additional ALPNs, the other options `connect_with_opts` takes.
+/// endpoint's own default outright rather than merging with it. Still not wired up: additional
+/// ALPNs, the other option `connect_with_opts` takes. 0-RTT does not travel through this function's
+/// `opts` at all — `ConnectOptions` upstream has no field for it; it is `Connecting::into_0rtt`
+/// instead, wired up separately below as [`connecting_zero_rtt`] and reached from Kotlin through
+/// `Connecting.zeroRtt()`.
 async fn start_connect(
     endpoint: Option<Endpoint>,
     addr: Vec<u8>,

@@ -134,7 +134,7 @@ strategy.
 
 iroh4k is that different strategy: one Rust crate built twice — a `staticlib` linked into
 Kotlin/Native through cinterop, and a `cdylib` reached from the JVM and Android through hand-written
-JNI. Both facades call the same core through the same codec, and the same 227 shared test bodies run
+JNI. Both facades call the same core through the same codec, and the same 239 shared test bodies run
 against each.
 
 Writing the binding by hand rather than generating it also changed three things. They are trade-offs,
@@ -288,6 +288,13 @@ as is. Without `android` in `-Ptargets`, the Android Gradle plugin is never appl
 
 Version `0.1.0`, the first release, targeting **iroh 1.0.3**. Dual licensed Apache-2.0 or MIT.
 
+**Binary compatible with source, not with bytecode.** `Stream.kt`'s four extension functions —
+`openBi`, `acceptBi`, `openUni`, `acceptUni` — took `Connection` as their receiver; they now take
+`QuicConnection`, the supertype `Connection` and the two 0-RTT connection types share. A caller that
+recompiles keeps working unchanged, because `Connection` still *is* a `QuicConnection` — but a `.jar`
+or `.klib` built against an earlier `0.1.0` snapshot has the old receiver type baked into its call
+sites, and will not link against this one without recompiling.
+
 The transport itself — endpoints, connections, streams, datagrams, the router — is covered by the
 test suite on every change. Five things around it are in different states, and the difference is
 worth seeing rather than lumping them together. [`STATUS.md`](STATUS.md) has the evidence for each.
@@ -311,8 +318,14 @@ twenty-eight of the twenty-nine, that round trip into iroh's own config object i
 confirming more needs traffic analysis the suite does not do. The exception is
 `datagramReceiveBufferSize`, whose effect the other end can observe directly.
 
-**Not implemented.** No 0-RTT. `Endpoint.startConnect` maps onto iroh's `connect_with_opts`, and
-0-RTT is upstream's option there, waiting for a place in it.
+**Both sides work over loopback; the sharpest edges are not pinned by a live assertion.** 0-RTT is
+`Connecting.zeroRtt()` on the dialling side and `Accepting.zeroRtt()` on the accepting one, and both
+acceptance and rejection are demonstrated end to end — rejection by restarting the server endpoint
+under the same key, so the resumption state the first ticket depended on is gone. Two things stop
+short of that: the per-stream error a rejected write should raise is pinned by a Rust unit test rather
+than a write that reliably fails from Kotlin, and a stream reporting that it carried 0-RTT data is
+never asserted `true`, only `false`, because upstream decides that flag at the moment a stream is
+accepted rather than when it was opened. [`STATUS.md`](STATUS.md) has the measurements behind both.
 
 **Known and pinned.** An IPv6 zone id does not survive an `EndpointTicket`, because upstream's
 encoding has nowhere to put one. A test holds that behaviour in place so it cannot regress quietly.
