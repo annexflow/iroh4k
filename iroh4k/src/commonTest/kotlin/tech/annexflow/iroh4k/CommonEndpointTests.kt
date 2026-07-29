@@ -1151,4 +1151,31 @@ class CommonEndpointTests {
             assertThat(endpoint.isClosed).isFalse()
         }
     }
+
+    // ── TLS session ticket cache ─────────────────────────────────────────────────────────────
+
+    /** Loopback's configuration with a ticket cache size — EndpointConfig has no copy(). */
+    private fun ticketConfig(max: Int) = EndpointConfig(
+        preset = EndpointPreset.Minimal,
+        relayMode = RelayMode.Disabled,
+        bindAddrs = listOf(loopback),
+        maxTlsTickets = max,
+    )
+
+    fun `max tls tickets is absent by default`() {
+        assertThat(EndpointConfig().maxTlsTickets).isNull()
+        assertThat(ticketConfig(8).maxTlsTickets).isEqualTo(8)
+    }
+
+    fun `an endpoint binds with a ticket cache size of zero`() = Loopback.bounded {
+        // Zero is legal upstream and means "store none", so this must bind rather than raise.
+        Endpoint.bind(ticketConfig(0)).use { endpoint ->
+            assertThat(endpoint.isClosed).isFalse()
+        }
+    }
+
+    fun `a negative ticket cache size is refused`() = Loopback.bounded {
+        val failure = assertFailsWith<IrohError> { Endpoint.bind(ticketConfig(-1)).close() }
+        assertThat(failure.code).isEqualTo(IrohError.Code.InvalidArgument)
+    }
 }
