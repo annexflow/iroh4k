@@ -50,6 +50,8 @@ internal object ConnectionJni {
 
     external fun incomingRemoteAddrValidated(handle: Long): ByteArray
 
+    external fun incomingAcceptWith(handle: Long, endpoint: Long, opts: ByteArray): ByteArray
+
     // ── Connecting and Connection — synchronous ──────────────────────────────────────────────
 
     external fun connectingRemoteId(handle: Long): ByteArray
@@ -88,7 +90,12 @@ internal object ConnectionJni {
 
     external fun acceptNextStart(endpoint: Long): Long
 
-    external fun startConnectStart(endpoint: Long, addr: ByteArray, alpn: ByteArray): Long
+    external fun startConnectStart(
+        endpoint: Long,
+        addr: ByteArray,
+        alpn: ByteArray,
+        opts: ByteArray,
+    ): Long
 
     external fun connectStart(endpoint: Long, addr: ByteArray, alpn: ByteArray): Long
 
@@ -156,6 +163,9 @@ internal actual fun nativeIncomingRemoteAddr(handle: Long): ByteArray =
 internal actual fun nativeIncomingRemoteAddrValidated(handle: Long): Boolean =
     ConnectionJni.incomingRemoteAddrValidated(handle).jniLongOrThrow() != 0L
 
+internal actual fun nativeIncomingAcceptWith(handle: Long, endpoint: Long, opts: ByteArray): Long =
+    ConnectionJni.incomingAcceptWith(handle, endpoint, opts).jniHandleOrThrow()
+
 // ── Connecting and Connection — synchronous ───────────────────────────────────────────────────
 
 internal actual fun nativeConnectingRemoteId(handle: Long): ByteArray =
@@ -219,8 +229,9 @@ internal actual suspend fun nativeEndpointStartConnect(
     handle: Long,
     addr: ByteArray,
     alpn: ByteArray,
+    opts: ByteArray,
 ): Long = jniOp(
-    { ConnectionJni.startConnectStart(handle, addr, alpn) },
+    { ConnectionJni.startConnectStart(handle, addr, alpn, opts) },
     ConnectionJni::freeConnecting,
 ) { it.handle }
 

@@ -206,6 +206,11 @@ class MdnsConfig(
  *   discovery at all" is not expressible here, because an empty list already means something else —
  *   spell that [EndpointPreset.Minimal] with `relayMode = RelayMode.Default`. [mdns] is separate and
  *   always composes, because it points at no server and no preset installs it.
+ * @property transportConfig the QUIC transport parameters this endpoint applies to every connection
+ *   by default. `null`, the default, leaves iroh's own — including the six it overrides for hole
+ *   punching, see [TransportConfig]'s class documentation. A config set on a single connection
+ *   **replaces** this one outright rather than merging with it, exactly as [TransportConfig] itself
+ *   documents.
  */
 class EndpointConfig(
     val preset: EndpointPreset = EndpointPreset.N0,
@@ -216,6 +221,7 @@ class EndpointConfig(
     val externalAddrs: List<SocketAddr> = emptyList(),
     val mdns: MdnsConfig? = null,
     val discovery: List<Discovery> = emptyList(),
+    val transportConfig: TransportConfig? = null,
 ) {
     // Copied in and copied out, for the reason `CustomAddr` copies: a `ByteArray` is mutable, and a
     // configuration that changed under the caller after being built would be a confusing bug.
@@ -562,6 +568,16 @@ class Endpoint private constructor(private val guard: NativeHandle) : AutoClosea
      */
     internal suspend fun <T> withHandle(block: suspend (Long) -> T): T = suspending(block)
 
+    /**
+     * Runs a synchronous native call against this endpoint's handle, from another domain.
+     *
+     * The non-suspending twin of [withHandle], for the one caller that needs an endpoint handle
+     * inside a synchronous operation: `Incoming.acceptWith` has to build a server configuration from
+     * the endpoint that produced it. Guarded exactly as every other access is, so racing it against
+     * [close] reports [IrohError.Code.Closed] rather than dereferencing a freed pointer.
+     */
+    internal fun <T> useHandle(block: (Long) -> T): T = sync(block)
+
     companion object {
         /**
          * Binds an endpoint according to [config].
@@ -572,8 +588,9 @@ class Endpoint private constructor(private val guard: NativeHandle) : AutoClosea
          * @throws IrohError with [IrohError.Code.Bind] if iroh refuses to bind — a port already in
          *   use, no crypto provider ([EndpointPreset.Empty] never has one), or a malformed
          *   configuration. A bad piece of [config] reports the code that fits it instead:
-         *   [IrohError.Code.Key] for the secret key, [IrohError.Code.Addr] for an address and
-         *   [IrohError.Code.Relay] for a relay URL.
+         *   [IrohError.Code.Key] for the secret key, [IrohError.Code.Addr] for an address,
+         *   [IrohError.Code.Relay] for a relay URL, [IrohError.Code.Discovery] for a discovery
+         *   service, and [IrohError.Code.InvalidArgument] for [EndpointConfig.transportConfig].
          */
         suspend fun bind(config: EndpointConfig = EndpointConfig()): Endpoint {
             // The handle is created *before* the bind, so Kotlin owns it no matter how the bind
@@ -621,6 +638,10 @@ class Endpoint private constructor(private val guard: NativeHandle) : AutoClosea
 //                            u8 0 PkarrPublisher + str? relay URL + u8 published addrs;
 //                            u8 1 PkarrResolver  + str? relay URL;
 //                            u8 2 Dns            + str? origin domain
+//   u8      transport config 0 absent — iroh's own defaults — or 1 present, then
+//                            `TransportConfig.kt`'s `writeTransportConfig`: a counted sequence of
+//                            tagged entries, its own tag family (`TRANSPORT_TAG_*`), documented in
+//                            full there and mirrored by `transport.rs`.
 //
 // `addEndpointAddr` sends an `EndpointAddr` as the *whole* payload, so it is written with
 // `encodeEndpointAddr` and read by `addr::decode_endpoint_addr`, which rejects trailing bytes —
@@ -695,6 +716,12 @@ private fun encodeBindConfig(config: EndpointConfig): ByteArray {
     // for a presence byte to distinguish.
     w.i32(config.discovery.size)
     for (service in config.discovery) w.writeDiscovery(service)
+
+    // Appended after the discovery sequence, for the same reason: the payload is positional and a
+    // field can only ever be added at the end. An optional *record*, like `mdns` above and unlike
+    // `relayMode`'s "leave the preset's choice" tag — there is no preset transport configuration to
+    // leave alone, so absent always means iroh's own defaults.
+    w.writeOptionalTransportConfig(config.transportConfig)
 
     return w.finish()
 }

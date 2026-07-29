@@ -906,6 +906,125 @@ class CommonConnectionTests {
         }
     }
 
+    // ── Per-connection transport configuration ───────────────────────────────────────────────
+
+    fun `a connection made with datagrams refused reports no datagram size`() = Loopback.bounded {
+        Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+            Endpoint.bind(Loopback.config()).use { client ->
+                val accepted = async { server.acceptOne() }
+                // The client refuses datagrams for this connection only — its endpoint says nothing
+                // about them. The server therefore has nowhere to send one and reports no size,
+                // which is the one transport setting whose effect the other end can observe without
+                // traffic analysis, and so the only one a hermetic test can pin.
+                val connecting = client.startConnect(
+                    server.addr(),
+                    Loopback.alpn,
+                    TransportConfig(datagramReceiveBufferSize = 0),
+                )
+                connecting.connect().use { connection ->
+                    accepted.await().use { served ->
+                        // Zero rather than null, and the difference is the point: null is reserved
+                        // for a peer whose transport does not do datagrams at all, while this peer
+                        // does and has advertised that it will accept none. Anything the server
+                        // sent would be dropped, so the two answers mean the same thing to a
+                        // caller and different things to whoever reads the connection.
+                        assertThat(served.maxDatagramSize()).isEqualTo(0L)
+                        assertThat(connection.remoteId()).isEqualTo(server.id)
+                    }
+                }
+            }
+        }
+    }
+
+    fun `an incoming connection can be accepted with its own transport configuration`() =
+        Loopback.bounded {
+            Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+                Endpoint.bind(Loopback.config()).use { client ->
+                    val accepted = async {
+                        val incoming = server.acceptNext() ?: error("shut down while accepting")
+                        incoming.use { pending ->
+                            // The server refuses datagrams for this connection alone.
+                            pending.acceptWith(
+                                listOf(Loopback.alpn),
+                                TransportConfig(datagramReceiveBufferSize = 0),
+                            ).use { accepting -> accepting.connect() }
+                        }
+                    }
+                    client.connect(server.addr(), Loopback.alpn).use { connection ->
+                        accepted.await().use { served ->
+                            // Zero rather than null, for the same reason as the sibling test above:
+                            // the server accepted this connection with an empty receive buffer, so
+                            // the client has nowhere to send a datagram, but datagrams are not
+                            // unsupported by the peer — they are advertised at size zero.
+                            assertThat(connection.maxDatagramSize()).isEqualTo(0L)
+                            assertThat(served.remoteId()).isEqualTo(client.id)
+                        }
+                    }
+                }
+            }
+        }
+
+    fun `acceptWith with no overlapping ALPN fails loudly rather than silently`() =
+        Loopback.bounded {
+            // What this settles: the class doc used to claim a list omitting the negotiated
+            // protocol "accepts a connection whose two sides agree on nothing, and does so
+            // silently". Measured against the actual Rust/rustls behaviour behind `acceptWith`,
+            // that is backwards — a non-empty list with no overlap fails loudly, and it fails at
+            // `acceptWith` itself rather than at `Accepting.connect()`: `incoming.accept_with`
+            // negotiates ALPN synchronously from the ClientHello already carried in the QUIC
+            // Initial packet, so there is no handshake left to fail later. The error is the same
+            // shape iroh reports for an endpoint-wide ALPN mismatch — `IrohError.Code.Accept` — not
+            // `Code.Connect`.
+            val other = "iroh4k/m5/no-overlap".encodeToByteArray()
+            Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+                Endpoint.bind(Loopback.config()).use { client ->
+                    val accepted = async {
+                        val incoming = server.acceptNext() ?: error("shut down while accepting")
+                        incoming.use { pending ->
+                            assertFailsWith<IrohError> { pending.acceptWith(listOf(other)) }
+                        }
+                    }
+                    val dialFailure = assertFailsWith<IrohError> {
+                        client.connect(server.addr(), Loopback.alpn)
+                    }
+                    assertThat(dialFailure.code).isEqualTo(IrohError.Code.Connect)
+                    assertThat(accepted.await().code).isEqualTo(IrohError.Code.Accept)
+                }
+            }
+        }
+
+    fun `acceptWith refuses an empty ALPN list without touching the incoming connection`() =
+        Loopback.bounded {
+            // An empty list is not the silent "accept anything" case either: ALPN overlap is an
+            // intersection, and an empty list intersects nothing, so accepting with one would fail
+            // exactly as loudly and exactly as pointlessly as the mismatched-list case above on
+            // every single call. iroh4k refuses it up front instead — the one InvalidArgument this
+            // function raises before ever calling into Rust, which is why the incoming connection
+            // is still usable afterwards rather than consumed by a doomed attempt.
+            Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+                Endpoint.bind(Loopback.config()).use { client ->
+                    val accepted = async {
+                        val incoming = server.acceptNext() ?: error("shut down while accepting")
+                        incoming.use { pending ->
+                            val error = assertFailsWith<IrohError> { pending.acceptWith(emptyList()) }
+                            assertThat(error.code).isEqualTo(IrohError.Code.InvalidArgument)
+
+                            // Still usable: the rejection never reached Rust, so nothing was
+                            // consumed. A real ALPN list now succeeds on the same incoming
+                            // connection.
+                            pending.acceptWith(listOf(Loopback.alpn)).use { it.connect() }
+                        }
+                    }
+                    client.connect(server.addr(), Loopback.alpn).use { connection ->
+                        accepted.await().use { served ->
+                            assertThat(served.remoteId()).isEqualTo(client.id)
+                            assertThat(connection.remoteId()).isEqualTo(server.id)
+                        }
+                    }
+                }
+            }
+        }
+
     /** Polls [condition] on a real clock — see [Loopback.awaitUntil]. */
     private suspend fun awaitUntil(condition: () -> Boolean) = Loopback.awaitUntil(condition)
 }

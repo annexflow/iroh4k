@@ -121,4 +121,20 @@ class JvmConnectionTests {
     @Test
     fun `incoming and local addresses are values`() =
         runner.`incoming and local addresses are values`()
+
+    @Test
+    fun `a connection made with datagrams refused reports no datagram size`() =
+        runner.`a connection made with datagrams refused reports no datagram size`()
+
+    @Test
+    fun `an incoming connection can be accepted with its own transport configuration`() =
+        runner.`an incoming connection can be accepted with its own transport configuration`()
+
+    @Test
+    fun `acceptWith with no overlapping ALPN fails loudly rather than silently`() =
+        runner.`acceptWith with no overlapping ALPN fails loudly rather than silently`()
+
+    @Test
+    fun `acceptWith refuses an empty ALPN list without touching the incoming connection`() =
+        runner.`acceptWith refuses an empty ALPN list without touching the incoming connection`()
 }

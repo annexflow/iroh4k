@@ -50,6 +50,17 @@ iroh-metrics = { version = "1.0.1" }
 # no multicast traffic at all.
 iroh-mdns-address-lookup = { version = "0.4.0" }
 
+# https://crates.io/crates/noq-proto
+# Only for the two congestion controller configs. `iroh` re-exports the `ControllerFactory` trait
+# but not the concrete `CubicConfig`/`NewRenoConfig`, so constructing either needs the crate iroh
+# itself depends on. Keep the version in step with iroh's own. `default-features = false` matches
+# how iroh itself declares this dependency: Cargo unifies features across the one shared copy, so
+# taking the defaults here — `bloom` included — would turn them on for iroh's own use of the crate
+# too, pulling `fastbloom`/`libm`/`siphasher` into every artifact for a feature nothing in this
+# crate reaches. `pub mod congestion`, and neither `CubicConfig` nor `NewRenoConfig`, is
+# feature-gated, so the two configs used here compile identically without defaults.
+noq-proto = { version = "1.1", default-features = false }
+
 # https://crates.io/crates/url
 url = "2"
 

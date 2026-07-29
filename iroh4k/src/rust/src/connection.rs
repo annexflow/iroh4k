@@ -118,6 +118,17 @@
 //! EndpointAddr  (Kotlin → Rust)   — the layout `addr.rs` documents and reads
 //!   bytes id
 //!   i32   count             then count × TransportAddr, tags as above
+//!
+//! start_connect options  (Kotlin → Rust)   — `Endpoint.startConnect`'s `opts` argument
+//!   u8    transport config  0 absent — the endpoint's own default — or 1 present, then a
+//!                           `TransportConfig`: the counted, tagged, sparse sequence `transport.rs`
+//!                           documents in full. Read by `transport::read_optional`, and the whole
+//!                           of `opts` — `Reader::finish()` rejects anything left over.
+//!
+//! acceptWith options  (Kotlin → Rust)   — `Incoming.acceptWith`'s `opts` argument
+//!   i32   ALPN count        then count × bytes (one ALPN each)
+//!   u8    transport config  as `start_connect options` above, and likewise the rest of the
+//!                           buffer — see `decode_accept_with_opts`.
 //! ```
 //!
 //! ## Scalars with an absent value
@@ -142,20 +153,22 @@ use iroh::{
     Endpoint, EndpointId,
     endpoint::{
         Accepting, ConnectOptions, Connecting, ConnectingError, Connection, ConnectionStats,
-        Incoming, IncomingAddr, LocalTransportAddr, Path, SendDatagramError, UdpStats, VarInt,
+        Incoming, IncomingAddr, LocalTransportAddr, Path, QuicTransportConfig, SendDatagramError,
+        UdpStats, VarInt,
     },
 };
 
 use crate::addr::{
     TAG_CUSTOM, TAG_IP, TAG_RELAY, TAG_UNKNOWN, decode_endpoint_addr, write_transport_addr,
 };
-use crate::codec::Writer;
+use crate::codec::{Reader, Writer};
 use crate::core::{
     ERROR_ACCEPT, ERROR_CLOSED, ERROR_CONNECT, ERROR_INVALID_ARGUMENT, ERROR_WRITE, Iroh4kPtr,
     Iroh4kResult, bytes_result, error_result, handle_result, i64_result, ok_result, owned_bytes,
 };
 use crate::handle::{self, Consumed, Tagged};
 use crate::ops::{self, OpResult};
+use crate::transport;
 
 /// The completion callback every async C export takes — see [`crate::ffi`].
 pub(crate) type Completion = extern "C" fn(Iroh4kPtr, *mut Iroh4kResult);
@@ -495,6 +508,65 @@ fn incoming_accept(slot: &Consumed<Incoming>) -> *mut Iroh4kResult {
     }
 }
 
+/// Decodes an `acceptWith` options payload: the ALPN list plus an optional transport
+/// configuration.
+///
+/// Mirrors `Incoming.acceptWith`'s writer in `Connection.kt`: `i32` count then that many
+/// length-prefixed ALPNs, followed by the same optional-`TransportConfig` record
+/// `Endpoint.startConnect`'s options payload ends with.
+fn decode_accept_with_opts(
+    opts: &[u8],
+) -> Result<(Vec<Vec<u8>>, Option<QuicTransportConfig>), String> {
+    let mut r = Reader::new(opts);
+    let count = r.count()?;
+    let mut alpns = Vec::with_capacity(count);
+    for _ in 0..count {
+        alpns.push(r.bytes()?.to_vec());
+    }
+    let transport = transport::read_optional(&mut r)?;
+    r.finish()?;
+    Ok((alpns, transport))
+}
+
+/// Accepts an incoming connection with a transport configuration for this connection alone,
+/// producing an `Accepting` handle.
+///
+/// A sibling of [`incoming_accept`] rather than a parameter added to it: `accept_with` needs an
+/// `Arc<ServerConfig>`, which upstream can only build through `endpoint`'s own
+/// `create_server_config_builder`, so this operation additionally takes the endpoint the incoming
+/// connection came from. `alpns` is not inferred from the incoming connection's own negotiated
+/// protocol: `ServerConfigBuilder` has no way to add an ALPN after it is created, so the caller
+/// states the list explicitly and Kotlin's `acceptWith` documents why a list that omits the
+/// negotiated protocol accepts a connection that agrees on nothing.
+///
+/// The slot is taken *after* `alpns`/`transport` have already been decoded by the caller, so a
+/// malformed payload never consumes the incoming connection — only a well-formed one reaches this
+/// function at all. Taking it here, before the server configuration is built, is what makes a
+/// second use of the same handle report [`ERROR_CLOSED`] rather than building a config for nothing,
+/// exactly as [`incoming_accept`] does.
+fn incoming_accept_with(
+    slot: &Consumed<Incoming>,
+    endpoint: &Endpoint,
+    alpns: Vec<Vec<u8>>,
+    transport: Option<QuicTransportConfig>,
+) -> *mut Iroh4kResult {
+    let Some(incoming) = slot.take() else {
+        return consumed("incoming connection");
+    };
+    let mut builder = endpoint.create_server_config_builder(alpns);
+    if let Some(transport) = transport {
+        builder = builder.set_transport_config(transport);
+    }
+    let server_config = Arc::new(builder.build());
+    match in_runtime(|| incoming.accept_with(server_config)) {
+        Ok(accepting) => handle_result(handle::into_handle(tracked(Once::new(accepting)))),
+        Err(error) => error_result(
+            ERROR_ACCEPT,
+            format!("could not accept an incoming connection: {error}"),
+        ),
+    }
+}
+
 /// Rejects an incoming connection, telling the peer so.
 fn incoming_refuse(slot: &Consumed<Incoming>) -> *mut Iroh4kResult {
     match slot.take() {
@@ -614,11 +686,19 @@ async fn accept_next(endpoint: Option<Endpoint>) -> OpResult {
 
 /// Starts an outbound connection attempt, producing a `Connecting` handle.
 ///
-/// **Deliberately minimal.** The outbound side is M5's; this exists because the accept chain cannot
-/// be exercised — or used — without something to accept, and one loopback dial is the smallest thing
-/// that provides it. Only `connect_with_opts` with default options is wired up: no 0-RTT, no
-/// transport configuration, no additional ALPNs.
-async fn start_connect(endpoint: Option<Endpoint>, addr: Vec<u8>, alpn: Vec<u8>) -> OpResult {
+/// The outbound side is M5's; this exists because the accept chain cannot be exercised — or used —
+/// without something to accept, and one loopback dial is the smallest thing that provides it.
+/// `opts` carries an optional transport configuration — the same `writeOptionalTransportConfig`
+/// payload `endpoint.rs`'s bind configuration ends with — decoded below and, when present, handed
+/// to `connect_with_opts` through `ConnectOptions::with_transport_config`, replacing the
+/// endpoint's own default outright rather than merging with it. Still not wired up: 0-RTT and
+/// additional ALPNs, the other options `connect_with_opts` takes.
+async fn start_connect(
+    endpoint: Option<Endpoint>,
+    addr: Vec<u8>,
+    alpn: Vec<u8>,
+    opts: Vec<u8>,
+) -> OpResult {
     let Some(endpoint) = endpoint else {
         return OpResult::new(released());
     };
@@ -626,10 +706,29 @@ async fn start_connect(endpoint: Option<Endpoint>, addr: Vec<u8>, alpn: Vec<u8>)
         Ok(addr) => addr,
         Err((code, message)) => return OpResult::new(error_result(code, message)),
     };
-    match endpoint
-        .connect_with_opts(addr, &alpn, ConnectOptions::default())
-        .await
-    {
+    // Decoded here rather than in either facade's export, because both call this one function and
+    // a second copy of the decode is a second place for the two ends to drift apart.
+    let transport_config = {
+        let mut r = Reader::new(&opts);
+        match transport::read_optional(&mut r).and_then(|config| r.finish().map(|()| config)) {
+            Ok(config) => config,
+            Err(message) => {
+                return OpResult::new(error_result(
+                    ERROR_INVALID_ARGUMENT,
+                    format!("malformed connect options: {message}"),
+                ));
+            }
+        }
+    };
+
+    // A transport configuration given here replaces the endpoint's own outright — that is upstream's
+    // behaviour, not a choice made here, and `Endpoint.startConnect`'s documentation says so.
+    let mut options = ConnectOptions::new();
+    if let Some(transport) = transport_config {
+        options = options.with_transport_config(transport);
+    }
+
+    match endpoint.connect_with_opts(addr, &alpn, options).await {
         Ok(connecting) => {
             let slot = ConnectingSlot {
                 remote_id: connecting.remote_id(),
@@ -1144,6 +1243,43 @@ pub unsafe extern "C" fn iroh4k_incoming_remote_addr_validated(
     unsafe { with::<Consumed<Incoming>>(handle, |slot| incoming_remote_addr_validated(slot)) }
 }
 
+/// Accepts an incoming connection with its own ALPN list and transport configuration; the result
+/// carries an `Accepting` handle.
+///
+/// Synchronous, like [`iroh4k_incoming_accept`]: `accept_with` is synchronous in iroh too, so
+/// `opts` is borrowed rather than copied — it need only survive this one call.
+///
+/// # Safety
+/// `handle` must satisfy [`peek`]'s contract for an `Incoming` handle. `endpoint` must satisfy
+/// [`crate::endpoint::endpoint_clone`]'s contract for an endpoint handle. `opts`/`opts_len` must
+/// satisfy [`borrowed`]'s contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_incoming_accept_with(
+    handle: *mut c_void,
+    endpoint: *mut c_void,
+    opts: *const u8,
+    opts_len: c_int,
+) -> *mut Iroh4kResult {
+    unsafe {
+        let opts = borrowed(opts, opts_len);
+        let (alpns, transport) = match decode_accept_with_opts(opts) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                return error_result(
+                    ERROR_INVALID_ARGUMENT,
+                    format!("malformed accept options: {message}"),
+                );
+            }
+        };
+        let Some(endpoint) = crate::endpoint::endpoint_clone(endpoint) else {
+            return released();
+        };
+        with::<Consumed<Incoming>>(handle, |slot| {
+            incoming_accept_with(slot, &endpoint, alpns, transport)
+        })
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Connecting — the one synchronous accessor
 // ----------------------------------------------------------------------------
@@ -1436,6 +1572,8 @@ pub unsafe extern "C" fn iroh4k_endpoint_start_connect(
     addr_len: c_int,
     alpn: *const u8,
     alpn_len: c_int,
+    opts: *const u8,
+    opts_len: c_int,
     callback: *mut c_void,
     fun: Completion,
 ) -> i64 {
@@ -1443,7 +1581,10 @@ pub unsafe extern "C" fn iroh4k_endpoint_start_connect(
         let endpoint = crate::endpoint::endpoint_clone(endpoint);
         let addr = owned_bytes(addr, addr_len);
         let alpn = owned_bytes(alpn, alpn_len);
-        ops::spawn_callback(callback, fun, start_connect(endpoint, addr, alpn))
+        // Copied, not borrowed: this is an asynchronous operation, so the pinned Kotlin array is
+        // gone long before the spawned future reads the payload.
+        let opts = owned_bytes(opts, opts_len);
+        ops::spawn_callback(callback, fun, start_connect(endpoint, addr, alpn, opts))
     }
 }
 
@@ -1760,6 +1901,34 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_incomingAcceptWith(
+        mut env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+        endpoint: jlong,
+        opts: JByteArray,
+    ) -> jbyteArray {
+        let opts = arg(&mut env, &opts);
+        let result = match decode_accept_with_opts(&opts) {
+            Ok((alpns, transport)) => {
+                match unsafe { crate::endpoint::endpoint_clone(as_handle(endpoint)) } {
+                    Some(endpoint) => unsafe {
+                        with::<Consumed<Incoming>>(as_handle(handle), |slot| {
+                            incoming_accept_with(slot, &endpoint, alpns, transport)
+                        })
+                    },
+                    None => released(),
+                }
+            }
+            Err(message) => error_result(
+                ERROR_INVALID_ARGUMENT,
+                format!("malformed accept options: {message}"),
+            ),
+        };
+        finish(&mut env, result)
+    }
+
     // ── Connecting and Connection — synchronous ──────────────────────────────────────────────
 
     #[unsafe(no_mangle)]
@@ -2028,11 +2197,13 @@ mod jni_facade {
         endpoint: jlong,
         addr: JByteArray,
         alpn: JByteArray,
+        opts: JByteArray,
     ) -> jlong {
         let endpoint = unsafe { crate::endpoint::endpoint_clone(as_handle(endpoint)) };
         let addr = arg(&mut env, &addr);
         let alpn = arg(&mut env, &alpn);
-        ops::spawn_channel(start_connect(endpoint, addr, alpn))
+        let opts = arg(&mut env, &opts);
+        ops::spawn_channel(start_connect(endpoint, addr, alpn, opts))
     }
 
     #[unsafe(no_mangle)]

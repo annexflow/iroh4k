@@ -134,7 +134,7 @@ strategy.
 
 iroh4k is that different strategy: one Rust crate built twice — a `staticlib` linked into
 Kotlin/Native through cinterop, and a `cdylib` reached from the JVM and Android through hand-written
-JNI. Both facades call the same core through the same codec, and the same 216 shared test bodies run
+JNI. Both facades call the same core through the same codec, and the same 227 shared test bodies run
 against each.
 
 Writing the binding by hand rather than generating it also changed three things. They are trade-offs,
@@ -289,7 +289,7 @@ as is. Without `android` in `-Ptargets`, the Android Gradle plugin is never appl
 Version `0.1.0`, the first release, targeting **iroh 1.0.3**. Dual licensed Apache-2.0 or MIT.
 
 The transport itself — endpoints, connections, streams, datagrams, the router — is covered by the
-test suite on every change. Four things around it are in different states, and the difference is
+test suite on every change. Five things around it are in different states, and the difference is
 worth seeing rather than lumping them together. [`STATUS.md`](STATUS.md) has the evidence for each.
 
 **Verified by hand, not in CI.** mDNS discovery works: measured across two hosts on different Wi-Fi
@@ -302,8 +302,17 @@ the point of binding, but no pkarr relay and no DNS zone was ever stood up. Like
 domain is tested only against its failure path; the successful round trips to services.iroh.computer
 are not covered.
 
-**Not implemented.** No 0-RTT and no per-connection transport configuration. Both are upstream
-features that have a place waiting for them.
+**Every tag round-trips; rarely shown to reach the wire.** Per-connection transport configuration —
+an endpoint's default, one outgoing connection's, one incoming connection's — covers all twenty-nine
+of iroh's QUIC transport knobs. The suite proves the value types, the encoding, that every one of the
+twenty-nine top-level fields and both nested records decodes back correctly when all of them are set
+at once, and that a bind, a connect and an accept each succeed with a configuration set. For
+twenty-eight of the twenty-nine, that round trip into iroh's own config object is all that is shown —
+confirming more needs traffic analysis the suite does not do. The exception is
+`datagramReceiveBufferSize`, whose effect the other end can observe directly.
+
+**Not implemented.** No 0-RTT. `Endpoint.startConnect` maps onto iroh's `connect_with_opts`, and
+0-RTT is upstream's option there, waiting for a place in it.
 
 **Known and pinned.** An IPv6 zone id does not survive an `EndpointTicket`, because upstream's
 encoding has nowhere to put one. A test holds that behaviour in place so it cannot regress quietly.

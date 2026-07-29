@@ -151,4 +151,32 @@ class AndroidEndpointTests {
     @Test
     fun `PublishedAddrs ordinals match the Rust wire contract`() =
         runner.`PublishedAddrs ordinals match the Rust wire contract`()
+
+    @Test
+    fun `transport config is a value and says nothing by default`() =
+        runner.`transport config is a value and says nothing by default`()
+
+    @Test
+    fun `CongestionController ordinals match the Rust wire contract`() =
+        runner.`CongestionController ordinals match the Rust wire contract`()
+
+    @Test
+    fun `overriddenBy merges with the override winning and nested records replaced wholesale`() =
+        runner.`overriddenBy merges with the override winning and nested records replaced wholesale`()
+
+    @Test
+    fun `an endpoint binds with a transport configuration`() =
+        runner.`an endpoint binds with a transport configuration`()
+
+    @Test
+    fun `a transport value upstream ignores is passed through rather than refused`() =
+        runner.`a transport value upstream ignores is passed through rather than refused`()
+
+    @Test
+    fun `the largest transport duration a caller can express is accepted and a negative one is refused`() =
+        runner.`the largest transport duration a caller can express is accepted and a negative one is refused`()
+
+    @Test
+    fun `every transport configuration tag round-trips through the codec`() =
+        runner.`every transport configuration tag round-trips through the codec`()
 }

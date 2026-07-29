@@ -13,6 +13,8 @@ import assertk.assertions.isNotNull
 import assertk.assertions.isNull
 import assertk.assertions.isTrue
 import kotlin.test.assertFailsWith
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.measureTime
 import kotlinx.coroutines.Dispatchers
@@ -891,5 +893,262 @@ class CommonEndpointTests {
             1 to "IpOnly",
             2 to "Unfiltered",
         )
+    }
+
+    fun `transport config is a value and says nothing by default`() {
+        // Every field absent means "I did not say", which leaves iroh's own defaults — including
+        // the six it applies for hole punching before any caller sees the builder. An endpoint that
+        // never mentions transport configuration is therefore unchanged by this feature existing.
+        assertThat(EndpointConfig().transportConfig).isNull()
+        assertThat(TransportConfig().maxIdleTimeout).isNull()
+        assertThat(TransportConfig().congestionController).isNull()
+
+        assertThat(TransportConfig(maxIdleTimeout = 30.seconds))
+            .isEqualTo(TransportConfig(maxIdleTimeout = 30.seconds))
+        assertThat(TransportConfig(maxIdleTimeout = 30.seconds).hashCode())
+            .isEqualTo(TransportConfig(maxIdleTimeout = 30.seconds).hashCode())
+        assertThat(TransportConfig(maxIdleTimeout = 30.seconds))
+            .isNotEqualTo(TransportConfig(maxIdleTimeout = 31.seconds))
+        // A field left unset is not the same request as one set to a value.
+        assertThat(TransportConfig()).isNotEqualTo(TransportConfig(sendFairness = true))
+
+        assertThat(MtuDiscovery(upperBound = 1400)).isEqualTo(MtuDiscovery(upperBound = 1400))
+        assertThat(AckFrequency(reorderingThreshold = 3))
+            .isEqualTo(AckFrequency(reorderingThreshold = 3))
+
+        assertThat(TransportConfig(sendFairness = true).toString())
+            .contains("sendFairness=true")
+    }
+
+    fun `CongestionController ordinals match the Rust wire contract`() {
+        // The ordinals are a wire protocol shared with `transport.rs`. A reorder compiles cleanly on
+        // both sides and would silently select a different algorithm, which is the kind of change
+        // nobody notices until a throughput graph looks wrong months later. `Bbr3` is appended, not
+        // inserted, so it does not disturb `Cubic`/`NewReno`'s existing ordinals.
+        assertThat(CongestionController.entries.map { it.name })
+            .containsExactly("Cubic", "NewReno", "Bbr3")
+    }
+
+    fun `overriddenBy merges with the override winning and nested records replaced wholesale`() {
+        val base = TransportConfig(
+            maxIdleTimeout = 30.seconds,
+            sendFairness = true,
+            packetThreshold = 5,
+            congestionController = CongestionController.Cubic,
+            mtuDiscovery = MtuDiscovery(interval = 300.seconds, upperBound = 1400),
+            ackFrequency = AckFrequency(ackElicitingThreshold = 1L, reorderingThreshold = 2L),
+        )
+        val override = TransportConfig(
+            // Set: wins over the base's value.
+            sendFairness = false,
+            congestionController = CongestionController.NewReno,
+            // Set, on a nested record the base also set: replaces it wholesale, not field by
+            // field — see below.
+            mtuDiscovery = MtuDiscovery(blackHoleCooldown = 45.seconds),
+            // Left null: falls through to the base's value.
+            maxIdleTimeout = null,
+            packetThreshold = null,
+            ackFrequency = null,
+        )
+
+        val merged = base.overriddenBy(override)
+
+        // Fields the override set win outright.
+        assertThat(merged.sendFairness).isEqualTo(false)
+        assertThat(merged.congestionController).isEqualTo(CongestionController.NewReno)
+
+        // Fields the override left null fall through to the base.
+        assertThat(merged.maxIdleTimeout).isEqualTo(30.seconds)
+        assertThat(merged.packetThreshold).isEqualTo(5)
+
+        // A nested record the override set replaces the base's whole record: the base's
+        // `interval`/`upperBound` are gone entirely, not merged alongside the override's
+        // `blackHoleCooldown`. A half-merged `MtuDiscovery` is not what either caller asked for.
+        assertThat(merged.mtuDiscovery).isEqualTo(MtuDiscovery(blackHoleCooldown = 45.seconds))
+        assertThat(merged.mtuDiscovery?.interval).isNull()
+        assertThat(merged.mtuDiscovery?.upperBound).isNull()
+
+        // A nested record the override left null falls through to the base's whole record,
+        // unchanged.
+        assertThat(merged.ackFrequency)
+            .isEqualTo(AckFrequency(ackElicitingThreshold = 1L, reorderingThreshold = 2L))
+
+        // Every field neither side mentioned stays null.
+        assertThat(merged.receiveWindow).isNull()
+
+        // The receiver and the override are themselves untouched — this builds a third value
+        // rather than mutating either.
+        assertThat(base.sendFairness).isEqualTo(true)
+        assertThat(override.maxIdleTimeout).isNull()
+    }
+
+    fun `an endpoint binds with a transport configuration`() = runTest {
+        Endpoint.bind(
+            EndpointConfig(
+                preset = EndpointPreset.Minimal,
+                relayMode = RelayMode.Disabled,
+                bindAddrs = listOf(loopback),
+                transportConfig = TransportConfig(
+                    maxIdleTimeout = 30.seconds,
+                    sendFairness = true,
+                    timeThreshold = 1.25f,
+                    congestionController = CongestionController.NewReno,
+                    mtuDiscovery = MtuDiscovery(upperBound = 1400),
+                    ackFrequency = AckFrequency(reorderingThreshold = 3),
+                ),
+            )
+        ).use { endpoint ->
+            // Every kind the codec has to carry is in that config: a duration, a boolean, a float,
+            // an ordinal, and both nested records. Binding proves the payload round-trips; what it
+            // cannot prove is that any value changed anything on the wire.
+            assertThat(endpoint.isClosed).isFalse()
+        }
+    }
+
+    fun `a transport value upstream ignores is passed through rather than refused`() = runTest {
+        // Upstream keeps its own 8 and logs a warning. iroh4k deliberately does not reject, so that
+        // this call behaves exactly as the same call from Rust does. This body exists to pin that
+        // decision: without it, somebody would eventually "fix" it into an error.
+        Endpoint.bind(
+            EndpointConfig(
+                preset = EndpointPreset.Minimal,
+                relayMode = RelayMode.Disabled,
+                bindAddrs = listOf(loopback),
+                transportConfig = TransportConfig(maxConcurrentMultipathPaths = 4),
+            )
+        ).use { endpoint ->
+            assertThat(endpoint.isClosed).isFalse()
+        }
+    }
+
+    fun `the largest transport duration a caller can express is accepted and a negative one is refused`() =
+        runTest {
+            // `maxIdleTimeout` crosses the wire as `i64` nanoseconds, like every other `Duration`
+            // field here. An `i64` nanosecond count tops out at roughly 292 years, which is about
+            // six orders of magnitude below upstream's 62-bit varint bound (`IdleTimeout` counts
+            // milliseconds, so 292 years is on the order of `10^13` against a bound of roughly
+            // `4.6 * 10^18`) — no `Duration` a caller can construct can overflow that bound, so
+            // the Rust range check inside `IdleTimeout::try_from` is defence in depth, not a path
+            // reachable from here. `Duration.INFINITE` is the largest value a caller can express —
+            // it saturates every accessor at `Long.MAX_VALUE` instead of overflowing — and it binds
+            // successfully, the honest counterpart to the overflow this module cannot actually hit.
+            //
+            // This is established for `maxIdleTimeout` only. It is the one duration field upstream
+            // bound-checks at all — `read_idle_timeout` is the only reader in `transport.rs` that
+            // hands its `Duration` to a fallible conversion (`IdleTimeout::try_from`). The other
+            // seven duration fields (`keepAliveInterval`, `initialRtt`,
+            // `defaultPathMaxIdleTimeout`, `defaultPathKeepAliveInterval`,
+            // `mtuDiscovery.interval`, `mtuDiscovery.blackHoleCooldown`,
+            // `ackFrequency.maxAckDelay`) go through `read_duration` alone, which only rejects a
+            // negative value and accepts anything up to `i64::MAX` nanoseconds — there is no
+            // equivalent "largest value is accepted" claim to make for them, because there is no
+            // upper bound on their side to be near.
+            Endpoint.bind(
+                EndpointConfig(
+                    preset = EndpointPreset.Minimal,
+                    relayMode = RelayMode.Disabled,
+                    bindAddrs = listOf(loopback),
+                    transportConfig = TransportConfig(maxIdleTimeout = Duration.INFINITE),
+                )
+            ).use { endpoint ->
+                assertThat(endpoint.isClosed).isFalse()
+            }
+
+            // A negative duration is not a valid timeout regardless of the wire's own range, and
+            // nothing may reach upstream unvalidated.
+            val error = assertFailsWith<IrohError> {
+                Endpoint.bind(
+                    EndpointConfig(
+                        preset = EndpointPreset.Minimal,
+                        relayMode = RelayMode.Disabled,
+                        bindAddrs = listOf(loopback),
+                        transportConfig = TransportConfig(maxIdleTimeout = (-1).seconds),
+                    )
+                )
+            }
+            assertThat(error.code).isEqualTo(IrohError.Code.InvalidArgument)
+        }
+
+    fun `every transport configuration tag round-trips through the codec`() = runTest {
+        // The other transport-configuration bodies in this class each set a handful of fields —
+        // enough to prove the shape works, not enough to prove the wire agrees on every tag. Between
+        // all of them, only 8 of `TransportConfig`'s 29 top-level tags and one field in each nested
+        // record are ever written, so a wrong tag constant on either side for any of the other 21
+        // would compile cleanly on both ends and never be caught by anything here.
+        //
+        // This body sets every one of the 29 top-level fields, plus every field of the nested
+        // `MtuDiscovery` and `AckFrequency` records, and binds an endpoint with it. The values below
+        // are individually plausible, not meaningful as a combination — some pairs (`initialMtu`
+        // versus `minMtu`, the four fields whose KDoc says values outside a range are silently
+        // clamped or ignored) are chosen to land *inside* whatever bound applies, specifically so
+        // that a successful bind is not secretly exercising the "ignored" path for one of them
+        // instead of the tag it is meant to cover.
+        //
+        // The assertion is the bind succeeding at all: `writeTransportConfig` writes 29 tagged
+        // entries plus the nested `MtuDiscovery` (4 tags) and `AckFrequency` (3 tags) records, and
+        // `read_transport_config`/`read_mtu_discovery`/`read_ack_frequency` in `transport.rs` read
+        // them back. Every reader there consumes exactly the bytes its matching writer produced, an
+        // unrecognised tag on either side is a hard decode error rather than something skipped, and
+        // `Reader::finish()` rejects anything left over. A tag constant that drifted between
+        // `TransportConfig.kt` and `transport.rs` — for any of the 21 fields nothing else here
+        // touches — would misalign the reader and fail this bind, either with a decode error or by
+        // reading the wrong field's value into the wrong builder call. It says nothing about whether
+        // any individual value changed iroh's behaviour beyond landing in its config object — see
+        // `datagramReceiveBufferSize` elsewhere in this class for the one knob that is checked that
+        // way.
+        Endpoint.bind(
+            EndpointConfig(
+                preset = EndpointPreset.Minimal,
+                relayMode = RelayMode.Disabled,
+                bindAddrs = listOf(loopback),
+                transportConfig = TransportConfig(
+                    maxConcurrentBidiStreams = 128L,
+                    maxConcurrentUniStreams = 128L,
+                    streamReceiveWindow = 1_000_000L,
+                    receiveWindow = 2_000_000L,
+                    sendWindow = 4_000_000L,
+                    sendFairness = true,
+                    maxIdleTimeout = 45.seconds,
+                    keepAliveInterval = 5.seconds,
+                    initialRtt = 200.milliseconds,
+                    packetThreshold = 5,
+                    timeThreshold = 1.5f,
+                    persistentCongestionThreshold = 4,
+                    ackFrequency = AckFrequency(
+                        ackElicitingThreshold = 2L,
+                        maxAckDelay = 25.milliseconds,
+                        reorderingThreshold = 1L,
+                    ),
+                    congestionController = CongestionController.NewReno,
+                    initialMtu = 1400,
+                    minMtu = 1200,
+                    mtuDiscovery = MtuDiscovery(
+                        interval = 300.seconds,
+                        upperBound = 1480,
+                        blackHoleCooldown = 30.seconds,
+                        minimumChange = 10,
+                    ),
+                    padToMtu = true,
+                    datagramReceiveBufferSize = 131072,
+                    datagramSendBufferSize = 131072,
+                    cryptoBufferSize = 16384,
+                    allowSpin = true,
+                    enableSegmentationOffload = false,
+                    sendObservedAddressReports = true,
+                    receiveObservedAddressReports = true,
+                    // Below 9 is silently ignored (upstream rejects anything under
+                    // `MAX_MULTIPATH_PATHS + 1`, which is 8, so 8 itself is rejected too).
+                    maxConcurrentMultipathPaths = 9,
+                    // Above 15 seconds is silently clamped.
+                    defaultPathMaxIdleTimeout = 10.seconds,
+                    // Above 5 seconds is silently ignored.
+                    defaultPathKeepAliveInterval = 3.seconds,
+                    // Below 8 is silently ignored.
+                    maxRemoteNatTraversalAddresses = 16,
+                ),
+            )
+        ).use { endpoint ->
+            assertThat(endpoint.isClosed).isFalse()
+        }
     }
 }

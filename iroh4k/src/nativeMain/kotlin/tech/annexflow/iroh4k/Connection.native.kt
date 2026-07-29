@@ -35,6 +35,7 @@ import iroh4k.ffi.iroh4k_endpoint_connect
 import iroh4k.ffi.iroh4k_endpoint_start_connect
 import iroh4k.ffi.iroh4k_free_result
 import iroh4k.ffi.iroh4k_incoming_accept
+import iroh4k.ffi.iroh4k_incoming_accept_with
 import iroh4k.ffi.iroh4k_incoming_free
 import iroh4k.ffi.iroh4k_incoming_ignore
 import iroh4k.ffi.iroh4k_incoming_local_addr
@@ -156,6 +157,11 @@ internal actual fun nativeIncomingRemoteAddr(handle: Long): ByteArray =
 internal actual fun nativeIncomingRemoteAddrValidated(handle: Long): Boolean =
     iroh4k_incoming_remote_addr_validated(handle.asHandle()).longOrThrow() != 0L
 
+internal actual fun nativeIncomingAcceptWith(handle: Long, endpoint: Long, opts: ByteArray): Long =
+    opts.usePtr { ptr, len ->
+        iroh4k_incoming_accept_with(handle.asHandle(), endpoint.asHandle(), ptr, len)
+    }.handleOrThrow()
+
 // ── Connecting and Connection — synchronous ───────────────────────────────────────────────────
 
 internal actual fun nativeConnectingRemoteId(handle: Long): ByteArray =
@@ -230,13 +236,17 @@ internal actual suspend fun nativeEndpointStartConnect(
     handle: Long,
     addr: ByteArray,
     alpn: ByteArray,
+    opts: ByteArray,
 ): Long = iroh(::iroh4k_connecting_free) { c ->
-    // Both buffers are pinned only for the call: Rust copies them before spawning the future.
+    // All three buffers are pinned only for the call: Rust copies them before spawning the future.
     addr.usePtr { addrPtr, addrLen ->
         alpn.usePtr { alpnPtr, alpnLen ->
-            iroh4k_endpoint_start_connect(
-                handle.asHandle(), addrPtr, addrLen, alpnPtr, alpnLen, c, completion,
-            )
+            opts.usePtr { optsPtr, optsLen ->
+                iroh4k_endpoint_start_connect(
+                    handle.asHandle(), addrPtr, addrLen, alpnPtr, alpnLen, optsPtr, optsLen,
+                    c, completion,
+                )
+            }
         }
     }
 }.handleOrThrow()

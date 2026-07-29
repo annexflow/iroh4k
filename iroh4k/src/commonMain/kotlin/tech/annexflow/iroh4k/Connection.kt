@@ -38,8 +38,7 @@ import tech.annexflow.iroh4k.internal.NativeHandle
  * ## What is not here yet
  *
  * [Connection.paths] is the snapshot form; the streaming form lives in `Watch.kt` as
- * `Connection.watchPaths()` and `Connection.watchPathEvents()`. Still absent: 0-RTT and a custom
- * `ServerConfig` per accepted connection.
+ * `Connection.watchPaths()` and `Connection.watchPathEvents()`. Still absent: 0-RTT.
  */
 
 // ── Addresses ─────────────────────────────────────────────────────────────────────────────────
@@ -215,8 +214,8 @@ data class PathSnapshot(
 /**
  * An inbound connection attempt that has not been answered yet.
  *
- * Produced by [Endpoint.acceptNext]. Exactly one of [accept], [refuse], [retry] and [ignore] decides
- * what happens to it; the inspectors below are what that decision can be based on.
+ * Produced by [Endpoint.acceptNext]. Exactly one of [accept], [acceptWith], [refuse], [retry] and
+ * [ignore] decides what happens to it; the inspectors below are what that decision can be based on.
  *
  * **Thread-safe**, as [Endpoint] is: any member may be called from any thread or coroutine,
  * including concurrently with [close], and a released handle is never dereferenced.
@@ -224,13 +223,16 @@ data class PathSnapshot(
  * Releasing an `Incoming` that was never answered *refuses* the connection, because that is what
  * dropping an `Incoming` means in iroh.
  */
-class Incoming internal constructor(private val guard: NativeHandle) : AutoCloseable {
+class Incoming internal constructor(
+    private val guard: NativeHandle,
+    private val endpoint: Endpoint,
+) : AutoCloseable {
 
     /**
      * Begins this endpoint's half of the handshake, yielding an [Accepting] to await.
      *
-     * Consumes this incoming connection: every later [accept], [refuse], [retry] or [ignore] raises
-     * [IrohError] with [IrohError.Code.Closed].
+     * Consumes this incoming connection: every later [accept], [acceptWith], [refuse], [retry] or
+     * [ignore] raises [IrohError] with [IrohError.Code.Closed].
      *
      * @throws IrohError with [IrohError.Code.Accept] if iroh refuses the attempt. That is routine
      *   rather than alarming: a QUIC endpoint listens on an ordinary UDP socket, anything on the
@@ -240,6 +242,69 @@ class Incoming internal constructor(private val guard: NativeHandle) : AutoClose
      */
     fun accept(): Accepting = guard.use { handle ->
         Accepting(NativeHandle(nativeIncomingAccept(handle), ACCEPTING, ::nativeAcceptingFree))
+    }
+
+    /**
+     * Begins this endpoint's half of the handshake, offering [alpns] for this connection alone
+     * and a transport configuration for it too, yielding an [Accepting] to await.
+     *
+     * Consumes this incoming connection, exactly as [accept] does: every later [accept],
+     * [acceptWith], [refuse], [retry] or [ignore] raises [IrohError] with [IrohError.Code.Closed].
+     * The one exception is [alpns] itself: an empty list is rejected before this incoming
+     * connection is touched at all, so it is still usable afterwards — see below.
+     *
+     * [transportConfig] applies to this connection alone — it changes nothing about any other
+     * connection this endpoint accepts or dials. It **replaces** the endpoint's own
+     * [EndpointConfig.transportConfig] outright rather than merging with it, exactly as
+     * [Endpoint.startConnect]'s does: setting one field here does not inherit the other 28 from
+     * whatever the endpoint was given. `null`, the default, uses the endpoint's — the fresh
+     * `ServerConfig` [alpns] requires is built with the endpoint's own transport configuration
+     * already baked in (`create_server_config`), and [transportConfig] either leaves that starting
+     * point alone or replaces it wholesale, the same choice [Endpoint.startConnect] offers a dial.
+     *
+     * [alpns] is *not* the protocol this connection negotiated — nothing has been negotiated yet at
+     * this stage; [alpns] is what determines what still can be. Accepting with a configuration means
+     * building a fresh `ServerConfig` through the endpoint's own `create_server_config_builder`, and
+     * that builder has no way to add an ALPN afterwards — its list is fixed at creation, replacing
+     * whatever the endpoint itself advertises for every other connection. A list with no protocol the
+     * peer actually offered does **not** fail silently — established empirically, not assumed: it
+     * fails exactly as loudly as an endpoint-wide ALPN mismatch does, raising [IrohError] with
+     * [IrohError.Code.Accept] from this call itself, before an [Accepting] is ever produced.
+     * `emptyList()` is not a special "accept anything" case either: an empty list can never overlap
+     * with anything a peer could offer, so accepting with one would fail that same way on every
+     * single call — which is why it is refused up front instead.
+     *
+     * @throws IrohError with [IrohError.Code.Accept] if iroh refuses the attempt — [alpns] holding no
+     *   protocol the peer actually offered, or any of the reasons [accept] describes.
+     * @throws IrohError with [IrohError.Code.Closed] if this incoming connection was already used,
+     *   or if the endpoint it came from has been released.
+     * @throws IrohError with [IrohError.Code.InvalidArgument] if [alpns] is empty, or if
+     *   [transportConfig] holds a value iroh refuses — a negative duration, say.
+     */
+    fun acceptWith(
+        alpns: List<ByteArray>,
+        transportConfig: TransportConfig? = null,
+    ): Accepting {
+        if (alpns.isEmpty()) {
+            IrohError(
+                IrohError.Code.InvalidArgument,
+                "acceptWith requires at least one ALPN: an empty list can never overlap with " +
+                    "anything a peer offers, so every connection accepted this way would be refused",
+            ).raise()
+        }
+        return guard.use { handle ->
+            val w = BinaryWriter()
+            w.i32(alpns.size)
+            for (alpn in alpns) w.bytes(alpn)
+            w.writeOptionalTransportConfig(transportConfig)
+            Accepting(
+                NativeHandle(
+                    endpoint.useHandle { ep -> nativeIncomingAcceptWith(handle, ep, w.finish()) },
+                    ACCEPTING,
+                    ::nativeAcceptingFree,
+                )
+            )
+        }
     }
 
     /**
@@ -301,7 +366,8 @@ class Incoming internal constructor(private val guard: NativeHandle) : AutoClose
     /**
      * Releases the handle. Idempotent, and safe to call while other threads are inside it.
      *
-     * Required even after [accept]: consuming the value empties the handle but does not free it.
+     * Required even after [accept] or [acceptWith]: consuming the value empties the handle but does
+     * not free it.
      */
     override fun close() = guard.close()
 
@@ -688,7 +754,7 @@ suspend fun Endpoint.acceptNext(): Incoming? = withHandle { handle ->
     val incoming = nativeEndpointAcceptNext(handle)
     // A null handle is the `None` iroh answers with for a closed endpoint, not an error.
     if (incoming == 0L) null
-    else Incoming(NativeHandle(incoming, INCOMING, ::nativeIncomingFree))
+    else Incoming(NativeHandle(incoming, INCOMING, ::nativeIncomingFree), this)
 }
 
 /**
@@ -725,17 +791,28 @@ suspend fun Endpoint.connect(addr: EndpointAddr, alpn: ByteArray): Connection = 
  * can simply be abandoned by releasing it — which is the whole reason both exist. Prefer [connect]
  * when neither of those matters.
  *
- * Maps onto iroh's `connect_with_opts` with default options, so there is no 0-RTT and no per-attempt
- * transport configuration here yet; when those arrive they belong on this call rather than on [connect].
+ * Maps onto iroh's `connect_with_opts`, which is also why [transportConfig] lives here and not on
+ * [connect]: upstream offers per-attempt options on that call alone. 0-RTT is the other thing that
+ * belongs here, and it has not arrived yet.
  *
+ * @param transportConfig QUIC transport parameters for this connection alone. It **replaces** the
+ *   endpoint's own [EndpointConfig.transportConfig] rather than merging with it — upstream's
+ *   behaviour, and the opposite of what most people expect, so a caller who wants the endpoint's
+ *   settings plus one change has to restate the settings. `null`, the default, uses the endpoint's.
  * @throws IrohError as [connect], except that a handshake failure surfaces from [Connecting.connect]
  *   rather than from here.
+ * @throws IrohError with [IrohError.Code.InvalidArgument] if [transportConfig] holds a value iroh
+ *   refuses — a negative duration, say.
  */
-suspend fun Endpoint.startConnect(addr: EndpointAddr, alpn: ByteArray): Connecting =
-    withHandle { handle ->
-        val started = nativeEndpointStartConnect(handle, encodeEndpointAddr(addr), alpn)
-        Connecting(NativeHandle(started, CONNECTING, ::nativeConnectingFree))
-    }
+suspend fun Endpoint.startConnect(
+    addr: EndpointAddr,
+    alpn: ByteArray,
+    transportConfig: TransportConfig? = null,
+): Connecting = withHandle { handle ->
+    val opts = BinaryWriter().apply { writeOptionalTransportConfig(transportConfig) }.finish()
+    val started = nativeEndpointStartConnect(handle, encodeEndpointAddr(addr), alpn, opts)
+    Connecting(NativeHandle(started, CONNECTING, ::nativeConnectingFree))
+}
 
 // ── The guard ─────────────────────────────────────────────────────────────────────────────────
 //
@@ -866,6 +943,9 @@ internal expect fun nativeIncomingRemoteAddr(handle: Long): ByteArray
 
 internal expect fun nativeIncomingRemoteAddrValidated(handle: Long): Boolean
 
+/** Returns the handle of the [Accepting] this produced; `endpoint` is the endpoint's own handle. */
+internal expect fun nativeIncomingAcceptWith(handle: Long, endpoint: Long, opts: ByteArray): Long
+
 internal expect fun nativeConnectingRemoteId(handle: Long): ByteArray
 
 internal expect fun nativeConnectionAlpn(handle: Long): ByteArray
@@ -908,6 +988,7 @@ internal expect suspend fun nativeEndpointStartConnect(
     handle: Long,
     addr: ByteArray,
     alpn: ByteArray,
+    opts: ByteArray,
 ): Long
 
 /** Returns the handle of the established [Connection]. */
