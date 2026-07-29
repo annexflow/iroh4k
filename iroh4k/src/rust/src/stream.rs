@@ -71,13 +71,14 @@ use std::{
 };
 
 use iroh::endpoint::{
-    Connection, ConnectionError, ReadError, ReadExactError, ReadToEndError, RecvStream, ResetError,
-    SendStream, StoppedError, VarInt, WriteError,
+    ConnectionError, ReadError, ReadExactError, ReadToEndError, RecvStream, ResetError, SendStream,
+    StoppedError, VarInt, WriteError,
 };
 use tokio::sync::Mutex;
 
 use crate::connection::{
-    Completion, Tracked, connection_clone, in_runtime, released, share, varint, with,
+    AnyConnection, Completion, Tracked, connection_clone_any, in_runtime, released, share, varint,
+    with,
 };
 use crate::core::{
     ERROR_CLOSED, ERROR_INVALID_ARGUMENT, ERROR_READ, ERROR_WRITE, Iroh4kResult, bytes_result,
@@ -204,8 +205,11 @@ fn optional_code(value: Option<VarInt>) -> *mut Iroh4kResult {
 // ============================================================================
 // Shared logic — opening and accepting
 //
-// All four borrow the connection to build their future, so all four take an owned `Connection` and
-// create the borrow inside the spawned block — the idiom `connection.rs` documents.
+// All four borrow the connection to build their future, so all four take an owned `AnyConnection`
+// and create the borrow inside the spawned block — the idiom `connection.rs` documents. Resolved
+// through `connection_clone_any` rather than the strict `connection_clone`: opening and accepting
+// streams is on `impl<T: ConnectionState>` upstream, so a 0-RTT handle answers these too — the whole
+// point of this domain running through the three-way probe at all.
 // ============================================================================
 
 /// Turns a stream-open outcome into a result carrying a handle.
@@ -232,7 +236,7 @@ fn opened(outcome: Result<StreamHandle, ConnectionError>, what: &str) -> OpResul
 ///
 /// Returns as soon as QUIC has an id for it — no round trip is involved, and the peer sees nothing
 /// until data is written, which is why an unwritten stream never reaches its `accept_bi`.
-async fn open_bi(connection: Option<Connection>) -> OpResult {
+async fn open_bi(connection: Option<AnyConnection>) -> OpResult {
     let Some(connection) = connection else {
         return OpResult::new(released());
     };
@@ -246,7 +250,7 @@ async fn open_bi(connection: Option<Connection>) -> OpResult {
 }
 
 /// Awaits the peer's next bidirectional stream. Waits indefinitely by design.
-async fn accept_bi(connection: Option<Connection>) -> OpResult {
+async fn accept_bi(connection: Option<AnyConnection>) -> OpResult {
     let Some(connection) = connection else {
         return OpResult::new(released());
     };
@@ -260,7 +264,7 @@ async fn accept_bi(connection: Option<Connection>) -> OpResult {
 }
 
 /// Opens a unidirectional stream: a send half and no receive half.
-async fn open_uni(connection: Option<Connection>) -> OpResult {
+async fn open_uni(connection: Option<AnyConnection>) -> OpResult {
     let Some(connection) = connection else {
         return OpResult::new(released());
     };
@@ -274,7 +278,7 @@ async fn open_uni(connection: Option<Connection>) -> OpResult {
 }
 
 /// Awaits the peer's next unidirectional stream: a receive half and no send half.
-async fn accept_uni(connection: Option<Connection>) -> OpResult {
+async fn accept_uni(connection: Option<AnyConnection>) -> OpResult {
     let Some(connection) = connection else {
         return OpResult::new(released());
     };
@@ -774,8 +778,10 @@ pub unsafe extern "C" fn iroh4k_recv_stream_id(handle: *mut c_void) -> *mut Iroh
 /// Opens a bidirectional stream; the result carries a stream handle. Asynchronous.
 ///
 /// # Safety
-/// `connection` must be null, or a live `Connection` handle from `connection.rs` that has not been
-/// freed. Kotlin's guard on `Connection` guarantees the second part.
+/// `connection` must be null, or a live connection handle of any of the three kinds — completed or
+/// either 0-RTT — from `connection.rs` that has not been freed, satisfying
+/// [`crate::connection::connection_clone_any`]'s contract. Kotlin's guard on the corresponding handle
+/// type guarantees the second part.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_open_bi(
     connection: *mut c_void,
@@ -783,7 +789,7 @@ pub unsafe extern "C" fn iroh4k_connection_open_bi(
     fun: Completion,
 ) -> i64 {
     unsafe {
-        let connection = connection_clone(connection);
+        let connection = connection_clone_any(connection);
         ops::spawn_callback(callback, fun, open_bi(connection))
     }
 }
@@ -799,7 +805,7 @@ pub unsafe extern "C" fn iroh4k_connection_accept_bi(
     fun: Completion,
 ) -> i64 {
     unsafe {
-        let connection = connection_clone(connection);
+        let connection = connection_clone_any(connection);
         ops::spawn_callback(callback, fun, accept_bi(connection))
     }
 }
@@ -815,7 +821,7 @@ pub unsafe extern "C" fn iroh4k_connection_open_uni(
     fun: Completion,
 ) -> i64 {
     unsafe {
-        let connection = connection_clone(connection);
+        let connection = connection_clone_any(connection);
         ops::spawn_callback(callback, fun, open_uni(connection))
     }
 }
@@ -831,7 +837,7 @@ pub unsafe extern "C" fn iroh4k_connection_accept_uni(
     fun: Completion,
 ) -> i64 {
     unsafe {
-        let connection = connection_clone(connection);
+        let connection = connection_clone_any(connection);
         ops::spawn_callback(callback, fun, accept_uni(connection))
     }
 }
@@ -1125,7 +1131,7 @@ mod jni_facade {
         _class: JClass,
         connection: jlong,
     ) -> jlong {
-        let connection = unsafe { connection_clone(as_handle(connection)) };
+        let connection = unsafe { connection_clone_any(as_handle(connection)) };
         ops::spawn_channel(open_bi(connection))
     }
 
@@ -1135,7 +1141,7 @@ mod jni_facade {
         _class: JClass,
         connection: jlong,
     ) -> jlong {
-        let connection = unsafe { connection_clone(as_handle(connection)) };
+        let connection = unsafe { connection_clone_any(as_handle(connection)) };
         ops::spawn_channel(accept_bi(connection))
     }
 
@@ -1145,7 +1151,7 @@ mod jni_facade {
         _class: JClass,
         connection: jlong,
     ) -> jlong {
-        let connection = unsafe { connection_clone(as_handle(connection)) };
+        let connection = unsafe { connection_clone_any(as_handle(connection)) };
         ops::spawn_channel(open_uni(connection))
     }
 
@@ -1155,7 +1161,7 @@ mod jni_facade {
         _class: JClass,
         connection: jlong,
     ) -> jlong {
-        let connection = unsafe { connection_clone(as_handle(connection)) };
+        let connection = unsafe { connection_clone_any(as_handle(connection)) };
         ops::spawn_channel(accept_uni(connection))
     }
 

@@ -154,7 +154,14 @@ agreeing, and the resulting bug **compiles cleanly**.
 | `addr.rs` `write_transport_addr` / `write_endpoint_addr` / `read_endpoint_addr` / `decode_endpoint_addr` and the `TAG_*` constants | `Addr.kt` `writeTransportAddr` / `writeEndpointAddr` / `readEndpointAddr` and its mirrored `TAG_*` |
 | `jni.rs` `finish` (the result envelope writer) | `JniResult.kt` (the only envelope decoder) and `jniOp` |
 | `internal/NativeHandle.kt` | — the only handle guard |
-| `connection.rs` `with` / `share` / `released` / `varint` / `in_runtime` / `Tracked` | reused by `stream.rs` and `watch.rs`, not re-implemented |
+| `connection.rs` `with` / `share` / `released` / `varint` / `in_runtime` / `Tracked` / `connection_clone_any` | reused by `stream.rs` and `watch.rs`, not re-implemented |
+
+`connection_clone` — the strict, `Connection`-only clone — is not on that row and stays that way. It
+is not folded into `connection_clone_any`: `watch.rs`'s path watchers and `connection.rs`'s own
+`connection_alpn` / `connection_remote_id` / `connection_side` / `connection_paths` /
+`connection_rtt` are `HandshakeCompleted`-only upstream, so they must reject a 0-RTT handle rather
+than be handed one they cannot serve. `connection_clone_any` exists beside it for the surface that
+*is* common to all three handshake states — see `AnyConnection` in `connection.rs`.
 
 Two specific traps:
 
