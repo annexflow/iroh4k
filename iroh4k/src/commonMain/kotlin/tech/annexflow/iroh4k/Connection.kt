@@ -245,46 +245,66 @@ class Incoming internal constructor(
     }
 
     /**
-     * Begins this endpoint's half of the handshake with a transport configuration for this
-     * connection alone, yielding an [Accepting] to await.
+     * Begins this endpoint's half of the handshake, offering [alpns] for this connection alone
+     * and a transport configuration for it too, yielding an [Accepting] to await.
      *
      * Consumes this incoming connection, exactly as [accept] does: every later [accept],
      * [acceptWith], [refuse], [retry] or [ignore] raises [IrohError] with [IrohError.Code.Closed].
+     * The one exception is [alpns] itself: an empty list is rejected before this incoming
+     * connection is touched at all, so it is still usable afterwards — see below.
      *
      * [transportConfig] applies to this connection alone — it changes nothing about any other
      * connection this endpoint accepts or dials. It **replaces** the endpoint's own
      * [EndpointConfig.transportConfig] outright rather than merging with it, exactly as
      * [Endpoint.startConnect]'s does: setting one field here does not inherit the other 28 from
-     * whatever the endpoint was given.
+     * whatever the endpoint was given. `null`, the default, uses the endpoint's — the fresh
+     * `ServerConfig` [alpns] requires is built with the endpoint's own transport configuration
+     * already baked in (`create_server_config`), and [transportConfig] either leaves that starting
+     * point alone or replaces it wholesale, the same choice [Endpoint.startConnect] offers a dial.
      *
-     * [alpns] must include the protocol this connection actually negotiated. Accepting with a
-     * configuration means building a fresh `ServerConfig` through the endpoint's own
-     * `create_server_config_builder`, and that builder has no way to add an ALPN afterwards — its
-     * list is fixed at creation. A list that omits the negotiated protocol therefore accepts a
-     * connection whose two sides agree on nothing, and does so silently.
+     * [alpns] is *not* the protocol this connection negotiated — nothing has been negotiated yet at
+     * this stage; [alpns] is what determines what still can be. Accepting with a configuration means
+     * building a fresh `ServerConfig` through the endpoint's own `create_server_config_builder`, and
+     * that builder has no way to add an ALPN afterwards — its list is fixed at creation, replacing
+     * whatever the endpoint itself advertises for every other connection. A list with no protocol the
+     * peer actually offered does **not** fail silently — established empirically, not assumed: it
+     * fails exactly as loudly as an endpoint-wide ALPN mismatch does, raising [IrohError] with
+     * [IrohError.Code.Accept] from this call itself, before an [Accepting] is ever produced.
+     * `emptyList()` is not a special "accept anything" case either: an empty list can never overlap
+     * with anything a peer could offer, so accepting with one would fail that same way on every
+     * single call — which is why it is refused up front instead.
      *
-     * @throws IrohError with [IrohError.Code.Accept] if iroh refuses the attempt, as [accept]
-     *   describes.
+     * @throws IrohError with [IrohError.Code.Accept] if iroh refuses the attempt — [alpns] holding no
+     *   protocol the peer actually offered, or any of the reasons [accept] describes.
      * @throws IrohError with [IrohError.Code.Closed] if this incoming connection was already used,
      *   or if the endpoint it came from has been released.
-     * @throws IrohError with [IrohError.Code.InvalidArgument] if [transportConfig] holds a value
-     *   iroh refuses — a negative duration, say.
+     * @throws IrohError with [IrohError.Code.InvalidArgument] if [alpns] is empty, or if
+     *   [transportConfig] holds a value iroh refuses — a negative duration, say.
      */
     fun acceptWith(
         alpns: List<ByteArray>,
         transportConfig: TransportConfig? = null,
-    ): Accepting = guard.use { handle ->
-        val w = BinaryWriter()
-        w.i32(alpns.size)
-        for (alpn in alpns) w.bytes(alpn)
-        w.writeOptionalTransportConfig(transportConfig)
-        Accepting(
-            NativeHandle(
-                endpoint.useHandle { ep -> nativeIncomingAcceptWith(handle, ep, w.finish()) },
-                ACCEPTING,
-                ::nativeAcceptingFree,
+    ): Accepting {
+        if (alpns.isEmpty()) {
+            IrohError(
+                IrohError.Code.InvalidArgument,
+                "acceptWith requires at least one ALPN: an empty list can never overlap with " +
+                    "anything a peer offers, so every connection accepted this way would be refused",
+            ).raise()
+        }
+        return guard.use { handle ->
+            val w = BinaryWriter()
+            w.i32(alpns.size)
+            for (alpn in alpns) w.bytes(alpn)
+            w.writeOptionalTransportConfig(transportConfig)
+            Accepting(
+                NativeHandle(
+                    endpoint.useHandle { ep -> nativeIncomingAcceptWith(handle, ep, w.finish()) },
+                    ACCEPTING,
+                    ::nativeAcceptingFree,
+                )
             )
-        )
+        }
     }
 
     /**

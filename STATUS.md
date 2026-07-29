@@ -15,8 +15,8 @@ Android — are held to identical behaviour by the same shared test bodies.
 
 | Target | What is actually run |
 | --- | --- |
-| `macosArm64`, `jvm` | 448 test bodies, 224 per facade, on every change |
-| `android` (AAR) | The same 224 shared bodies under Robolectric, plus 6 Android-only tests for `Iroh4kAndroid.multicastLock`, which exists on no other target — 230 in all. Plus 6 instrumented tests, the only ones that exercise the packaged `.so` |
+| `macosArm64`, `jvm` | 454 test bodies, 227 per facade, on every change |
+| `android` (AAR) | The same 227 shared bodies under Robolectric, plus 6 Android-only tests for `Iroh4kAndroid.multicastLock`, which exists on no other target — 233 in all. Plus 6 instrumented tests, the only ones that exercise the packaged `.so` |
 | `iosArm64`, `iosSimulatorArm64` | Compiles and links; cinterop verified in CI |
 | `linuxX64` | Test suite configured in CI on `ubuntu-latest`; not verified locally |
 | `linuxArm64`, `mingwX64` | Cross-compiled and assembled in CI; never executed |

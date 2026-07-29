@@ -922,10 +922,64 @@ class CommonEndpointTests {
 
     fun `CongestionController ordinals match the Rust wire contract`() {
         // The ordinals are a wire protocol shared with `transport.rs`. A reorder compiles cleanly on
-        // both sides and would silently select the other algorithm, which is the kind of change
-        // nobody notices until a throughput graph looks wrong months later.
+        // both sides and would silently select a different algorithm, which is the kind of change
+        // nobody notices until a throughput graph looks wrong months later. `Bbr3` is appended, not
+        // inserted, so it does not disturb `Cubic`/`NewReno`'s existing ordinals.
         assertThat(CongestionController.entries.map { it.name })
-            .containsExactly("Cubic", "NewReno")
+            .containsExactly("Cubic", "NewReno", "Bbr3")
+    }
+
+    fun `overriddenBy merges with the override winning and nested records replaced wholesale`() {
+        val base = TransportConfig(
+            maxIdleTimeout = 30.seconds,
+            sendFairness = true,
+            packetThreshold = 5,
+            congestionController = CongestionController.Cubic,
+            mtuDiscovery = MtuDiscovery(interval = 300.seconds, upperBound = 1400),
+            ackFrequency = AckFrequency(ackElicitingThreshold = 1L, reorderingThreshold = 2L),
+        )
+        val override = TransportConfig(
+            // Set: wins over the base's value.
+            sendFairness = false,
+            congestionController = CongestionController.NewReno,
+            // Set, on a nested record the base also set: replaces it wholesale, not field by
+            // field — see below.
+            mtuDiscovery = MtuDiscovery(blackHoleCooldown = 45.seconds),
+            // Left null: falls through to the base's value.
+            maxIdleTimeout = null,
+            packetThreshold = null,
+            ackFrequency = null,
+        )
+
+        val merged = base.overriddenBy(override)
+
+        // Fields the override set win outright.
+        assertThat(merged.sendFairness).isEqualTo(false)
+        assertThat(merged.congestionController).isEqualTo(CongestionController.NewReno)
+
+        // Fields the override left null fall through to the base.
+        assertThat(merged.maxIdleTimeout).isEqualTo(30.seconds)
+        assertThat(merged.packetThreshold).isEqualTo(5)
+
+        // A nested record the override set replaces the base's whole record: the base's
+        // `interval`/`upperBound` are gone entirely, not merged alongside the override's
+        // `blackHoleCooldown`. A half-merged `MtuDiscovery` is not what either caller asked for.
+        assertThat(merged.mtuDiscovery).isEqualTo(MtuDiscovery(blackHoleCooldown = 45.seconds))
+        assertThat(merged.mtuDiscovery?.interval).isNull()
+        assertThat(merged.mtuDiscovery?.upperBound).isNull()
+
+        // A nested record the override left null falls through to the base's whole record,
+        // unchanged.
+        assertThat(merged.ackFrequency)
+            .isEqualTo(AckFrequency(ackElicitingThreshold = 1L, reorderingThreshold = 2L))
+
+        // Every field neither side mentioned stays null.
+        assertThat(merged.receiveWindow).isNull()
+
+        // The receiver and the override are themselves untouched — this builds a third value
+        // rather than mutating either.
+        assertThat(base.sendFairness).isEqualTo(true)
+        assertThat(override.maxIdleTimeout).isNull()
     }
 
     fun `an endpoint binds with a transport configuration`() = runTest {

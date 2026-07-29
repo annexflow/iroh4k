@@ -12,6 +12,16 @@ import kotlin.time.Duration
  * endpoint's default outright rather than merging with it: setting one field there does not
  * inherit the other 28 from whatever the endpoint was given, upstream's `set_transport_config`
  * takes a whole [QuicTransportConfig] and there is nothing here that reads two objects together.
+ * A caller who wants that merge anyway builds it explicitly with [overriddenBy] before handing the
+ * result to [Endpoint.startConnect] or [Incoming.acceptWith] — see its own documentation.
+ *
+ * This is deliberately not a `data class`, so there is no `copy()` either: for a published library,
+ * `copy()` and `componentN()` are binary-compatibility hazards, not conveniences — a field added in
+ * a later version changes `copy()`'s signature, and every positional `componentN()` call silently
+ * shifts, neither of which a caller built against the older version catches at compile time.
+ * [overriddenBy] fills the gap `copy()` usually fills without either hazard: it is one ordinary
+ * function whose signature does not grow when a 30th field is added, reading every field through
+ * its public getter rather than through generated code tied to the constructor's exact shape.
  *
  * Every field is nullable, and `null` always means "I did not say" — it leaves whatever upstream's
  * own default is, never "off" or "zero". That distinction matters most here because upstream's
@@ -257,6 +267,10 @@ class TransportConfig(
      * falls back to its own default of 8 rather than treating multipath as off. **A value below 8 is
      * ignored**, silently. See [maxConcurrentMultipathPaths] for why iroh4k passes it through
      * anyway.
+     *
+     * That soft lower bound is not the only one. This field crosses the wire as an `i32` narrowed to
+     * a `u8`, so **a value above 255 is refused outright** with [IrohError.Code.InvalidArgument] —
+     * loudly, unlike the silent floor above.
      */
     val maxRemoteNatTraversalAddresses: Int? = null,
 ) {
@@ -357,6 +371,75 @@ class TransportConfig(
             "maxRemoteNatTraversalAddresses=$maxRemoteNatTraversalAddresses" +
             ")"
 }
+
+/**
+ * Builds the merge none of the three attach points do on their own: every field [override] set
+ * wins, and every field it leaves `null` falls through to this receiver's value.
+ *
+ * [EndpointConfig.transportConfig], [Endpoint.startConnect] and [Incoming.acceptWith] each read one
+ * [TransportConfig] and replace whatever came before it wholesale — see the class documentation for
+ * why, and why there is no `copy()` to soften it. That is upstream's own behaviour, faithfully
+ * carried through, and this function does not change it: nothing here reaches an endpoint or a
+ * connection. It exists so that "the endpoint's settings plus one change" — the thing the three
+ * replace-only attach points cannot express — is a call a reader can see happening, made explicit at
+ * the call site instead of quietly reimplemented by restating every field the endpoint was already
+ * given:
+ *
+ * ```kotlin
+ * val perConnection = endpointDefaults.overriddenBy(TransportConfig(sendFairness = true))
+ * endpoint.startConnect(addr, alpn, perConnection)
+ * ```
+ *
+ * Every one of the 29 top-level fields resolves as `override.field ?: this.field`. [mtuDiscovery]
+ * and [ackFrequency] are the two exceptions in shape, not in rule: each is itself a small record
+ * rather than a scalar, and when [override] sets one, it **replaces this receiver's whole record**
+ * rather than merging field-by-field into it. A [MtuDiscovery] or [AckFrequency] built from pieces of
+ * two unrelated configurations is not a request either caller actually made — nobody asked for an
+ * `interval` from one source and an `upperBound` from another — so the two are treated as one
+ * indivisible value each, exactly as every top-level field already is between calls.
+ *
+ * This shape is also why a 30th field costs nothing here: `override.thirtieth ?: this.thirtieth`
+ * reads the same way regardless of how many fields came before it, where a `copy()` with defaulted
+ * parameters — the shape this function stands in for — would need a new parameter and would still
+ * silently do the wrong thing for every caller compiled against the version before it existed.
+ */
+fun TransportConfig.overriddenBy(override: TransportConfig): TransportConfig = TransportConfig(
+    maxConcurrentBidiStreams = override.maxConcurrentBidiStreams ?: maxConcurrentBidiStreams,
+    maxConcurrentUniStreams = override.maxConcurrentUniStreams ?: maxConcurrentUniStreams,
+    streamReceiveWindow = override.streamReceiveWindow ?: streamReceiveWindow,
+    receiveWindow = override.receiveWindow ?: receiveWindow,
+    sendWindow = override.sendWindow ?: sendWindow,
+    sendFairness = override.sendFairness ?: sendFairness,
+    maxIdleTimeout = override.maxIdleTimeout ?: maxIdleTimeout,
+    keepAliveInterval = override.keepAliveInterval ?: keepAliveInterval,
+    initialRtt = override.initialRtt ?: initialRtt,
+    packetThreshold = override.packetThreshold ?: packetThreshold,
+    timeThreshold = override.timeThreshold ?: timeThreshold,
+    persistentCongestionThreshold =
+        override.persistentCongestionThreshold ?: persistentCongestionThreshold,
+    ackFrequency = override.ackFrequency ?: ackFrequency,
+    congestionController = override.congestionController ?: congestionController,
+    initialMtu = override.initialMtu ?: initialMtu,
+    minMtu = override.minMtu ?: minMtu,
+    mtuDiscovery = override.mtuDiscovery ?: mtuDiscovery,
+    padToMtu = override.padToMtu ?: padToMtu,
+    datagramReceiveBufferSize = override.datagramReceiveBufferSize ?: datagramReceiveBufferSize,
+    datagramSendBufferSize = override.datagramSendBufferSize ?: datagramSendBufferSize,
+    cryptoBufferSize = override.cryptoBufferSize ?: cryptoBufferSize,
+    allowSpin = override.allowSpin ?: allowSpin,
+    enableSegmentationOffload = override.enableSegmentationOffload ?: enableSegmentationOffload,
+    sendObservedAddressReports =
+        override.sendObservedAddressReports ?: sendObservedAddressReports,
+    receiveObservedAddressReports =
+        override.receiveObservedAddressReports ?: receiveObservedAddressReports,
+    maxConcurrentMultipathPaths =
+        override.maxConcurrentMultipathPaths ?: maxConcurrentMultipathPaths,
+    defaultPathMaxIdleTimeout = override.defaultPathMaxIdleTimeout ?: defaultPathMaxIdleTimeout,
+    defaultPathKeepAliveInterval =
+        override.defaultPathKeepAliveInterval ?: defaultPathKeepAliveInterval,
+    maxRemoteNatTraversalAddresses =
+        override.maxRemoteNatTraversalAddresses ?: maxRemoteNatTraversalAddresses,
+)
 
 /**
  * Configuration for QUIC's automatic MTU discovery, mirroring `noq`'s `MtuDiscoveryConfig`.
@@ -481,9 +564,14 @@ class AckFrequency(
  * than a name, but the *choice* of algorithm is a named choice and so crosses as data — the same
  * reasoning that lets a preset cross as an ordinal.
  *
- * These two are all that `noq` implements. There is no BBR.
+ * `noq` implements exactly these three. [Cubic] is upstream's own default —
+ * `TransportConfig::default` builds its factory from `CubicConfig::default()` — and [NewReno] is the
+ * other long-established, RFC 5681-style algorithm. [Bbr3] is `noq-proto`'s implementation of the
+ * IETF draft `draft-ietf-ccwg-bbr-05`, and upstream's own module documentation is blunt about it:
+ * "Experimental! Use at your own risk." iroh4k does not second-guess that — the choice crosses
+ * through exactly as given, and choosing [Bbr3] is entirely on the caller.
  */
-enum class CongestionController { Cubic, NewReno }
+enum class CongestionController { Cubic, NewReno, Bbr3 }
 
 // ── Wire format ───────────────────────────────────────────────────────────────────────────────
 //

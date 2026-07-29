@@ -34,7 +34,7 @@
 //!       10 timeThreshold                     f64  narrowed to f32
 //!       11 persistentCongestionThreshold     i32  narrowed to u32
 //!       12 ackFrequency                      AckFrequency, below
-//!       13 congestionController              u8   ordinal: 0 Cubic, 1 NewReno
+//!       13 congestionController              u8   ordinal: 0 Cubic, 1 NewReno, 2 Bbr3
 //!       14 initialMtu                        i32  narrowed to u16
 //!       15 minMtu                            i32  narrowed to u16
 //!       16 mtuDiscovery                      MtuDiscovery, below
@@ -101,7 +101,7 @@ use iroh::endpoint::{
     AckFrequencyConfig, ControllerFactory, IdleTimeout, MtuDiscoveryConfig, QuicTransportConfig,
     VarInt,
 };
-use noq_proto::congestion::{CubicConfig, NewRenoConfig};
+use noq_proto::congestion::{Bbr3Config, CubicConfig, NewRenoConfig};
 
 use crate::codec::Reader;
 
@@ -149,6 +149,7 @@ const TRANSPORT_TAG_MAX_REMOTE_NAT_TRAVERSAL_ADDRESSES: u8 = 28;
 /// `CongestionController` ordinals, matching Kotlin's enum.
 const CONGESTION_CONTROLLER_CUBIC: u8 = 0;
 const CONGESTION_CONTROLLER_NEW_RENO: u8 = 1;
+const CONGESTION_CONTROLLER_BBR3: u8 = 2;
 
 /// [`MtuDiscoveryConfig`] entry tags. Its own small family, distinct from `TRANSPORT_TAG_*`.
 const MTU_TAG_INTERVAL: u8 = 0;
@@ -255,14 +256,15 @@ fn read_time_threshold(r: &mut Reader, what: &str) -> Result<f32, String> {
 
 /// Reads `TransportConfig.congestionController`'s (Kotlin) `u8` ordinal into the
 /// concrete factory it names. `noq-proto` is a direct dependency of this crate for exactly these
-/// two types: `iroh` re-exports the `ControllerFactory` trait it takes but not the concrete
-/// `CubicConfig`/`NewRenoConfig` upstream builds its own default from.
+/// three types: `iroh` re-exports the `ControllerFactory` trait it takes but not the concrete
+/// `CubicConfig`/`NewRenoConfig`/`Bbr3Config` upstream builds its own default from.
 fn read_congestion_controller(
     r: &mut Reader,
 ) -> Result<Arc<dyn ControllerFactory + Send + Sync>, String> {
     match r.u8()? {
         CONGESTION_CONTROLLER_CUBIC => Ok(Arc::new(CubicConfig::default())),
         CONGESTION_CONTROLLER_NEW_RENO => Ok(Arc::new(NewRenoConfig::default())),
+        CONGESTION_CONTROLLER_BBR3 => Ok(Arc::new(Bbr3Config::default())),
         other => Err(format!(
             "malformed transport configuration: unknown congestion controller ordinal {other}"
         )),

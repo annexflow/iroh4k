@@ -138,4 +138,12 @@ class AndroidConnectionTests {
     @Test
     fun `an incoming connection can be accepted with its own transport configuration`() =
         runner.`an incoming connection can be accepted with its own transport configuration`()
+
+    @Test
+    fun `acceptWith with no overlapping ALPN fails loudly rather than silently`() =
+        runner.`acceptWith with no overlapping ALPN fails loudly rather than silently`()
+
+    @Test
+    fun `acceptWith refuses an empty ALPN list without touching the incoming connection`() =
+        runner.`acceptWith refuses an empty ALPN list without touching the incoming connection`()
 }

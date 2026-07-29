@@ -161,6 +161,10 @@ class AndroidEndpointTests {
         runner.`CongestionController ordinals match the Rust wire contract`()
 
     @Test
+    fun `overriddenBy merges with the override winning and nested records replaced wholesale`() =
+        runner.`overriddenBy merges with the override winning and nested records replaced wholesale`()
+
+    @Test
     fun `an endpoint binds with a transport configuration`() =
         runner.`an endpoint binds with a transport configuration`()
 

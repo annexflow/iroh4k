@@ -964,6 +964,67 @@ class CommonConnectionTests {
             }
         }
 
+    fun `acceptWith with no overlapping ALPN fails loudly rather than silently`() =
+        Loopback.bounded {
+            // What this settles: the class doc used to claim a list omitting the negotiated
+            // protocol "accepts a connection whose two sides agree on nothing, and does so
+            // silently". Measured against the actual Rust/rustls behaviour behind `acceptWith`,
+            // that is backwards — a non-empty list with no overlap fails loudly, and it fails at
+            // `acceptWith` itself rather than at `Accepting.connect()`: `incoming.accept_with`
+            // negotiates ALPN synchronously from the ClientHello already carried in the QUIC
+            // Initial packet, so there is no handshake left to fail later. The error is the same
+            // shape iroh reports for an endpoint-wide ALPN mismatch — `IrohError.Code.Accept` — not
+            // `Code.Connect`.
+            val other = "iroh4k/m5/no-overlap".encodeToByteArray()
+            Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+                Endpoint.bind(Loopback.config()).use { client ->
+                    val accepted = async {
+                        val incoming = server.acceptNext() ?: error("shut down while accepting")
+                        incoming.use { pending ->
+                            assertFailsWith<IrohError> { pending.acceptWith(listOf(other)) }
+                        }
+                    }
+                    val dialFailure = assertFailsWith<IrohError> {
+                        client.connect(server.addr(), Loopback.alpn)
+                    }
+                    assertThat(dialFailure.code).isEqualTo(IrohError.Code.Connect)
+                    assertThat(accepted.await().code).isEqualTo(IrohError.Code.Accept)
+                }
+            }
+        }
+
+    fun `acceptWith refuses an empty ALPN list without touching the incoming connection`() =
+        Loopback.bounded {
+            // An empty list is not the silent "accept anything" case either: ALPN overlap is an
+            // intersection, and an empty list intersects nothing, so accepting with one would fail
+            // exactly as loudly and exactly as pointlessly as the mismatched-list case above on
+            // every single call. iroh4k refuses it up front instead — the one InvalidArgument this
+            // function raises before ever calling into Rust, which is why the incoming connection
+            // is still usable afterwards rather than consumed by a doomed attempt.
+            Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+                Endpoint.bind(Loopback.config()).use { client ->
+                    val accepted = async {
+                        val incoming = server.acceptNext() ?: error("shut down while accepting")
+                        incoming.use { pending ->
+                            val error = assertFailsWith<IrohError> { pending.acceptWith(emptyList()) }
+                            assertThat(error.code).isEqualTo(IrohError.Code.InvalidArgument)
+
+                            // Still usable: the rejection never reached Rust, so nothing was
+                            // consumed. A real ALPN list now succeeds on the same incoming
+                            // connection.
+                            pending.acceptWith(listOf(Loopback.alpn)).use { it.connect() }
+                        }
+                    }
+                    client.connect(server.addr(), Loopback.alpn).use { connection ->
+                        accepted.await().use { served ->
+                            assertThat(served.remoteId()).isEqualTo(client.id)
+                            assertThat(connection.remoteId()).isEqualTo(server.id)
+                        }
+                    }
+                }
+            }
+        }
+
     /** Polls [condition] on a real clock — see [Loopback.awaitUntil]. */
     private suspend fun awaitUntil(condition: () -> Boolean) = Loopback.awaitUntil(condition)
 }
