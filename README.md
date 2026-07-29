@@ -134,7 +134,7 @@ strategy.
 
 iroh4k is that different strategy: one Rust crate built twice — a `staticlib` linked into
 Kotlin/Native through cinterop, and a `cdylib` reached from the JVM and Android through hand-written
-JNI. Both facades call the same core through the same codec, and the same 239 shared test bodies run
+JNI. Both facades call the same core through the same codec, and the same 240 shared test bodies run
 against each.
 
 Writing the binding by hand rather than generating it also changed three things. They are trade-offs,

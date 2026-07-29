@@ -217,9 +217,18 @@ class MdnsConfig(
  *   ticket held for a peer, no 0-RTT to that peer. It lives entirely in the endpoint's own memory —
  *   nothing is written to disk — so it dies with the endpoint and starts empty again on the next
  *   bind, even with the same [secretKey]. `null`, the default, leaves upstream's own default of
- *   256 tickets, which it documents as costing about 150 KiB. `0` is legal and means "store none",
- *   which is not merely a small cache but effectively **disables 0-RTT** for this endpoint, since
- *   there is never a ticket left to resume a handshake from.
+ *   256 tickets, which it documents as costing about 150 KiB. `0` is legal, but — measured, not
+ *   assumed, see `maxTlsTickets 0 does not stop a single peer from resuming` in
+ *   `CommonConnectionTests` — it does **not** reliably disable 0-RTT: upstream rounds
+ *   it down to a per-server budget of `0`, and for an endpoint that only ever talks to one peer, an
+ *   implementation quirk in how that budget's backing storage grows means the budget is never
+ *   actually enforced, so a ticket for that one peer is kept exactly as it would be with no limit
+ *   at all. The eviction this setting controls is upstream's own approximation and has sharp,
+ *   non-monotonic edges — a value from `1` to `8` is *worse* than `0`, evicting a ticket the
+ *   instant it is written, for the same single-peer case `0` keeps — so there is no small value
+ *   here that reliably shrinks the cache either. Nothing in this binding is a guaranteed way to
+ *   turn 0-RTT off; do not rely on `0` for that, including as a way to opt out of the replay
+ *   hazard [Connecting.zeroRtt] and [Accepting.zeroRtt] document.
  */
 class EndpointConfig(
     val preset: EndpointPreset = EndpointPreset.N0,

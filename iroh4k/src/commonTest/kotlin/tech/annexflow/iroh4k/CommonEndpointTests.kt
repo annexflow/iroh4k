@@ -1168,7 +1168,10 @@ class CommonEndpointTests {
     }
 
     fun `an endpoint binds with a ticket cache size of zero`() = Loopback.bounded {
-        // Zero is legal upstream and means "store none", so this must bind rather than raise.
+        // Zero is legal upstream — `ClientSessionMemoryCache::new(0)` does not panic — so this must
+        // bind rather than raise. It is not, despite appearances, a way to turn 0-RTT off; see
+        // `EndpointConfig.maxTlsTickets`'s KDoc and `maxTlsTickets 0 does not stop a single peer
+        // from resuming` in `CommonConnectionTests` for what `0` actually does.
         Endpoint.bind(ticketConfig(0)).use { endpoint ->
             assertThat(endpoint.isClosed).isFalse()
         }

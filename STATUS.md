@@ -15,8 +15,8 @@ Android — are held to identical behaviour by the same shared test bodies.
 
 | Target | What is actually run |
 | --- | --- |
-| `macosArm64`, `jvm` | 478 test bodies, 239 per facade, on every change |
-| `android` (AAR) | The same 239 shared bodies under Robolectric, plus 6 Android-only tests for `Iroh4kAndroid.multicastLock`, which exists on no other target — 245 in all. Plus 6 instrumented tests, the only ones that exercise the packaged `.so` |
+| `macosArm64`, `jvm` | 480 test bodies, 240 per facade, on every change |
+| `android` (AAR) | The same 240 shared bodies under Robolectric, plus 6 Android-only tests for `Iroh4kAndroid.multicastLock`, which exists on no other target — 246 in all. Plus 6 instrumented tests, the only ones that exercise the packaged `.so` |
 | `iosArm64`, `iosSimulatorArm64` | Compiles and links; cinterop verified in CI |
 | `linuxX64` | Test suite configured in CI on `ubuntu-latest`; not verified locally |
 | `linuxArm64`, `mingwX64` | Cross-compiled and assembled in CI; never executed |
@@ -127,12 +127,24 @@ client opened before the handshake completed. Only that negative is deterministi
 the suite does, and stops there rather than asserting a `true` that would be racing the same clock the
 comment above describes.
 
-**`EndpointConfig.maxTlsTickets` is covered for its value type, its encoding, and that an endpoint
-binds with it set** — absent by default, an explicit size round-trips, zero is legal and means "store
-none," and a negative size is refused with `IrohError.Code.InvalidArgument`. Eviction behaviour — what
-happens to a cached ticket once the cache is full — is not observable from this suite and is not
-asserted; confirming it needs enough distinct peers to fill the cache and a way to tell a stale ticket
-from an evicted one, neither of which a hermetic loopback suite can provide on its own.
+**`EndpointConfig.maxTlsTickets` is covered for its value type, its encoding, that an endpoint binds
+with it set, and — this once said something false — for what `0` actually does.** Absent by
+default, an explicit size round-trips, and a negative size is refused with
+`IrohError.Code.InvalidArgument`; none of that changed. What changed is `0`: an earlier draft of
+this file called it "store none" and said it "effectively disables 0-RTT". That was never run. It
+is measured now, by `maxTlsTickets 0 does not stop a single peer from resuming` in
+`CommonConnectionTests`, and it is false for the case a hermetic suite can exercise — one endpoint
+talking to one peer. `rustls`'s cache rounds `0` down to a per-server budget of `0`, and a quirk in
+how its backing `VecDeque` grows means that budget is never enforced for the first (and, here, only)
+server name inserted: the entry survives, and 0-RTT works exactly as it would with no limit set. The
+KDoc on `maxTlsTickets` carries the full explanation and the citations into `rustls`; the short
+version is that `0` is not a reliable way to turn 0-RTT off, and — measured separately, not
+asserted by the suite — a value from `1` to `8` is actually worse, evicting the single peer's ticket
+the instant it is written every time. Eviction behaviour beyond this one corner — what happens to a
+cached ticket once a cache sized for more than one peer is actually full — is still not observable
+from this suite and is still not asserted; confirming it needs enough distinct peers to fill the
+cache and a way to tell a stale ticket from an evicted one, neither of which a hermetic loopback
+suite can provide on its own.
 
 ### `Endpoint.watchNetworkChange()` is address-derived, not iroh's own net-report watcher
 

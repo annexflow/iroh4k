@@ -1316,6 +1316,79 @@ class CommonConnectionTests {
         }
     }
 
+    fun `maxTlsTickets 0 does not stop a single peer from resuming`() = bounded {
+        // EndpointConfig.maxTlsTickets's KDoc used to claim 0 means "store none" and therefore
+        // "effectively disables 0-RTT". That claim was never run against the real cache — this
+        // body measures it instead, and it is false for the case this suite can exercise: one
+        // endpoint resuming against one peer.
+        //
+        // `Builder::max_tls_tickets(0)` reaches `ClientSessionMemoryCache::new(0)`
+        // (`iroh-1.0.3/src/tls.rs:64`), which rounds down to `max_servers = 0`
+        // (`rustls-0.23.42/src/client/handy.rs:81-82`) and builds `LimitedCache::new(0)` — a
+        // `VecDeque` requested at capacity `0`. `LimitedCache` only evicts an entry when the
+        // insert that just created it leaves the backing `VecDeque` exactly full
+        // (`rustls-0.23.42/src/limited_cache.rs:42`), and confirmed directly against the standard
+        // library rather than assumed from reading it: `VecDeque::with_capacity(0)`'s first
+        // `push_back` reallocates to capacity 4, not 1, so that first entry is never full and is
+        // never evicted. This endpoint only ever dials one peer, so only one server name is ever
+        // inserted — every later dial to it finds an `Occupied` entry, which takes the edit path
+        // and does not consult capacity at all. So the cache keeps growing past its nominal
+        // "zero" size for as long as there is exactly one peer to talk to.
+        //
+        // This is not "0 is secretly a real cache size" — the same rounding, at `maxTlsTickets`
+        // values from 1 to 8, computes `max_servers = 1`, and `VecDeque::with_capacity(1)` does
+        // NOT overshoot: its first `push_back` leaves it exactly full, so the very entry that was
+        // just inserted is evicted immediately, every time, and this endpoint's own single peer
+        // then never accumulates a ticket at all — measured separately, not covered by an
+        // assertion here because it is not what this body's KDoc correction is about. The
+        // takeaway that does belong in the docs is narrower than either extreme: upstream's
+        // eviction is an approximation with sharp, non-monotonic edges, so `0` is not a reliable
+        // way to guarantee 0-RTT is off.
+        //
+        // The bounded-retry shape below is used deliberately, same as the other dialling-side
+        // 0-RTT bodies above: a ticket IS expected here, so a loop that gave up early would be
+        // the wrong kind of flaky, and every run measured while writing this test converged in
+        // single digits of attempts. A configuration for which no ticket is ever expected needs a
+        // wall-clock bound instead of this shape — the do/while below would otherwise spin until
+        // `bounded`'s 60s timeout with nothing to show for it if the answer were really "never".
+        val clientConfig = EndpointConfig(
+            preset = EndpointPreset.Minimal,
+            relayMode = RelayMode.Disabled,
+            bindAddrs = listOf(SocketAddr.parse("127.0.0.1:0")),
+            maxTlsTickets = 0,
+        )
+        Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+            Endpoint.bind(clientConfig).use { client ->
+                var zero: OutgoingZeroRttConnection? = null
+                lateinit var accepted: Deferred<Connection>
+                do {
+                    accepted = async { server.acceptOne() }
+                    val connecting = client.startConnect(server.addr(), Loopback.alpn)
+                    zero = connecting.zeroRtt()
+                    if (zero == null) {
+                        connecting.connect().close()
+                        connecting.close()
+                        accepted.await().close()
+                    } else {
+                        connecting.close()
+                    }
+                } while (zero == null)
+
+                zero.use { early ->
+                    early.openBi().use { stream -> stream.send.writeAll("early".encodeToByteArray()) }
+                    when (val status = early.awaitHandshake()) {
+                        is ZeroRttStatus.Accepted -> status.connection.use {
+                            assertThat(it.remoteId()).isEqualTo(server.id)
+                        }
+                        is ZeroRttStatus.Rejected ->
+                            error("a server that never restarted must not reject: $status")
+                    }
+                }
+                accepted.await().close()
+            }
+        }
+    }
+
     fun `0-RTT handles are released`() = bounded {
         val connections = LiveCounters.connectionHandles
         // Quiescent baseline first, or the ceiling below is slack by whatever the previous body

@@ -167,4 +167,8 @@ class NativeConnectionTests {
     @Test
     fun `0-RTT handles are released`() =
         runner.`0-RTT handles are released`()
+
+    @Test
+    fun `maxTlsTickets 0 does not stop a single peer from resuming`() =
+        runner.`maxTlsTickets 0 does not stop a single peer from resuming`()
 }

@@ -568,8 +568,18 @@ fn configure(config: BindConfig, lookup: MemoryLookup) -> Outcome<Builder> {
 
     // Independent of everything else here too: the size of the in-memory TLS session-ticket
     // cache, which is what makes 0-RTT possible at all. `0` is legal upstream — `rustls`'s
-    // `ClientSessionMemoryCache::new(0)` does not panic — and means "store none", which
-    // effectively disables 0-RTT for this endpoint rather than being refused as a mistake.
+    // `ClientSessionMemoryCache::new(0)` does not panic — but it does not reliably disable 0-RTT
+    // either, measured rather than assumed (see `maxTlsTickets 0 does not stop a single peer from
+    // resuming` in `CommonConnectionTests.kt`). `new(0)` rounds down to a per-server budget of `0`
+    // (`rustls-0.23.42/src/client/handy.rs:81-82`) and builds a `LimitedCache` whose backing
+    // `VecDeque` was requested at capacity `0`; that cache only evicts an entry when the insert
+    // that just created it leaves the `VecDeque` exactly full
+    // (`rustls-0.23.42/src/limited_cache.rs:42`), and `VecDeque::with_capacity(0)`'s first
+    // `push_back` reallocates straight past that — to capacity 4, not 1 — so the first entry
+    // survives, and every later entry for the same server name reuses it rather than triggering
+    // eviction again. For an endpoint that only ever dials one peer, this means the "zero" cache
+    // behaves like an unbounded one. `EndpointConfig.maxTlsTickets`'s KDoc has the caveats this
+    // corner deserves; nothing here should claim `0` turns 0-RTT off.
     if let Some(max_tls_tickets) = config.max_tls_tickets {
         builder = builder.max_tls_tickets(max_tls_tickets);
     }

@@ -209,7 +209,7 @@ callback into application code on the back of that VM being available.
 - **Bodies live once.** `commonTest`'s `Common*Tests` classes hold the test bodies;
   `nativeTest`, `jvmTest` and `androidHostTest` are thin classes that construct the runner and
   delegate one `@Test` per method. Every facade is held to identical behaviour, so a body added to
-  a runner must be added to all **three** delegators — 239 shared bodies run in each. The Android ones
+  a runner must be added to all **three** delegators — 240 shared bodies run in each. The Android ones
   additionally carry `@RunWith(RobolectricTestRunner::class)` and `@Config(sdk = [34])`. Note what
   that does *not* buy: the shared bodies touch no Android API, so a delegator that omits the runner
   still passes — measured, not assumed. It is there so the class is an Android unit test rather
@@ -218,13 +218,13 @@ callback into application code on the back of that VM being available.
   one) would need. Keep it on new delegators; nothing will fail loudly if you don't.
   (`BinaryReaderTests` is the one exception on the shared side: pure-Kotlin decoder tests with no
   facade, so they carry `@Test` directly in `commonTest` and are picked up by every compilation.
-  The 239 is 233 delegated bodies plus its 6.)
-- **The counts are not symmetric, and the asymmetry is deliberate.** 239 shared bodies per facade,
-  so 478 across the two tested facades (`jvmTest`, `macosArm64Test`), and `androidHostTest` runs
-  those 239 **plus 6 Android-only tests** — `AndroidMulticastLockTests`, the one class in that
+  The 240 is 234 delegated bodies plus its 6.)
+- **The counts are not symmetric, and the asymmetry is deliberate.** 240 shared bodies per facade,
+  so 480 across the two tested facades (`jvmTest`, `macosArm64Test`), and `androidHostTest` runs
+  those 240 **plus 6 Android-only tests** — `AndroidMulticastLockTests`, the one class in that
   source set that is not a delegator, because `Iroh4kAndroid.multicastLock` is `androidMain` code
-  over `WifiManager` and there is no other facade to hold to the same behaviour. 245 on Android,
-  723 host tests in all. Something that exists only on Android belongs in a class of its own there,
+  over `WifiManager` and there is no other facade to hold to the same behaviour. 246 on Android,
+  726 host tests in all. Something that exists only on Android belongs in a class of its own there,
   with a KDoc saying why it is not a delegator; do not invent a `Common*Tests` body that only one
   facade can run, and do not "restore symmetry" by deleting the class.
 - **`androidDeviceTest` is deliberately not a fourth delegator.** It runs on a device or emulator
@@ -238,7 +238,7 @@ callback into application code on the back of that VM being available.
   shared bodies at all — Kotlin turns a suspend lambda inside ``fun `a name with spaces`()`` into a
   class whose name contains spaces, which DEX rejects below version 040, i.e. below `minSdk 35`.
   That is why its methods are named without backticks and why the compilation is left out of the
-  `test` source-set tree. Everything these tests found was invisible to all 723 host tests: a
+  `test` source-set tree. Everything these tests found was invisible to all 726 host tests: a
   process-aborting missing init, and a missing `INTERNET` permission.
 - **Robolectric gives each test class its own sandbox classloader**, so under `androidHostTest`
   every class loads its *own copy* of the host `libiroh4k.so` — the loader in `androidMain`
