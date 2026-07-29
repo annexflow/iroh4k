@@ -488,7 +488,7 @@ enum class CongestionController { Cubic, NewReno }
 // later, the per-connection options payload) is positional at its outer level and nothing on
 // either side would notice a drift.
 //
-// This is its own tag family, in three parts. `TRANSPORT_TAG_*` is NOT `Addr.kt`'s `ADDR_TAG_*`
+// This is its own tag family, in three parts. `TRANSPORT_TAG_*` is NOT `Addr.kt`'s `TAG_*`
 // and NOT `Discovery.kt`'s `DISCOVERY_TAG_*`, both of which number different payload shapes from
 // the same starting point; `MTU_TAG_*` and `ACK_TAG_*` are two further small families of their
 // own, for the nested records.
@@ -540,6 +540,41 @@ private const val ABSENT = 0
 private const val PRESENT = 1
 
 /**
+ * Writes a counted, tagged, sparse sequence: `i32 count` followed by that many `u8 tag` + value
+ * entries, decided by calling `entry(tag, write)` from inside [block]. The shared preamble behind
+ * [writeTransportConfig], [writeMtuDiscovery] and [writeAckFrequency] — those three payloads are
+ * the same shape at different field lists, and three independent copies of this preamble are three
+ * independent chances for the next one to get the part below wrong.
+ *
+ * The count is never known before every field in [block] has decided whether to write itself, so
+ * `entry` cannot write straight into the outer payload — the byte count of what follows the `i32`
+ * has to be settled first. It instead appends to a second, inner [BinaryWriter] (`entries`) and,
+ * once [block] returns, this function writes the final count followed by that buffer's bytes.
+ *
+ * **Why `write`'s receiver matters.** `entry`'s `write` parameter is typed `BinaryWriter.() ->
+ * Unit`, so a call like `entry(TAG) { i64(it) }` has its `i64` resolve against *that lambda's own
+ * implicit receiver* — which `entry` binds to `entries`, the inner buffer — not against the
+ * [BinaryWriter] this whole function is an extension on. That shadowing is exactly what makes the
+ * scheme work: every `write` block lands in the entry buffer being counted, never in the outer
+ * payload, with no explicit `entries.` qualifier needed anywhere in [block]. Writing directly to
+ * the outer receiver from inside a `write` block — or hoisting a write outside `entry` entirely —
+ * would compile cleanly and silently desynchronise the count from the bytes.
+ */
+private fun BinaryWriter.writeCountedEntries(
+    block: ((tag: Int, write: BinaryWriter.() -> Unit) -> Unit) -> Unit,
+) {
+    val entries = BinaryWriter()
+    var count = 0
+    block { tag, write ->
+        entries.u8(tag)
+        entries.write()
+        count++
+    }
+    i32(count)
+    raw(entries.finish())
+}
+
+/**
  * Writes a transport configuration as a counted sequence of tagged entries.
  *
  * Sparse rather than positional: a caller typically sets two knobs out of twenty-nine, and a
@@ -555,101 +590,74 @@ private const val PRESENT = 1
  * `f32` — the codec has no narrower float.
  */
 internal fun BinaryWriter.writeTransportConfig(config: TransportConfig) {
-    val entries = BinaryWriter()
-    var count = 0
-    fun entry(tag: Int, write: BinaryWriter.() -> Unit) {
-        entries.u8(tag)
-        entries.write()
-        count++
+    writeCountedEntries { entry ->
+        config.maxConcurrentBidiStreams?.let { entry(TRANSPORT_TAG_MAX_CONCURRENT_BIDI_STREAMS) { i64(it) } }
+        config.maxConcurrentUniStreams?.let { entry(TRANSPORT_TAG_MAX_CONCURRENT_UNI_STREAMS) { i64(it) } }
+        config.streamReceiveWindow?.let { entry(TRANSPORT_TAG_STREAM_RECEIVE_WINDOW) { i64(it) } }
+        config.receiveWindow?.let { entry(TRANSPORT_TAG_RECEIVE_WINDOW) { i64(it) } }
+        config.sendWindow?.let { entry(TRANSPORT_TAG_SEND_WINDOW) { i64(it) } }
+        config.sendFairness?.let { entry(TRANSPORT_TAG_SEND_FAIRNESS) { bool(it) } }
+        config.maxIdleTimeout?.let { entry(TRANSPORT_TAG_MAX_IDLE_TIMEOUT) { i64(it.inWholeNanoseconds) } }
+        config.keepAliveInterval?.let { entry(TRANSPORT_TAG_KEEP_ALIVE_INTERVAL) { i64(it.inWholeNanoseconds) } }
+        config.initialRtt?.let { entry(TRANSPORT_TAG_INITIAL_RTT) { i64(it.inWholeNanoseconds) } }
+        config.packetThreshold?.let { entry(TRANSPORT_TAG_PACKET_THRESHOLD) { i32(it) } }
+        config.timeThreshold?.let { entry(TRANSPORT_TAG_TIME_THRESHOLD) { f64(it.toDouble()) } }
+        config.persistentCongestionThreshold?.let {
+            entry(TRANSPORT_TAG_PERSISTENT_CONGESTION_THRESHOLD) { i32(it) }
+        }
+        config.ackFrequency?.let { entry(TRANSPORT_TAG_ACK_FREQUENCY) { writeAckFrequency(it) } }
+        config.congestionController?.let { entry(TRANSPORT_TAG_CONGESTION_CONTROLLER) { u8(it.ordinal) } }
+        config.initialMtu?.let { entry(TRANSPORT_TAG_INITIAL_MTU) { i32(it) } }
+        config.minMtu?.let { entry(TRANSPORT_TAG_MIN_MTU) { i32(it) } }
+        config.mtuDiscovery?.let { entry(TRANSPORT_TAG_MTU_DISCOVERY) { writeMtuDiscovery(it) } }
+        config.padToMtu?.let { entry(TRANSPORT_TAG_PAD_TO_MTU) { bool(it) } }
+        config.datagramReceiveBufferSize?.let {
+            entry(TRANSPORT_TAG_DATAGRAM_RECEIVE_BUFFER_SIZE) { i32(it) }
+        }
+        config.datagramSendBufferSize?.let { entry(TRANSPORT_TAG_DATAGRAM_SEND_BUFFER_SIZE) { i32(it) } }
+        config.cryptoBufferSize?.let { entry(TRANSPORT_TAG_CRYPTO_BUFFER_SIZE) { i32(it) } }
+        config.allowSpin?.let { entry(TRANSPORT_TAG_ALLOW_SPIN) { bool(it) } }
+        config.enableSegmentationOffload?.let {
+            entry(TRANSPORT_TAG_ENABLE_SEGMENTATION_OFFLOAD) { bool(it) }
+        }
+        config.sendObservedAddressReports?.let {
+            entry(TRANSPORT_TAG_SEND_OBSERVED_ADDRESS_REPORTS) { bool(it) }
+        }
+        config.receiveObservedAddressReports?.let {
+            entry(TRANSPORT_TAG_RECEIVE_OBSERVED_ADDRESS_REPORTS) { bool(it) }
+        }
+        config.maxConcurrentMultipathPaths?.let {
+            entry(TRANSPORT_TAG_MAX_CONCURRENT_MULTIPATH_PATHS) { i32(it) }
+        }
+        config.defaultPathMaxIdleTimeout?.let {
+            entry(TRANSPORT_TAG_DEFAULT_PATH_MAX_IDLE_TIMEOUT) { i64(it.inWholeNanoseconds) }
+        }
+        config.defaultPathKeepAliveInterval?.let {
+            entry(TRANSPORT_TAG_DEFAULT_PATH_KEEP_ALIVE_INTERVAL) { i64(it.inWholeNanoseconds) }
+        }
+        config.maxRemoteNatTraversalAddresses?.let {
+            entry(TRANSPORT_TAG_MAX_REMOTE_NAT_TRAVERSAL_ADDRESSES) { i32(it) }
+        }
     }
-
-    config.maxConcurrentBidiStreams?.let { entry(TRANSPORT_TAG_MAX_CONCURRENT_BIDI_STREAMS) { i64(it) } }
-    config.maxConcurrentUniStreams?.let { entry(TRANSPORT_TAG_MAX_CONCURRENT_UNI_STREAMS) { i64(it) } }
-    config.streamReceiveWindow?.let { entry(TRANSPORT_TAG_STREAM_RECEIVE_WINDOW) { i64(it) } }
-    config.receiveWindow?.let { entry(TRANSPORT_TAG_RECEIVE_WINDOW) { i64(it) } }
-    config.sendWindow?.let { entry(TRANSPORT_TAG_SEND_WINDOW) { i64(it) } }
-    config.sendFairness?.let { entry(TRANSPORT_TAG_SEND_FAIRNESS) { bool(it) } }
-    config.maxIdleTimeout?.let { entry(TRANSPORT_TAG_MAX_IDLE_TIMEOUT) { i64(it.inWholeNanoseconds) } }
-    config.keepAliveInterval?.let { entry(TRANSPORT_TAG_KEEP_ALIVE_INTERVAL) { i64(it.inWholeNanoseconds) } }
-    config.initialRtt?.let { entry(TRANSPORT_TAG_INITIAL_RTT) { i64(it.inWholeNanoseconds) } }
-    config.packetThreshold?.let { entry(TRANSPORT_TAG_PACKET_THRESHOLD) { i32(it) } }
-    config.timeThreshold?.let { entry(TRANSPORT_TAG_TIME_THRESHOLD) { f64(it.toDouble()) } }
-    config.persistentCongestionThreshold?.let {
-        entry(TRANSPORT_TAG_PERSISTENT_CONGESTION_THRESHOLD) { i32(it) }
-    }
-    config.ackFrequency?.let { entry(TRANSPORT_TAG_ACK_FREQUENCY) { writeAckFrequency(it) } }
-    config.congestionController?.let { entry(TRANSPORT_TAG_CONGESTION_CONTROLLER) { u8(it.ordinal) } }
-    config.initialMtu?.let { entry(TRANSPORT_TAG_INITIAL_MTU) { i32(it) } }
-    config.minMtu?.let { entry(TRANSPORT_TAG_MIN_MTU) { i32(it) } }
-    config.mtuDiscovery?.let { entry(TRANSPORT_TAG_MTU_DISCOVERY) { writeMtuDiscovery(it) } }
-    config.padToMtu?.let { entry(TRANSPORT_TAG_PAD_TO_MTU) { bool(it) } }
-    config.datagramReceiveBufferSize?.let {
-        entry(TRANSPORT_TAG_DATAGRAM_RECEIVE_BUFFER_SIZE) { i32(it) }
-    }
-    config.datagramSendBufferSize?.let { entry(TRANSPORT_TAG_DATAGRAM_SEND_BUFFER_SIZE) { i32(it) } }
-    config.cryptoBufferSize?.let { entry(TRANSPORT_TAG_CRYPTO_BUFFER_SIZE) { i32(it) } }
-    config.allowSpin?.let { entry(TRANSPORT_TAG_ALLOW_SPIN) { bool(it) } }
-    config.enableSegmentationOffload?.let {
-        entry(TRANSPORT_TAG_ENABLE_SEGMENTATION_OFFLOAD) { bool(it) }
-    }
-    config.sendObservedAddressReports?.let {
-        entry(TRANSPORT_TAG_SEND_OBSERVED_ADDRESS_REPORTS) { bool(it) }
-    }
-    config.receiveObservedAddressReports?.let {
-        entry(TRANSPORT_TAG_RECEIVE_OBSERVED_ADDRESS_REPORTS) { bool(it) }
-    }
-    config.maxConcurrentMultipathPaths?.let {
-        entry(TRANSPORT_TAG_MAX_CONCURRENT_MULTIPATH_PATHS) { i32(it) }
-    }
-    config.defaultPathMaxIdleTimeout?.let {
-        entry(TRANSPORT_TAG_DEFAULT_PATH_MAX_IDLE_TIMEOUT) { i64(it.inWholeNanoseconds) }
-    }
-    config.defaultPathKeepAliveInterval?.let {
-        entry(TRANSPORT_TAG_DEFAULT_PATH_KEEP_ALIVE_INTERVAL) { i64(it.inWholeNanoseconds) }
-    }
-    config.maxRemoteNatTraversalAddresses?.let {
-        entry(TRANSPORT_TAG_MAX_REMOTE_NAT_TRAVERSAL_ADDRESSES) { i32(it) }
-    }
-
-    i32(count)
-    raw(entries.finish())
 }
 
 /** As [writeTransportConfig]'s entries, for [MtuDiscovery]'s own small tag family. */
 private fun BinaryWriter.writeMtuDiscovery(config: MtuDiscovery) {
-    val entries = BinaryWriter()
-    var count = 0
-    fun entry(tag: Int, write: BinaryWriter.() -> Unit) {
-        entries.u8(tag)
-        entries.write()
-        count++
+    writeCountedEntries { entry ->
+        config.interval?.let { entry(MTU_TAG_INTERVAL) { i64(it.inWholeNanoseconds) } }
+        config.upperBound?.let { entry(MTU_TAG_UPPER_BOUND) { i32(it) } }
+        config.blackHoleCooldown?.let { entry(MTU_TAG_BLACK_HOLE_COOLDOWN) { i64(it.inWholeNanoseconds) } }
+        config.minimumChange?.let { entry(MTU_TAG_MINIMUM_CHANGE) { i32(it) } }
     }
-
-    config.interval?.let { entry(MTU_TAG_INTERVAL) { i64(it.inWholeNanoseconds) } }
-    config.upperBound?.let { entry(MTU_TAG_UPPER_BOUND) { i32(it) } }
-    config.blackHoleCooldown?.let { entry(MTU_TAG_BLACK_HOLE_COOLDOWN) { i64(it.inWholeNanoseconds) } }
-    config.minimumChange?.let { entry(MTU_TAG_MINIMUM_CHANGE) { i32(it) } }
-
-    i32(count)
-    raw(entries.finish())
 }
 
 /** As [writeTransportConfig]'s entries, for [AckFrequency]'s own small tag family. */
 private fun BinaryWriter.writeAckFrequency(config: AckFrequency) {
-    val entries = BinaryWriter()
-    var count = 0
-    fun entry(tag: Int, write: BinaryWriter.() -> Unit) {
-        entries.u8(tag)
-        entries.write()
-        count++
+    writeCountedEntries { entry ->
+        config.ackElicitingThreshold?.let { entry(ACK_TAG_ACK_ELICITING_THRESHOLD) { i64(it) } }
+        config.maxAckDelay?.let { entry(ACK_TAG_MAX_ACK_DELAY) { i64(it.inWholeNanoseconds) } }
+        config.reorderingThreshold?.let { entry(ACK_TAG_REORDERING_THRESHOLD) { i64(it) } }
     }
-
-    config.ackElicitingThreshold?.let { entry(ACK_TAG_ACK_ELICITING_THRESHOLD) { i64(it) } }
-    config.maxAckDelay?.let { entry(ACK_TAG_MAX_ACK_DELAY) { i64(it.inWholeNanoseconds) } }
-    config.reorderingThreshold?.let { entry(ACK_TAG_REORDERING_THRESHOLD) { i64(it) } }
-
-    i32(count)
-    raw(entries.finish())
 }
 
 /**

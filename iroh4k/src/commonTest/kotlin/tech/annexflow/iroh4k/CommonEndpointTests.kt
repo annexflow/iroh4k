@@ -977,6 +977,17 @@ class CommonEndpointTests {
             // reachable from here. `Duration.INFINITE` is the largest value a caller can express —
             // it saturates every accessor at `Long.MAX_VALUE` instead of overflowing — and it binds
             // successfully, the honest counterpart to the overflow this module cannot actually hit.
+            //
+            // This is established for `maxIdleTimeout` only. It is the one duration field upstream
+            // bound-checks at all — `read_idle_timeout` is the only reader in `transport.rs` that
+            // hands its `Duration` to a fallible conversion (`IdleTimeout::try_from`). The other
+            // seven duration fields (`keepAliveInterval`, `initialRtt`,
+            // `defaultPathMaxIdleTimeout`, `defaultPathKeepAliveInterval`,
+            // `mtuDiscovery.interval`, `mtuDiscovery.blackHoleCooldown`,
+            // `ackFrequency.maxAckDelay`) go through `read_duration` alone, which only rejects a
+            // negative value and accepts anything up to `i64::MAX` nanoseconds — there is no
+            // equivalent "largest value is accepted" claim to make for them, because there is no
+            // upper bound on their side to be near.
             Endpoint.bind(
                 EndpointConfig(
                     preset = EndpointPreset.Minimal,

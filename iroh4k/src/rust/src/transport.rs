@@ -234,6 +234,23 @@ fn read_u64(r: &mut Reader, what: &str) -> Result<u64, String> {
     u64::try_from(value).map_err(|_| format!("{what} must not be negative, got {value}"))
 }
 
+/// Reads `TransportConfig.timeThreshold`'s (Kotlin) `f64` and narrows it to `f32`, rejecting NaN
+/// and negative values.
+///
+/// Unlike the integer fields above, an `f64` -> `f32` narrowing cannot fail on range — every
+/// caller of this function is only after the precision truncation `writeTransportConfig`'s
+/// KDoc explains. What it must still reject is a value the QUIC crate would otherwise store
+/// verbatim: a negative multiple of the round-trip time makes no sense, and NaN is worse than
+/// wrong — every comparison against it is `false`, so it silently disables time-based loss
+/// detection rather than failing anywhere.
+fn read_time_threshold(r: &mut Reader, what: &str) -> Result<f32, String> {
+    let value = r.f64()?;
+    if value.is_nan() || value < 0.0 {
+        return Err(format!("{what} must be a nonnegative number, got {value}"));
+    }
+    Ok(value as f32)
+}
+
 /// Reads `TransportConfig.congestionController`'s (Kotlin) `u8` ordinal into the
 /// concrete factory it names. `noq-proto` is a direct dependency of this crate for exactly these
 /// two types: `iroh` re-exports the `ControllerFactory` trait it takes but not the concrete
@@ -342,7 +359,9 @@ pub(crate) fn read_transport_config(r: &mut Reader) -> Result<QuicTransportConfi
             TRANSPORT_TAG_PACKET_THRESHOLD => {
                 builder.packet_threshold(read_u32(r, "packetThreshold")?)
             }
-            TRANSPORT_TAG_TIME_THRESHOLD => builder.time_threshold(r.f64()? as f32),
+            TRANSPORT_TAG_TIME_THRESHOLD => {
+                builder.time_threshold(read_time_threshold(r, "timeThreshold")?)
+            }
             TRANSPORT_TAG_PERSISTENT_CONGESTION_THRESHOLD => builder
                 .persistent_congestion_threshold(read_u32(r, "persistentCongestionThreshold")?),
             TRANSPORT_TAG_ACK_FREQUENCY => {
