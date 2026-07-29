@@ -3,6 +3,7 @@ package tech.annexflow.iroh4k
 import assertk.assertThat
 import assertk.assertions.isEqualTo
 import assertk.assertions.isFalse
+import assertk.assertions.isInstanceOf
 import assertk.assertions.isNotEqualTo
 import assertk.assertions.isNotNull
 import assertk.assertions.isNull
@@ -1167,6 +1168,88 @@ class CommonConnectionTests {
                     assertThat(received).isEqualTo("hello".encodeToByteArray())
                     assertThat(id).isEqualTo(client.id)
                 }
+            }
+        }
+    }
+
+    fun `a restarted server rejects the early data and the stream says so`() = bounded {
+        // The server's identity must survive the restart: the client's ticket is keyed by it. A new
+        // SecretKey would make this a first dial again and the body would pass for the wrong reason.
+        // EndpointConfig is not a data class — there is no copy() — so the configuration is built out.
+        val serverKey = SecretKey.generate()
+        fun serverConfig() = EndpointConfig(
+            preset = EndpointPreset.Minimal,
+            secretKey = serverKey,
+            alpns = listOf(Loopback.alpn),
+            relayMode = RelayMode.Disabled,
+            bindAddrs = listOf(SocketAddr.parse("127.0.0.1:0")),
+        )
+
+        Endpoint.bind(Loopback.config()).use { client ->
+            // Prime the ticket against the server's original identity. As in "a second dial from the
+            // same endpoint sends data before the handshake" above, the session ticket is ordinary
+            // post-handshake application data delivered asynchronously, so `zeroRtt()` on the very next
+            // dial can still race its arrival. This dials repeatedly, completing and releasing each
+            // attempt normally, until `zeroRtt()` itself reports a ticket on a fresh attempt — the
+            // earliest instant priming is provably done, and a real wait rather than a fixed delay. The
+            // enclosing `bounded`'s 60s real-time timeout is the backstop.
+            Endpoint.bind(serverConfig()).use { server ->
+                var warm: OutgoingZeroRttConnection? = null
+                lateinit var accepted: Deferred<Connection>
+                do {
+                    accepted = async { server.acceptOne() }
+                    val connecting = client.startConnect(server.addr(), Loopback.alpn)
+                    warm = connecting.zeroRtt()
+                    if (warm == null) {
+                        // Not primed yet: finish this attempt like any ordinary connection, and release
+                        // both ends, so the loop's unsuccessful iterations cannot strand connection-domain
+                        // handles across a retry.
+                        connecting.connect().close()
+                        connecting.close()
+                        accepted.await().close()
+                    } else {
+                        // Primed: the attempt itself is spent (see `Connecting.zeroRtt`'s doc), but the
+                        // `Connecting` handle wrapping it is a separate release from the `zero` handle
+                        // just produced, so it still needs its own close.
+                        connecting.close()
+                    }
+                } while (warm == null)
+
+                warm.use { early ->
+                    (early.awaitHandshake() as ZeroRttStatus.Accepted).connection.close()
+                }
+                accepted.await().close()
+            }
+
+            // The endpoint above is closed, so its resumption state is gone. A new one with the same key
+            // still looks like the same peer to the client, which will therefore try 0-RTT and be refused.
+            Endpoint.bind(serverConfig()).use { restarted ->
+                val accepted = async { restarted.acceptOne() }
+                val zero = client.startConnect(restarted.addr(), Loopback.alpn).zeroRtt()
+                assertThat(zero).isNotNull()
+                zero!!.use { early ->
+                    val stream = early.openBi()
+                    val status = early.awaitHandshake()
+                    assertThat(status).isInstanceOf(ZeroRttStatus.Rejected::class)
+
+                    // No assertion here on a write raising `ZeroRttRejected`, deliberately: it cannot be
+                    // made deterministic from Kotlin. `noq` captures whether a stream is 0-RTT exactly
+                    // once, at `open_bi()`'s first poll (`noq-1.1.0/src/connection.rs:1031`) — and
+                    // `zeroRtt`, `openBi` and `awaitHandshake` are each dispatched as their own
+                    // independently scheduled tokio task (`ops.rs:234`). If the connection's background
+                    // driver has already processed the peer's rejection by the moment `open_bi`'s task
+                    // actually gets polled, the stream it hands back is an ordinary post-handshake stream
+                    // — its write then correctly succeeds, and there is no way for anything issued after
+                    // the fact, on the Kotlin side, to close that window. Measured empirically rather than
+                    // assumed: a `writeAll` here failed 0/9 times on the JVM/JNI facade and 10/16 times on
+                    // cinterop. Ordinal 15 is pinned elsewhere instead — see `stream.rs`'s mapper unit
+                    // tests for the four `ZeroRttRejected` arms, and `CommonSmokeTests` for the ordinal
+                    // itself. Only the deterministic half belongs here: the stream is dead, so it is
+                    // closed along with the connection, the same as any other spent 0-RTT attempt.
+                    stream.close()
+                    status.connection.close()
+                }
+                accepted.await().close()
             }
         }
     }

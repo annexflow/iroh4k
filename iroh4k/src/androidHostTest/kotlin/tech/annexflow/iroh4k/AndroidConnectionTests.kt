@@ -162,4 +162,8 @@ class AndroidConnectionTests {
     @Test
     fun `the accepting side reads a stream before its handshake completes`() =
         runner.`the accepting side reads a stream before its handshake completes`()
+
+    @Test
+    fun `a restarted server rejects the early data and the stream says so`() =
+        runner.`a restarted server rejects the early data and the stream says so`()
 }

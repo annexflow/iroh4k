@@ -57,6 +57,15 @@
 //! ended. Reading zero bytes at the end of a stream is **not** an error: it is `-1` in `i64_val` with
 //! no payload, which Kotlin reads as `null`.
 //!
+//! [`ERROR_ZERO_RTT_REJECTED`] is the one code in this file with its own `#[cfg(test)]` module —
+//! the first in this crate. A live rejection over a real connection cannot pin it deterministically
+//! (see `CommonConnectionTests.kt`'s note on the write assertion it deliberately does not make: the
+//! stream's 0-RTT-ness is decided by `noq` at the first poll of `open_bi`, and that races the
+//! connection's own background driver independently of anything Kotlin can sequence), so the four
+//! mappers are instead tested directly here, off a hand-built `ZeroRttRejected` value, with no
+//! connection involved at all. That pins one half — the mapper produces the constant — and
+//! `CommonSmokeTests` pins the other — the constant's ordinal decodes to this variant in Kotlin.
+//!
 //! ## Codec layout
 //!
 //! None. Every value here is either raw stream bytes or a scalar, so nothing needs the codec — the
@@ -81,8 +90,8 @@ use crate::connection::{
     with,
 };
 use crate::core::{
-    ERROR_CLOSED, ERROR_INVALID_ARGUMENT, ERROR_READ, ERROR_WRITE, Iroh4kResult, bytes_result,
-    error_result, handle_result, i64_result, ok_result, owned_bytes,
+    ERROR_CLOSED, ERROR_INVALID_ARGUMENT, ERROR_READ, ERROR_WRITE, ERROR_ZERO_RTT_REJECTED,
+    Iroh4kResult, bytes_result, error_result, handle_result, i64_result, ok_result, owned_bytes,
 };
 use crate::handle::{self, Tagged};
 use crate::ops::{self, OpResult};
@@ -143,20 +152,28 @@ const RECEIVE: &str = "receive";
 /// [`ERROR_CLOSED`] for a stream that has already been finished or reset, and for a connection that
 /// ended — in both cases there is nothing left to write *to*, which is a different fact from a write
 /// having gone wrong. [`ERROR_WRITE`] for the peer having stopped the stream, which carries its own
-/// application error code and is reported in the message.
+/// application error code and is reported in the message. [`ERROR_ZERO_RTT_REJECTED`] for a stream
+/// opened before a 0-RTT handshake completed, once the peer has refused that early data — see
+/// `connection.rs`'s `ZeroRttStatus` doc. That is a distinct fact from an ordinary write failure: the
+/// peer is there and reachable, it just could not decrypt what was sent before it vouched for its own
+/// identity, so the caller's answer is to resend on the now-established connection rather than give up.
 fn write_failure(error: &WriteError) -> *mut Iroh4kResult {
     let code = match error {
         WriteError::ClosedStream | WriteError::ConnectionLost(_) => ERROR_CLOSED,
+        WriteError::ZeroRttRejected => ERROR_ZERO_RTT_REJECTED,
         _ => ERROR_WRITE,
     };
     error_result(code, format!("could not write to the stream: {error}"))
 }
 
 /// Why a read failed. The mirror of [`write_failure`], with a reset by the peer as the read-side
-/// counterpart of a stop.
+/// counterpart of a stop and the same [`ERROR_ZERO_RTT_REJECTED`] carve-out for early data the peer
+/// refused. Reached from `ReadExactError` and `ReadToEndError` too — both wrap a [`ReadError`] and
+/// unwrap it back to this function rather than duplicating the match.
 fn read_failure(error: &ReadError) -> *mut Iroh4kResult {
     let code = match error {
         ReadError::ClosedStream | ReadError::ConnectionLost(_) => ERROR_CLOSED,
+        ReadError::ZeroRttRejected => ERROR_ZERO_RTT_REJECTED,
         _ => ERROR_READ,
     };
     error_result(code, format!("could not read from the stream: {error}"))
@@ -350,10 +367,16 @@ async fn send_stopped(slot: Option<StreamShared>) -> OpResult {
     }
 }
 
+/// Why waiting for the peer to stop the stream failed.
+///
+/// `StoppedError` has exactly these two variants upstream — no catch-all arm, so a third one added
+/// later fails this match at compile time instead of silently falling into the wrong code.
+/// [`ERROR_ZERO_RTT_REJECTED`] covers a stream opened before a 0-RTT handshake completed once the
+/// peer refuses that early data — see [`write_failure`]'s note on what the caller should do about it.
 fn stopped_failure(error: &StoppedError) -> *mut Iroh4kResult {
     let code = match error {
         StoppedError::ConnectionLost(_) => ERROR_CLOSED,
-        _ => ERROR_WRITE,
+        StoppedError::ZeroRttRejected => ERROR_ZERO_RTT_REJECTED,
     };
     error_result(
         code,
@@ -551,10 +574,13 @@ async fn recv_received_reset(slot: Option<StreamShared>) -> OpResult {
     }
 }
 
+/// Why waiting for the peer to reset the stream failed. The read-side mirror of
+/// [`stopped_failure`], including the exhaustive-match note: `ResetError` has exactly these two
+/// variants upstream, so there is no catch-all arm here either.
 fn reset_failure(error: &ResetError) -> *mut Iroh4kResult {
     let code = match error {
         ResetError::ConnectionLost(_) => ERROR_CLOSED,
-        _ => ERROR_READ,
+        ResetError::ZeroRttRejected => ERROR_ZERO_RTT_REJECTED,
     };
     error_result(
         code,
@@ -1240,5 +1266,52 @@ mod jni_facade {
     ) -> jlong {
         let slot = unsafe { share::<StreamSlot>(as_handle(handle)) };
         ops::spawn_channel(recv_received_reset(slot))
+    }
+}
+
+// ============================================================================
+// Tests
+//
+// See the module header's note by `ERROR_ZERO_RTT_REJECTED` for why this exists: the four
+// `ZeroRttRejected` arms cannot be pinned by a live connection deterministically, so they are
+// pinned here instead, calling each mapper directly with a hand-built error value.
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reads a result's error code and frees it, so a test cannot leak the allocation
+    /// `error_result` leaks by design — Kotlin ordinarily frees it through `free_result` once it
+    /// has read the fields it needs, and a test is the one caller on the Rust side that must do
+    /// the same rather than just dropping the pointer.
+    fn error_code_of(result: *mut Iroh4kResult) -> c_int {
+        let code = unsafe { (*result).error };
+        crate::core::free_result(result);
+        code
+    }
+
+    #[test]
+    fn write_failure_maps_zero_rtt_rejected() {
+        let result = write_failure(&WriteError::ZeroRttRejected);
+        assert_eq!(error_code_of(result), ERROR_ZERO_RTT_REJECTED);
+    }
+
+    #[test]
+    fn read_failure_maps_zero_rtt_rejected() {
+        let result = read_failure(&ReadError::ZeroRttRejected);
+        assert_eq!(error_code_of(result), ERROR_ZERO_RTT_REJECTED);
+    }
+
+    #[test]
+    fn stopped_failure_maps_zero_rtt_rejected() {
+        let result = stopped_failure(&StoppedError::ZeroRttRejected);
+        assert_eq!(error_code_of(result), ERROR_ZERO_RTT_REJECTED);
+    }
+
+    #[test]
+    fn reset_failure_maps_zero_rtt_rejected() {
+        let result = reset_failure(&ResetError::ZeroRttRejected);
+        assert_eq!(error_code_of(result), ERROR_ZERO_RTT_REJECTED);
     }
 }

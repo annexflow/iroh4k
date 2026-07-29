@@ -40,6 +40,8 @@ pub const ERROR_TICKET: c_int = 11;
 pub const ERROR_RELAY: c_int = 12;
 pub const ERROR_SERVICES: c_int = 13;
 pub const ERROR_DISCOVERY: c_int = 14;
+/// A stream that carried 0-RTT data, after the peer refused it. The data must be resent.
+pub const ERROR_ZERO_RTT_REJECTED: c_int = 15;
 
 // ============================================================================
 // C-ABI types
