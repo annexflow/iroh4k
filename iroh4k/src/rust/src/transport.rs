@@ -25,7 +25,7 @@
 //!       3  receiveWindow                     i64  a QUIC varint
 //!       4  sendWindow                        i64  a raw u64
 //!       5  sendFairness                      u8   bool
-//!       6  maxIdleTimeout                    i64  MILLISECONDS, not nanoseconds — see below
+//!       6  maxIdleTimeout                    i64  nanoseconds
 //!       7  keepAliveInterval                 i64  nanoseconds
 //!       8  initialRtt                        i64  nanoseconds
 //!       9  packetThreshold                   i32  narrowed to u32
@@ -70,19 +70,21 @@
 //! entry: this payload only ever travels from Kotlin to Rust inside one build, so a tag this
 //! build does not recognise is version skew *inside* the build, not a newer peer to tolerate.
 //!
-//! ## Why `maxIdleTimeout` is milliseconds and everything else is nanoseconds
+//! ## `maxIdleTimeout`
 //!
-//! Every other duration here becomes a plain `std::time::Duration` upstream, so nanosecond
-//! precision costs nothing and matches every other `Duration`-typed field in the binding.
-//! `maxIdleTimeout` is different: it becomes `Option<IdleTimeout>`, and `IdleTimeout` wraps a
-//! 62-bit QUIC varint counted in **milliseconds** — the one place in this configuration a value
-//! can be too large for the wire and must be refused rather than silently accepted. Nanoseconds
-//! would defeat that: dividing an 8-byte nanosecond count back down to milliseconds can never
-//! produce a value anywhere near the varint's 62-bit range (even `i64::MAX` nanoseconds is only
-//! on the order of `10^13` milliseconds, against a varint that holds up to roughly `4.6 * 10^18`
-//! milliseconds), so encoding this field as nanoseconds would make the overflow this module has
-//! to guard against unreachable from Kotlin. Milliseconds is also upstream's own unit, so nothing
-//! is lost by converting through it instead.
+//! Every duration here, `maxIdleTimeout` included, becomes an `i64` nanosecond count on the wire
+//! — see [`read_duration`]. Upstream's own type for it is not a plain `std::time::Duration`, though:
+//! it becomes `Option<IdleTimeout>`, and `IdleTimeout` wraps a 62-bit QUIC varint counted in
+//! milliseconds. `IdleTimeout::try_from(Duration)` does that nanoseconds-to-milliseconds
+//! conversion and bound check itself, so [`read_idle_timeout`] just hands it the same `Duration`
+//! every other field here becomes, and the conversion happens exactly once, on this side.
+//!
+//! Nothing a Kotlin caller can construct can trip that bound: an `i64` nanosecond count tops out
+//! at roughly 292 years, which in milliseconds is on the order of `10^13`, against a varint that
+//! holds up to roughly `4.6 * 10^18` milliseconds — about six orders of magnitude of margin. The
+//! bound check inside `IdleTimeout::try_from` is defence in depth, not a path this binding can
+//! actually reach; it stays because upstream's constructor returns a `Result` and this module
+//! never assumes a fallible conversion cannot fail.
 //!
 //! Every failure here is malformed caller input, reported as `ERROR_INVALID_ARGUMENT` by every
 //! caller of this module — there is no second code, because there is nothing here upstream itself
@@ -191,15 +193,15 @@ fn read_duration(r: &mut Reader, what: &str) -> Result<Duration, String> {
     Ok(Duration::from_nanos(nanos as u64))
 }
 
-/// Reads `TransportConfig.maxIdleTimeout`'s (Kotlin) `i64` **milliseconds** — see the
-/// module header for why this one field is not nanoseconds like every other duration here.
+/// Reads `TransportConfig.maxIdleTimeout`'s (Kotlin) `i64` nanoseconds, like every other duration
+/// in this module, then hands the resulting [`Duration`] to `IdleTimeout::try_from`, which does
+/// its own conversion to upstream's millisecond varint and checks its bound — see the module
+/// header for why nothing a Kotlin `Duration` can express can trip that check.
 fn read_idle_timeout(r: &mut Reader) -> Result<IdleTimeout, String> {
-    let millis = r.i64()?;
-    let unsigned = u64::try_from(millis)
-        .map_err(|_| format!("maxIdleTimeout must not be negative, got {millis} milliseconds"))?;
-    VarInt::from_u64(unsigned)
-        .map(IdleTimeout::from)
-        .map_err(|error| format!("maxIdleTimeout of {millis}ms does not fit on the wire: {error}"))
+    let duration = read_duration(r, "maxIdleTimeout")?;
+    IdleTimeout::try_from(duration).map_err(|error| {
+        format!("maxIdleTimeout of {duration:?} does not fit on the wire: {error}")
+    })
 }
 
 /// Reads an `i32` and narrows it to `u32`, rejecting a negative value.

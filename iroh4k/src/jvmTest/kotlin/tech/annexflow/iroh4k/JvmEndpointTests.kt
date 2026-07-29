@@ -159,6 +159,6 @@ class JvmEndpointTests {
         runner.`a transport value upstream ignores is passed through rather than refused`()
 
     @Test
-    fun `a transport duration too large for the wire is refused`() =
-        runner.`a transport duration too large for the wire is refused`()
+    fun `the largest transport duration a caller can express is accepted and a negative one is refused`() =
+        runner.`the largest transport duration a caller can express is accepted and a negative one is refused`()
 }

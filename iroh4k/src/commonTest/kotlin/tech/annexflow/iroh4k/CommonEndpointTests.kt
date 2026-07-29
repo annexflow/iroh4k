@@ -13,7 +13,7 @@ import assertk.assertions.isNotNull
 import assertk.assertions.isNull
 import assertk.assertions.isTrue
 import kotlin.test.assertFailsWith
-import kotlin.time.Duration.Companion.days
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.measureTime
 import kotlinx.coroutines.Dispatchers
@@ -966,22 +966,40 @@ class CommonEndpointTests {
         }
     }
 
-    fun `a transport duration too large for the wire is refused`() = runTest {
-        // `maxIdleTimeout` becomes a millisecond varint upstream (a 62-bit value), which tops out
-        // at roughly 146 million years — well below what a Kotlin `Duration` can express: its own
-        // ceiling, `Duration.INFINITE`, saturates every accessor at `Long.MAX_VALUE` instead of
-        // overflowing, and 60 billion days is already large enough to hit that ceiling. The
-        // conversion returns a `Result` and is treated as one.
-        val error = assertFailsWith<IrohError> {
+    fun `the largest transport duration a caller can express is accepted and a negative one is refused`() =
+        runTest {
+            // `maxIdleTimeout` crosses the wire as `i64` nanoseconds, like every other `Duration`
+            // field here. An `i64` nanosecond count tops out at roughly 292 years, which is about
+            // six orders of magnitude below upstream's 62-bit varint bound (`IdleTimeout` counts
+            // milliseconds, so 292 years is on the order of `10^13` against a bound of roughly
+            // `4.6 * 10^18`) — no `Duration` a caller can construct can overflow that bound, so
+            // the Rust range check inside `IdleTimeout::try_from` is defence in depth, not a path
+            // reachable from here. `Duration.INFINITE` is the largest value a caller can express —
+            // it saturates every accessor at `Long.MAX_VALUE` instead of overflowing — and it binds
+            // successfully, the honest counterpart to the overflow this module cannot actually hit.
             Endpoint.bind(
                 EndpointConfig(
                     preset = EndpointPreset.Minimal,
                     relayMode = RelayMode.Disabled,
                     bindAddrs = listOf(loopback),
-                    transportConfig = TransportConfig(maxIdleTimeout = 60_000_000_000L.days),
+                    transportConfig = TransportConfig(maxIdleTimeout = Duration.INFINITE),
                 )
-            )
+            ).use { endpoint ->
+                assertThat(endpoint.isClosed).isFalse()
+            }
+
+            // A negative duration is not a valid timeout regardless of the wire's own range, and
+            // nothing may reach upstream unvalidated.
+            val error = assertFailsWith<IrohError> {
+                Endpoint.bind(
+                    EndpointConfig(
+                        preset = EndpointPreset.Minimal,
+                        relayMode = RelayMode.Disabled,
+                        bindAddrs = listOf(loopback),
+                        transportConfig = TransportConfig(maxIdleTimeout = (-1).seconds),
+                    )
+                )
+            }
+            assertThat(error.code).isEqualTo(IrohError.Code.InvalidArgument)
         }
-        assertThat(error.code).isEqualTo(IrohError.Code.InvalidArgument)
-    }
 }

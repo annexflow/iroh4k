@@ -546,17 +546,13 @@ private const val PRESENT = 1
  * positional record would spend a presence byte on each of the twenty-seven they did not. It also
  * means a knob added later is a new tag rather than a change of layout.
  *
- * Every field but one writes the way its Kotlin type suggests: a `Long` as `i64`, an `Int` as
- * `i32`, a `Boolean` as a `u8` via [BinaryWriter.bool], a [Duration] as `i64` nanoseconds, and
+ * Every field writes the way its Kotlin type suggests: a `Long` as `i64`, an `Int` as `i32`, a
+ * `Boolean` as a `u8` via [BinaryWriter.bool], a [Duration] as `i64` nanoseconds — including
+ * [maxIdleTimeout][TransportConfig.maxIdleTimeout], which upstream turns into a `VarInt`-encoded
+ * `noq_proto::IdleTimeout` rather than a plain [Duration]-shaped field, but that conversion happens
+ * once, on the Rust side, from the same nanoseconds every other duration here carries — and
  * [timeThreshold][TransportConfig.timeThreshold] as `f64` even though upstream's own field is
- * `f32` — the codec has no narrower float. [maxIdleTimeout][TransportConfig.maxIdleTimeout] is
- * the one exception: it writes as `i64` **milliseconds**, not nanoseconds, because it is the only
- * field that crosses into a `VarInt`-encoded value upstream (`noq_proto::IdleTimeout`, a 62-bit
- * varint of milliseconds) rather than a plain [Duration]-shaped one. Nanoseconds would
- * defeat the point: a nanosecond count can never be large enough, once divided back down to
- * milliseconds, to exceed that varint's range — the wire could never refuse an oversized value,
- * only silently accept a wrong one. Milliseconds is also upstream's own unit, so nothing is lost
- * converting through it.
+ * `f32` — the codec has no narrower float.
  */
 internal fun BinaryWriter.writeTransportConfig(config: TransportConfig) {
     val entries = BinaryWriter()
@@ -573,8 +569,7 @@ internal fun BinaryWriter.writeTransportConfig(config: TransportConfig) {
     config.receiveWindow?.let { entry(TRANSPORT_TAG_RECEIVE_WINDOW) { i64(it) } }
     config.sendWindow?.let { entry(TRANSPORT_TAG_SEND_WINDOW) { i64(it) } }
     config.sendFairness?.let { entry(TRANSPORT_TAG_SEND_FAIRNESS) { bool(it) } }
-    // Milliseconds, not nanoseconds — see the KDoc above.
-    config.maxIdleTimeout?.let { entry(TRANSPORT_TAG_MAX_IDLE_TIMEOUT) { i64(it.inWholeMilliseconds) } }
+    config.maxIdleTimeout?.let { entry(TRANSPORT_TAG_MAX_IDLE_TIMEOUT) { i64(it.inWholeNanoseconds) } }
     config.keepAliveInterval?.let { entry(TRANSPORT_TAG_KEEP_ALIVE_INTERVAL) { i64(it.inWholeNanoseconds) } }
     config.initialRtt?.let { entry(TRANSPORT_TAG_INITIAL_RTT) { i64(it.inWholeNanoseconds) } }
     config.packetThreshold?.let { entry(TRANSPORT_TAG_PACKET_THRESHOLD) { i32(it) } }
