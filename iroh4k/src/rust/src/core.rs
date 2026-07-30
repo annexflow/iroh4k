@@ -43,12 +43,37 @@ pub const ERROR_DISCOVERY: c_int = 14;
 /// A stream that carried 0-RTT data, after the peer refused it. The data must be resent.
 pub const ERROR_ZERO_RTT_REJECTED: c_int = 15;
 
-// Kotlin pins `IrohError.Code.entries[15]` to `ZeroRttRejected` by ordinal (see
-// `CommonSmokeTests`'s "ordinal 15 decodes to ZeroRttRejected"); this pins the Rust side to the
-// same number. Together they turn a mid-list insertion above — one that renumbers this constant
-// off 15 without a matching edit to `IrohError.kt` — into a build failure here, instead of a
-// silent remap of every error the binding reports.
-const _: () = assert!(ERROR_ZERO_RTT_REJECTED == 15);
+// Kotlin decodes these by ordinal — `Code.of(code) = entries.getOrElse(code) { Unknown }` — so the
+// numbers above are a wire contract with `IrohError.kt`, not an implementation detail. Nothing in
+// either language fails to compile when they stop agreeing, and the only other thing that would
+// notice is a test asserting one specific code.
+//
+// So pin every one of them. A single assertion on the last constant catches an *insertion*, since
+// inserting anywhere shifts the tail — but it cannot catch two constants swapping values, which
+// leaves the length and the tail untouched while silently remapping both. Pinning the whole list
+// catches that too, and costs one line per code.
+//
+// The Kotlin half of the contract is `CommonSmokeTests`'s "ordinal 15 decodes to ZeroRttRejected".
+// Adding a code means appending here, appending to `IrohError.Code`, and adding a line below.
+const _: () = {
+    assert!(OK == -1);
+    assert!(ERROR_UNKNOWN == 0);
+    assert!(ERROR_CANCELLED == 1);
+    assert!(ERROR_INVALID_ARGUMENT == 2);
+    assert!(ERROR_BIND == 3);
+    assert!(ERROR_CONNECT == 4);
+    assert!(ERROR_ACCEPT == 5);
+    assert!(ERROR_READ == 6);
+    assert!(ERROR_WRITE == 7);
+    assert!(ERROR_CLOSED == 8);
+    assert!(ERROR_KEY == 9);
+    assert!(ERROR_ADDR == 10);
+    assert!(ERROR_TICKET == 11);
+    assert!(ERROR_RELAY == 12);
+    assert!(ERROR_SERVICES == 13);
+    assert!(ERROR_DISCOVERY == 14);
+    assert!(ERROR_ZERO_RTT_REJECTED == 15);
+};
 
 // ============================================================================
 // C-ABI types
