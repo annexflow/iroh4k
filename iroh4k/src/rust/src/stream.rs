@@ -632,9 +632,14 @@ fn recv_id(slot: &StreamSlot) -> *mut Iroh4kResult {
 
 /// Whether this stream was accepted while the handshake was still in progress.
 ///
-/// `noq` decides this once, at the moment the stream is created (`open_bi`/`open_uni` on the
-/// dialling side) or accepted (`accept_bi`/`accept_uni` on the accepting one), and `RecvStream`
-/// just remembers the bit — see `is_0rtt` on `noq-1.1.0`'s `RecvStream`/`UnorderedRecvStream`. A
+/// `noq` decides this once, at the moment the stream is created (`open_bi`/`open_uni`) or accepted
+/// (`accept_bi`/`accept_uni`), and `RecvStream` just remembers the bit — see `is_0rtt` on
+/// `noq-1.1.0`'s `RecvStream`/`UnorderedRecvStream`. The two creation paths are not symmetric.
+/// `poll_accept` (`noq-1.1.0/src/connection.rs:1098`) samples `state.inner.is_handshaking()` alone,
+/// regardless of which side — dialling or accepting — this connection is. `poll_open`
+/// (`noq-1.1.0/src/connection.rs:1031`) additionally requires `state.inner.side().is_client()`: a
+/// stream opened by the *accepting* side (`IncomingZeroRttConnection.openBi` in Kotlin, which is
+/// entirely legal) reports `false` unconditionally, whatever that side's own handshake state is. A
 /// `true` here is the caller's signal that whatever this stream carries arrived before the
 /// handshake vouched for the peer's identity, and is therefore replayable.
 fn recv_is_0rtt(slot: &StreamSlot) -> *mut Iroh4kResult {

@@ -92,7 +92,13 @@ give a value type a handle; it buys nothing and costs a free routine and a leak 
 - Consumed-once iroh types get `handle::Consumed` (synchronous: `Incoming`) or `connection.rs`'s
   `Once` (async, over a `tokio::sync::Mutex`: `Accepting`, `Connecting` — their `alpn` is `async`,
   and a `std::sync::MutexGuard` held across an `await` is not `Send`). A second use returns
-  `ERROR_CLOSED`. Never `expect("already consumed")`: see the panic rule.
+  `ERROR_CLOSED` — **except one caller.** `connecting_zero_rtt` takes a `Connecting` out of its
+  `Once` to try `into_0rtt()`, and on the no-ticket branch puts the same value back instead of
+  leaving the slot empty, so the *next* caller sees `Some` again rather than a permanently spent
+  attempt. `Once`'s own doc in `connection.rs` explains why that is still safe (`into_0rtt` is
+  synchronous, so a cancellation can never observe the slot empty) — read it before assuming every
+  `Once` behaves like `Consumed` on a second use. Never `expect("already consumed")`: see the panic
+  rule.
 - On the Kotlin side, `internal/NativeHandle.kt` is the **only** handle guard. One `AtomicLong`
   holds a closed bit in bit 63 and the in-flight caller count below it, so exactly one of `close()`
   and the final `release()` frees. A second copy of this would drift, and the failure mode is a
@@ -272,22 +278,29 @@ callback into application code on the back of that VM being available.
 
 ## Build and verification
 
-Gates, the standard four:
+Gates, the standard five:
 
 ```bash
 cargo fmt --manifest-path iroh4k/src/rust/Cargo.toml -- --check
 cargo clippy --manifest-path iroh4k/src/rust/Cargo.toml --release -- -D warnings
+cargo test --manifest-path iroh4k/src/rust/Cargo.toml
 ./gradlew :iroh4k:macosArm64Test
 ./gradlew :iroh4k:jvmTest
 ```
 
-A fifth for anything in `commonMain`, `commonTest` or `jniMain`, which Android shares verbatim:
+**Not `--release` on the test invocation** — `[profile.release]` sets `panic = "abort"`, which
+breaks the test harness, and clippy without `--all-targets` does not even typecheck a
+`#[cfg(test)] mod tests` the way `cargo test` does. This is what runs `stream.rs`'s unit tests, the
+substitute for the write-based `ZeroRttRejected` assertion the branch could not make — see its
+module header and `STATUS.md`.
+
+A sixth for anything in `commonMain`, `commonTest` or `jniMain`, which Android shares verbatim:
 
 ```bash
 ./gradlew :iroh4k:testAndroidHostTest -Ptargets=jvm,android
 ```
 
-It needs an Android SDK, so it is not in the standard four — but it is the only gate that runs the
+It needs an Android SDK, so it is not in the standard five — but it is the only gate that runs the
 shared bodies through the Android loader, and CI runs it on every change.
 
 Anything touching `src/androidMain`, `src/rust/src/android.rs` or the Android manifest also wants a

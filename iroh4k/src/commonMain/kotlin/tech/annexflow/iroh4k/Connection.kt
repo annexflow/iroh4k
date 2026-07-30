@@ -821,6 +821,14 @@ sealed interface ZeroRttStatus {
  * than an error. A non-null answer consumes the attempt: a later [Connecting.connect] raises
  * [IrohError] with [IrohError.Code.Closed]. [Connecting.remoteId] answers either way.
  *
+ * **A cancelled call can consume the attempt too, without ever handing back a non-null answer.** On
+ * the has-a-ticket branch, the `Connecting` is taken out of its slot before the resulting
+ * [OutgoingZeroRttConnection] handle is delivered back to Kotlin; if the coroutine calling this is
+ * cancelled while that delivery is in flight, the handle is freed unseen (see `ops.rs`'s module
+ * header for why that is not a leak) but the slot stays empty regardless — the attempt was already
+ * spent. A [Connecting.connect] made afterwards then answers `Closed` the same as it would after a
+ * normal non-null answer, even though the caller here only ever observed a cancellation.
+ *
  * The ticket cache lives in the [Endpoint] and dies with it, so 0-RTT is only ever available on a second
  * or later dial **from the same endpoint**.
  */

@@ -119,13 +119,18 @@ to `ZeroRttRejected` and a compile-time assertion in `core.rs` that the constant
 than by a write that reliably fails. The rejection itself is still proven end to end, exactly as
 described above; only the specific error code on a specific stream write is not.
 
-**`is0Rtt() == true` is asserted nowhere.** `RecvStream.is0Rtt()` reports whether a received stream
-carried early data, and `poll_accept` upstream samples the handshake state at the moment a stream is
+**`is0Rtt() == true` is asserted nowhere, and not for one reason but two — one per side.** On the
+accepting side, `poll_accept` upstream samples the handshake state at the moment a stream is
 *accepted*, not when it was *created*. A loopback server accepts fast enough that the handshake has
 routinely already settled by then, so `is0Rtt()` legitimately answers `false` even for a stream the
-client opened before the handshake completed. Only that negative is deterministic enough to assert;
-the suite does, and stops there rather than asserting a `true` that would be racing the same clock the
-comment above describes.
+client opened before the handshake completed. On the dialling side the flag is asserted for a
+different reason entirely: `noq`'s `poll_open` *does* set it, but capturing that from Kotlin needs a
+stream opened before `awaitHandshake()` settles, and this binding dispatches `zeroRtt`, `openBi` and
+`awaitHandshake` as three independently scheduled tokio tasks — the same race that defeated the
+refused-write assertion two paragraphs above, for the identical reason: nothing issued from Kotlin
+after the fact can close the window between them. Only the accepting side's negative is deterministic
+enough to assert; the suite does, and stops there rather than asserting a `true` that would be racing
+one clock or the other depending on which side wrote the stream.
 
 **`EndpointConfig.maxTlsTickets` is covered for its value type, its encoding, that an endpoint binds
 with it set, and — this once said something false — for what `0` actually does.** Absent by

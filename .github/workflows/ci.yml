@@ -253,3 +253,7 @@ jobs:
         run: cargo fmt --manifest-path iroh4k/src/rust/Cargo.toml -- --check
       - name: Clippy
         run: cargo clippy --manifest-path iroh4k/src/rust/Cargo.toml --release -- -D warnings
+      # Not --release: `[profile.release]` sets `panic = "abort"`, which breaks the test harness
+      # (a failing assertion has to unwind to be caught and reported).
+      - name: Rust unit tests
+        run: cargo test --manifest-path iroh4k/src/rust/Cargo.toml

@@ -288,7 +288,7 @@ as is. Without `android` in `-Ptargets`, the Android Gradle plugin is never appl
 
 Version `0.1.0`, the first release, targeting **iroh 1.0.3**. Dual licensed Apache-2.0 or MIT.
 
-**Binary compatible with source, not with bytecode.** `Stream.kt`'s four extension functions —
+**Source-compatible, not binary-compatible.** `Stream.kt`'s four extension functions —
 `openBi`, `acceptBi`, `openUni`, `acceptUni` — took `Connection` as their receiver; they now take
 `QuicConnection`, the supertype `Connection` and the two 0-RTT connection types share. A caller that
 recompiles keeps working unchanged, because `Connection` still *is* a `QuicConnection` — but a `.jar`

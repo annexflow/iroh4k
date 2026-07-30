@@ -291,9 +291,16 @@ class RecvStream internal constructor(private val guard: NativeHandle) : AutoClo
      * for the same hazard on the connection as a whole.
      *
      * The flag is decided once and only ever read back afterwards — for a stream from
-     * [Connection.acceptBi]/[Connection.acceptUni], at the moment this side *accepted* it; for one
-     * from [Connection.openBi], at the moment this side *opened* it. Either way `noq` samples whether
-     * the handshake was still running right then, not when the stream was first created on the wire.
+     * [QuicConnection.acceptBi]/[QuicConnection.acceptUni], at the moment this side *accepted* it; for one
+     * from [QuicConnection.openBi], at the moment this side *opened* it. The two cases are not
+     * symmetric. On accept, `noq` samples whether *this side's own* handshake was still running right
+     * then, regardless of which side — dialling or accepting — this connection is. On open, `noq`
+     * additionally requires this side to be the **dialling** side: opening a stream while accepting a
+     * connection reports `false` unconditionally, however far along that side's own handshake is,
+     * because [IncomingZeroRttConnection.openBi] is a legal thing to do and upstream only tracks early
+     * data for the client's own writes. Either way, the sample is taken when the stream was created or
+     * accepted, not when it was first observed on the wire.
+     *
      * For the accepting case in particular that timing means **`false` does not prove the data was not
      * sent early**: the peer can write to a stream before its own handshake completes, and if this side
      * does not get around to accepting it until after its own handshake has settled, this reports
@@ -402,7 +409,7 @@ internal object Streams {
  * appear at the peer's [acceptBi]; write something, even one byte.
  *
  * Suspends only while the connection is at its bidirectional stream limit and the peer has not yet
- * allowed more; see [Connection.setMaxConcurrentBiStreams] for the other side of that.
+ * allowed more; see [QuicConnection.setMaxConcurrentBiStreams] for the other side of that.
  *
  * @throws IrohError with [IrohError.Code.Closed] if the connection has ended or its handle has been
  *   released.

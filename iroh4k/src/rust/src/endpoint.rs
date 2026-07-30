@@ -396,14 +396,17 @@ fn read_bind_config(payload: &[u8]) -> Outcome<BindConfig> {
 /// An optional scalar (`u8` presence byte, then `i64`) rather than a sentinel: a value of `-1`
 /// is a legal cache size to *write* on the wire's own terms (it is just an `i64`), so folding
 /// "absent" into it would make a genuine `-1` indistinguishable from "not set" and this function
-/// could never observe the negative value it is supposed to reject. `usize::try_from` rejects both
-/// a negative `i64` and, on a 32-bit target, one too large to fit — either is the caller's mistake
-/// to hear about as [`ERROR_INVALID_ARGUMENT`] rather than something to silently wrap or truncate.
+/// could never observe the negative value it is supposed to reject. The `i64` itself is read under
+/// [`ERROR_BIND`], same as the presence byte before it — a truncated payload is a malformed
+/// message, not a bad argument value, and the two must not depend on exactly where the truncation
+/// happened to fall. `usize::try_from` rejects both a negative `i64` and, on a 32-bit target, one
+/// too large to fit — that is the genuine bad-value case, and the only one reported as
+/// [`ERROR_INVALID_ARGUMENT`] rather than something to silently wrap or truncate.
 fn read_max_tls_tickets(r: &mut Reader) -> Outcome<Option<usize>> {
     match under(ERROR_BIND, r.u8())? {
         ABSENT => Ok(None),
         PRESENT => {
-            let value = under(ERROR_INVALID_ARGUMENT, r.i64())?;
+            let value = under(ERROR_BIND, r.i64())?;
             let n = usize::try_from(value).map_err(|_| Failure {
                 code: ERROR_INVALID_ARGUMENT,
                 message: format!(

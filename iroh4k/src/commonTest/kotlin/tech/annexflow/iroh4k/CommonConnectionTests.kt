@@ -12,6 +12,7 @@ import kotlin.test.assertFailsWith
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.measureTime
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -1148,10 +1149,10 @@ class CommonConnectionTests {
                                 // The handle behind `early` is still open here — this proves the
                                 // absent-preserving `remoteId()` reader (shared with the dialling
                                 // side's `nativeZeroRttRemoteId`) can answer a *present* value once
-                                // the handshake has actually settled, not only ever `null`. Task 3's
-                                // equivalent assertion on the dialling side could not make this claim:
-                                // there, the answer was still racing the certificate's arrival at the
-                                // equivalent point.
+                                // the handshake has actually settled, not only ever `null`. The
+                                // equivalent assertion on the dialling side, above, could not make
+                                // this claim: there, the answer was still racing the certificate's
+                                // arrival at the equivalent point.
                                 assertThat(early.remoteId()).isEqualTo(client.id)
                                 received to completed.remoteId()
                             }
@@ -1299,6 +1300,25 @@ class CommonConnectionTests {
                     val abandoned = async { early.awaitHandshake() }
                     abandoned.cancelAndJoin()
 
+                    // `cancelAndJoin` on an already-completed `Deferred` is a no-op: if the real
+                    // handshake happened to settle before the cancel reached it, `abandoned` is
+                    // completed rather than cancelled, and — silently ignored — its result would
+                    // leak the `Connection` handle it carries, since `NativeHandle` has no
+                    // finalizer. `await()` after `cancelAndJoin()` answers immediately either way,
+                    // without re-running the coroutine: it rethrows on the cancelled branch this
+                    // test is named for, or returns the already-settled result on the other one —
+                    // so this closes that handle before requiring the cancelled branch to be what
+                    // actually happened, rather than merely hoping it was.
+                    try {
+                        abandoned.await().connection.close()
+                        error(
+                            "expected the awaitHandshake() coroutine to have been cancelled, not " +
+                                "completed — the race this test relies on did not go the usual way",
+                        )
+                    } catch (_: CancellationException) {
+                        // Expected: the cancel really landed before the handshake settled.
+                    }
+
                     // The future behind it is shared, so a second await simply works — and mints
                     // its own fresh `Connection` handle, which is why the two are closed
                     // separately rather than being the same object reused.
@@ -1415,10 +1435,12 @@ class CommonConnectionTests {
                     }
                 } while (zero == null)
 
-                // Both handles must be closed: the 0-RTT one holds a clone of the same connection
-                // — upstream's `Shared` future caches its own output, which contains that
-                // `Connection` — so releasing only the `Connection` would leave it open and this
-                // counter above its baseline forever.
+                // Both handles must be closed: `zero` and the `Connection` `awaitHandshake()` mints
+                // are two separate handles over related but distinct native objects, so releasing
+                // only the `Connection` leaves `zero`'s own handle unfreed. `connectionHandles`
+                // counts iroh4k handles, not live QUIC connections, so this is what the assertion
+                // below actually catches — a missing `close()` on `zero` — regardless of whatever
+                // state the underlying QUIC connection itself ends up in.
                 zero.awaitHandshake().connection.close()
                 zero.close()
                 accepted.await().close()

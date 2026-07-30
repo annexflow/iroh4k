@@ -343,13 +343,15 @@ type ConnectingHandle = Tracked<ConnectingSlot>;
 type ConnectionHandle = Tracked<Connection>;
 /// The client side of a connection still exchanging 0-RTT data.
 ///
-/// Upstream's `Connection<OutgoingZeroRtt>`, produced by `Connecting::into_0rtt` (Task 3). Nothing in
-/// this task creates one — see [`AnyConnection`] for why the type exists here regardless.
+/// Upstream's `Connection<OutgoingZeroRtt>`, produced by `Connecting::into_0rtt` — see
+/// `connecting_zero_rtt` below for the one place that creates one, and [`AnyConnection`] for why
+/// the type exists here regardless.
 type OutgoingZeroRttHandle = Tracked<OutgoingZeroRttConnection>;
 /// The server side of a connection still exchanging 0-RTT data.
 ///
-/// Upstream's `Connection<IncomingZeroRtt>`, produced by `Incoming::into_0rtt` (Task 4). Nothing in
-/// this task creates one — see [`AnyConnection`] for why the type exists here regardless.
+/// Upstream's `Connection<IncomingZeroRtt>`, produced by `Accepting::into_0rtt`
+/// (`iroh-1.0.3/src/endpoint/connection.rs:620`) — see `accepting_zero_rtt` below for the one place
+/// that creates one, and [`AnyConnection`] for why the type exists here regardless.
 type IncomingZeroRttHandle = Tracked<IncomingZeroRttConnection>;
 
 type AcceptingShared = Arc<Tagged<AcceptingHandle>>;
@@ -440,8 +442,9 @@ pub(crate) unsafe fn connection_clone(handle: *mut c_void) -> Option<Connection>
 /// inside the spawned block. [`connection_clone`] is this function specialised to `Connection` and
 /// kept as its own name: most call sites want that one concrete type, and its own doc explains which
 /// of them must stay on the strict form rather than going through [`connection_clone_any`]. The
-/// 0-RTT handshake awaits — dialling-side here, the server-side accept in a later task — peek
-/// `OutgoingZeroRttConnection` and `IncomingZeroRttConnection` straight through this function instead.
+/// 0-RTT handshake awaits — both the dialling side and the accepting side — peek
+/// `OutgoingZeroRttConnection` and `IncomingZeroRttConnection` straight through this function
+/// instead.
 ///
 /// # Safety
 /// As [`peek`], for a handle of type `T`.
@@ -1088,10 +1091,10 @@ async fn connecting_zero_rtt(slot: Option<ConnectingShared>) -> OpResult {
 ///
 /// Infallible upstream (`iroh-1.0.3/src/endpoint/connection.rs:620`), so unlike [`connecting_zero_rtt`]
 /// there is nothing to put back: the value is taken and never returned to the slot. That asymmetry with
-/// the dialling side is not an oversight here, it is the whole reason this task exists separately —
-/// iroh accepts 0-RTT at the TLS layer on every endpoint (`max_early_data_size` is hardcoded,
-/// `iroh-1.0.3/src/tls.rs:118`), so an accepted handshake can always be converted; only a *dial* can
-/// lack a session ticket to convert with.
+/// the dialling side is not an oversight — it is the whole reason this is its own function rather than
+/// a shared one parameterised over both sides: iroh accepts 0-RTT at the TLS layer on every endpoint
+/// (`max_early_data_size` is hardcoded, `iroh-1.0.3/src/tls.rs:118`), so an accepted handshake can
+/// always be converted; only a *dial* can lack a session ticket to convert with.
 ///
 /// Note that upstream's infallibility rests on an internal
 /// `.expect("incoming connections can always be converted to 0-RTT")` (:624). Under this crate's
@@ -1480,8 +1483,9 @@ async fn connection_read_datagram(connection: Option<AnyConnection>) -> OpResult
 /// The one-shot form of `start_connect` + `Connecting::connect`, and iroh's own `Endpoint::connect`
 /// is exactly that: it calls `connect_with_opts` with default options and awaits the `Connecting`.
 /// Both are kept because they answer different questions — this one for "give me a connection", the
-/// two-step one for "let me look at the handshake before I commit to it" (`Connecting::alpn`, and
-/// the 0-RTT and custom-options surface a later milestone will add there rather than here).
+/// two-step one for "let me look at the handshake before I commit to it" (`Connecting::alpn`, the
+/// 0-RTT surface — see `connecting_zero_rtt` — and the per-connection transport configuration
+/// `start_connect` above takes; none of those three has anywhere to attach on the one-shot form).
 async fn connect(endpoint: Option<Endpoint>, addr: Vec<u8>, alpn: Vec<u8>) -> OpResult {
     let Some(endpoint) = endpoint else {
         return OpResult::new(released());

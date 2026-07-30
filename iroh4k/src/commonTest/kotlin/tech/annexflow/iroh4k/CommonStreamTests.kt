@@ -324,8 +324,18 @@ class CommonStreamTests {
             client.openBi().use { outbound ->
                 outbound.send.writeAll("x".encodeToByteArray())
                 opened.await().use { inbound ->
+                    // Read before asserting, and check `bytesRead()` too: `is0Rtt()` and `bytesRead()`
+                    // are two different Rust exports (`recv_is_0rtt`/`recv_bytes_read`), both booleans
+                    // in spirit at this specific point — a fresh stream reads `false`/`0` on either —
+                    // so an `is0Rtt()` accidentally wired to `recvBytesRead` would still pass the
+                    // assertion below without this. Reading one byte first and pinning `bytesRead()`
+                    // at `1` closes that: the two exports diverge from here on, so a mismatch would
+                    // fail loudly.
+                    assertRead(inbound.recv.read(chunk), "x".encodeToByteArray())
+                    assertThat(inbound.recv.bytesRead()).isEqualTo(1L)
+
                     // Only the negative is deterministic here. `poll_accept` samples `is_handshaking()`
-                    // at the moment the stream is accepted (noq-1.1.0/src/connection.rs:1094), not when
+                    // at the moment the stream is accepted (noq-1.1.0/src/connection.rs:1098), not when
                     // it was created, so a loopback server that accepts after the handshake completed
                     // sees `false` even for data the client sent early. Asserting `true` would be a race.
                     assertThat(inbound.recv.is0Rtt()).isFalse()
