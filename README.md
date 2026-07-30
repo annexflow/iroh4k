@@ -95,6 +95,7 @@ leaves the peer to work it out from a timeout.
 | **Connections** | The full accept path (`Incoming` → `Accepting` → `Connection`), stats, paths, RTT, MTU |
 | **Streams** | Bidirectional and unidirectional, priorities, resets, `stopped()`, `readToEnd` |
 | **Datagrams** | `sendDatagram`, `sendDatagramWait`, `readDatagram` |
+| **0-RTT** | `Connecting.zeroRtt()` and `Accepting.zeroRtt()` — first-flight data on a repeat dial, for idempotent work only |
 | **Router** | ALPN-routed protocol handlers, in fifty lines of Kotlin over `acceptNext()` |
 | **Watchers** | `watchAddr`, `watchHomeRelay`, `watchPaths`, `watchPathEvents` — real cold `Flow`s |
 | **Addressing** | `EndpointAddr` as a faithful set of transports, tickets, z32, sign and verify |
@@ -119,6 +120,59 @@ so an `EndpointId` alone is enough over the internet.
 at your servers instead. A non-empty list replaces the preset's services rather than joining them.
 `EndpointConfig.mdns` adds discovery over the local link, which is the offline-LAN answer — see
 [Android](#android) for the one permission it needs there.
+
+## Sending data in the first flight
+
+A handshake costs a round trip before your bytes can leave. 0-RTT spends the ticket from an earlier
+conversation to skip it: your request goes out in the same flight as the handshake, and on a link
+where the peer is 80 ms away, that is 80 ms you do not wait.
+
+It only applies on a **repeat dial from the same `Endpoint`**. The TLS ticket that makes resumption
+possible is cached in memory inside the endpoint and dies with it, so the first dial to a peer never
+has one, and neither does a fresh endpoint dialling a peer the old one knew.
+
+```kotlin
+val connecting = endpoint.startConnect(addr, alpn)
+val early = connecting.zeroRtt()
+
+if (early == null) {
+    // No ticket for this peer. Not an error — the attempt is untouched and completes normally.
+    connecting.connect().use { /* … */ }
+} else {
+    connecting.close()
+    early.use { zero ->
+        // Sending early data *is* opening a stream. These bytes travel with the handshake.
+        zero.openBi().use { stream -> stream.send.writeAll(request) }
+
+        when (val status = zero.awaitHandshake()) {
+            is ZeroRttStatus.Accepted -> status.connection.use { /* the early stream stands */ }
+            is ZeroRttStatus.Rejected -> status.connection.use { conn ->
+                // The peer refused the early data — it had lost the resumption state, most likely
+                // by restarting. The early streams are dead; resend on this connection.
+            }
+        }
+    }
+}
+```
+
+**Early data can be replayed, so only idempotent work belongs in it.** An attacker who captures the
+first flight can send it again, and the peer has no way to tell the copy from the original — the
+handshake that would have proved otherwise has not happened yet. Fetching a value is fine. Charging
+a card is not. This is a property of 0-RTT itself, not of this binding, and there is no setting that
+makes it safe.
+
+**Rejection is normal and you must handle it.** A server may refuse early data at its discretion, and
+will refuse it whenever it has lost the resumption state. `Rejected` still carries a working
+connection — what died is the streams you opened before the handshake, so the answer is to resend,
+not to give up.
+
+On the accepting side, `Accepting.zeroRtt()` lets a server read early data before its handshake
+completes, and `RecvStream.is0Rtt()` says whether a stream it accepted arrived that way. The same
+replay caveat applies, plus one of its own: anything the server sends back before the handshake
+finishes goes out before the client has been authenticated.
+
+`EndpointConfig.maxTlsTickets` sizes the ticket cache. Note that `0` does **not** turn 0-RTT off —
+see [`STATUS.md`](STATUS.md) for what was measured — so if you want no early data, do not send any.
 
 ## How this relates to iroh-ffi
 
