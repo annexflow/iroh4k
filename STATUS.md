@@ -3,10 +3,10 @@
 The long version of what iroh4k is and is not proven to do. [`README.md`](README.md) carries a
 summary; this file carries the evidence.
 
-Version `0.1.0`, targeting **iroh 1.0.3**. Published as `tech.annexflow.iroh4k:iroh4k` from a `v*`
+Version `0.2.0`, targeting **iroh 1.0.3**. Published as `tech.annexflow.iroh4k:iroh4k` from a `v*`
 tag by [`.github/workflows/release.yml`](.github/workflows/release.yml), dual licensed Apache-2.0 or
 MIT — the same terms as iroh itself, so a consumer picks up nothing stricter than upstream. The
-version string reports both halves: `Iroh4k.version` is `"0.1.0+iroh1.0.3"`.
+version string reports both halves: `Iroh4k.version` is `"0.2.0+iroh1.0.3"`.
 
 ## What runs where
 

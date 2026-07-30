@@ -214,10 +214,11 @@ jobs:
       # The version is passed so the check can confirm that what Gradle actually wrote to disk is
       # the version being released. check-release-version.sh compares the tag to Cargo.toml; nothing
       # else compares the tag to the staged output, and the gap is not theoretical — if
-      # -Piroh4kVersion ever stopped reaching the module the version would stay 0.1.0-SNAPSHOT,
-      # publishAndReleaseToMavenCentral would route it to the snapshot repository, release nothing
-      # at the Portal and exit 0, and the tag would report a successful release of nothing. On the
-      # dispatch path the argument is empty, which the script treats as "no version to assert".
+      # -Piroh4kVersion ever stopped reaching the module the version would stay at
+      # build.gradle.kts's -SNAPSHOT default, publishAndReleaseToMavenCentral would route it to the
+      # snapshot repository, release nothing at the Portal and exit 0, and the tag would report a
+      # successful release of nothing. On the dispatch path the argument is empty, which the script
+      # treats as "no version to assert".
       - name: Stage the release
         run: |
           ./gradlew :iroh4k:publishAllPublicationsToLocalStagingRepository \
