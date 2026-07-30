@@ -12,7 +12,7 @@ iroh4k puts that behind `suspend` functions, `Flow`s and `AutoCloseable` handles
 iOS, macOS, Linux and Windows.
 
 ```kotlin
-implementation("tech.annexflow.iroh4k:iroh4k:0.1.0")
+implementation("tech.annexflow.iroh4k:iroh4k:0.2.0")
 ```
 
 **If your app is JVM-only, look at [iroh-ffi](https://github.com/n0-computer/iroh-ffi) first.** It is
@@ -340,14 +340,14 @@ as is. Without `android` in `-Ptargets`, the Android Gradle plugin is never appl
 
 ## Status
 
-Version `0.1.0`, the first release, targeting **iroh 1.0.3**. Dual licensed Apache-2.0 or MIT.
+Version `0.2.0`, targeting **iroh 1.0.3**. Dual licensed Apache-2.0 or MIT.
 
-**Source-compatible, not binary-compatible.** `Stream.kt`'s four extension functions —
+**Source-compatible with `0.1.0`, not binary-compatible.** `Stream.kt`'s four extension functions —
 `openBi`, `acceptBi`, `openUni`, `acceptUni` — took `Connection` as their receiver; they now take
 `QuicConnection`, the supertype `Connection` and the two 0-RTT connection types share. A caller that
 recompiles keeps working unchanged, because `Connection` still *is* a `QuicConnection` — but a `.jar`
-or `.klib` built against an earlier `0.1.0` snapshot has the old receiver type baked into its call
-sites, and will not link against this one without recompiling.
+or `.klib` built against `0.1.0` has the old receiver type baked into its call sites, and will not
+link against `0.2.0` without recompiling.
 
 The transport itself — endpoints, connections, streams, datagrams, the router — is covered by the
 test suite on every change. Five things around it are in different states, and the difference is

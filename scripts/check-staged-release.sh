@@ -14,7 +14,7 @@
 #     secret would otherwise produce a green staging step and die at the Portal, after the upload.
 #  4. The staged version must be the version being released, when the caller says what that is.
 #     `-Piroh4kVersion` reaching the module is assumed everywhere and checked nowhere: if it ever
-#     stopped arriving the version would stay at the 0.1.0-SNAPSHOT default,
+#     stopped arriving the version would stay at build.gradle.kts's -SNAPSHOT default,
 #     publishAndReleaseToMavenCentral would route it to the snapshot repository, perform no Portal
 #     release, and exit 0 — a tag reporting a successful release of nothing.
 #
