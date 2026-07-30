@@ -171,4 +171,16 @@ class NativeEndpointTests {
     @Test
     fun `every transport configuration tag round-trips through the codec`() =
         runner.`every transport configuration tag round-trips through the codec`()
+
+    @Test
+    fun `max tls tickets is absent by default`() =
+        runner.`max tls tickets is absent by default`()
+
+    @Test
+    fun `an endpoint binds with a ticket cache size of zero`() =
+        runner.`an endpoint binds with a ticket cache size of zero`()
+
+    @Test
+    fun `a negative ticket cache size is refused`() =
+        runner.`a negative ticket cache size is refused`()
 }

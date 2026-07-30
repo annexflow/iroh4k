@@ -150,6 +150,17 @@ class CommonSmokeTests {
         assertThat(Iroh4k.smokeSleep(50)).isEqualTo(50L)
     }
 
+    fun `ordinal 15 decodes to ZeroRttRejected`() {
+        // `IrohError.Code` is decoded by ORDINAL against `core.rs`'s `ERROR_*` constants — the wire
+        // contract the whole binding rests on (`Code.of(code) = entries.getOrElse(code) { Unknown }`).
+        // Inserting a new entry anywhere but the end silently remaps every error already in the
+        // binding, and nothing fails to compile when that happens: this is the one thing that would
+        // notice. `stream.rs`'s own mapper tests pin that the four `ZeroRttRejected` arms produce
+        // `ERROR_ZERO_RTT_REJECTED` (15); this pins the other half, that 15 decodes back to this
+        // variant on the Kotlin side.
+        assertThat(IrohError.Code.entries[15]).isEqualTo(IrohError.Code.ZeroRttRejected)
+    }
+
     /** Delays on a real clock, since `runTest` would otherwise skip the delay entirely. */
     private suspend fun realDelay(millis: Long) {
         withContext(Dispatchers.Default) { delay(millis) }

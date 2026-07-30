@@ -57,6 +57,15 @@
 //! ended. Reading zero bytes at the end of a stream is **not** an error: it is `-1` in `i64_val` with
 //! no payload, which Kotlin reads as `null`.
 //!
+//! [`ERROR_ZERO_RTT_REJECTED`] is the one code in this file with its own `#[cfg(test)]` module —
+//! the first in this crate. A live rejection over a real connection cannot pin it deterministically
+//! (see `CommonConnectionTests.kt`'s note on the write assertion it deliberately does not make: the
+//! stream's 0-RTT-ness is decided by `noq` at the first poll of `open_bi`, and that races the
+//! connection's own background driver independently of anything Kotlin can sequence), so the four
+//! mappers are instead tested directly here, off a hand-built `ZeroRttRejected` value, with no
+//! connection involved at all. That pins one half — the mapper produces the constant — and
+//! `CommonSmokeTests` pins the other — the constant's ordinal decodes to this variant in Kotlin.
+//!
 //! ## Codec layout
 //!
 //! None. Every value here is either raw stream bytes or a scalar, so nothing needs the codec — the
@@ -71,17 +80,18 @@ use std::{
 };
 
 use iroh::endpoint::{
-    Connection, ConnectionError, ReadError, ReadExactError, ReadToEndError, RecvStream, ResetError,
-    SendStream, StoppedError, VarInt, WriteError,
+    ConnectionError, ReadError, ReadExactError, ReadToEndError, RecvStream, ResetError, SendStream,
+    StoppedError, VarInt, WriteError,
 };
 use tokio::sync::Mutex;
 
 use crate::connection::{
-    Completion, Tracked, connection_clone, in_runtime, released, share, varint, with,
+    AnyConnection, Completion, Tracked, connection_clone_any, in_runtime, released, share, varint,
+    with,
 };
 use crate::core::{
-    ERROR_CLOSED, ERROR_INVALID_ARGUMENT, ERROR_READ, ERROR_WRITE, Iroh4kResult, bytes_result,
-    error_result, handle_result, i64_result, ok_result, owned_bytes,
+    ERROR_CLOSED, ERROR_INVALID_ARGUMENT, ERROR_READ, ERROR_WRITE, ERROR_ZERO_RTT_REJECTED,
+    Iroh4kResult, bytes_result, error_result, handle_result, i64_result, ok_result, owned_bytes,
 };
 use crate::handle::{self, Tagged};
 use crate::ops::{self, OpResult};
@@ -142,20 +152,28 @@ const RECEIVE: &str = "receive";
 /// [`ERROR_CLOSED`] for a stream that has already been finished or reset, and for a connection that
 /// ended — in both cases there is nothing left to write *to*, which is a different fact from a write
 /// having gone wrong. [`ERROR_WRITE`] for the peer having stopped the stream, which carries its own
-/// application error code and is reported in the message.
+/// application error code and is reported in the message. [`ERROR_ZERO_RTT_REJECTED`] for a stream
+/// opened before a 0-RTT handshake completed, once the peer has refused that early data — see
+/// `connection.rs`'s `ZeroRttStatus` doc. That is a distinct fact from an ordinary write failure: the
+/// peer is there and reachable, it just could not decrypt what was sent before it vouched for its own
+/// identity, so the caller's answer is to resend on the now-established connection rather than give up.
 fn write_failure(error: &WriteError) -> *mut Iroh4kResult {
     let code = match error {
         WriteError::ClosedStream | WriteError::ConnectionLost(_) => ERROR_CLOSED,
+        WriteError::ZeroRttRejected => ERROR_ZERO_RTT_REJECTED,
         _ => ERROR_WRITE,
     };
     error_result(code, format!("could not write to the stream: {error}"))
 }
 
 /// Why a read failed. The mirror of [`write_failure`], with a reset by the peer as the read-side
-/// counterpart of a stop.
+/// counterpart of a stop and the same [`ERROR_ZERO_RTT_REJECTED`] carve-out for early data the peer
+/// refused. Reached from `ReadExactError` and `ReadToEndError` too — both wrap a [`ReadError`] and
+/// unwrap it back to this function rather than duplicating the match.
 fn read_failure(error: &ReadError) -> *mut Iroh4kResult {
     let code = match error {
         ReadError::ClosedStream | ReadError::ConnectionLost(_) => ERROR_CLOSED,
+        ReadError::ZeroRttRejected => ERROR_ZERO_RTT_REJECTED,
         _ => ERROR_READ,
     };
     error_result(code, format!("could not read from the stream: {error}"))
@@ -204,8 +222,11 @@ fn optional_code(value: Option<VarInt>) -> *mut Iroh4kResult {
 // ============================================================================
 // Shared logic — opening and accepting
 //
-// All four borrow the connection to build their future, so all four take an owned `Connection` and
-// create the borrow inside the spawned block — the idiom `connection.rs` documents.
+// All four borrow the connection to build their future, so all four take an owned `AnyConnection`
+// and create the borrow inside the spawned block — the idiom `connection.rs` documents. Resolved
+// through `connection_clone_any` rather than the strict `connection_clone`: opening and accepting
+// streams is on `impl<T: ConnectionState>` upstream, so a 0-RTT handle answers these too — the whole
+// point of this domain running through the three-way probe at all.
 // ============================================================================
 
 /// Turns a stream-open outcome into a result carrying a handle.
@@ -232,7 +253,7 @@ fn opened(outcome: Result<StreamHandle, ConnectionError>, what: &str) -> OpResul
 ///
 /// Returns as soon as QUIC has an id for it — no round trip is involved, and the peer sees nothing
 /// until data is written, which is why an unwritten stream never reaches its `accept_bi`.
-async fn open_bi(connection: Option<Connection>) -> OpResult {
+async fn open_bi(connection: Option<AnyConnection>) -> OpResult {
     let Some(connection) = connection else {
         return OpResult::new(released());
     };
@@ -246,7 +267,7 @@ async fn open_bi(connection: Option<Connection>) -> OpResult {
 }
 
 /// Awaits the peer's next bidirectional stream. Waits indefinitely by design.
-async fn accept_bi(connection: Option<Connection>) -> OpResult {
+async fn accept_bi(connection: Option<AnyConnection>) -> OpResult {
     let Some(connection) = connection else {
         return OpResult::new(released());
     };
@@ -260,7 +281,7 @@ async fn accept_bi(connection: Option<Connection>) -> OpResult {
 }
 
 /// Opens a unidirectional stream: a send half and no receive half.
-async fn open_uni(connection: Option<Connection>) -> OpResult {
+async fn open_uni(connection: Option<AnyConnection>) -> OpResult {
     let Some(connection) = connection else {
         return OpResult::new(released());
     };
@@ -274,7 +295,7 @@ async fn open_uni(connection: Option<Connection>) -> OpResult {
 }
 
 /// Awaits the peer's next unidirectional stream: a receive half and no send half.
-async fn accept_uni(connection: Option<Connection>) -> OpResult {
+async fn accept_uni(connection: Option<AnyConnection>) -> OpResult {
     let Some(connection) = connection else {
         return OpResult::new(released());
     };
@@ -346,10 +367,16 @@ async fn send_stopped(slot: Option<StreamShared>) -> OpResult {
     }
 }
 
+/// Why waiting for the peer to stop the stream failed.
+///
+/// `StoppedError` has exactly these two variants upstream — no catch-all arm, so a third one added
+/// later fails this match at compile time instead of silently falling into the wrong code.
+/// [`ERROR_ZERO_RTT_REJECTED`] covers a stream opened before a 0-RTT handshake completed once the
+/// peer refuses that early data — see [`write_failure`]'s note on what the caller should do about it.
 fn stopped_failure(error: &StoppedError) -> *mut Iroh4kResult {
     let code = match error {
         StoppedError::ConnectionLost(_) => ERROR_CLOSED,
-        _ => ERROR_WRITE,
+        StoppedError::ZeroRttRejected => ERROR_ZERO_RTT_REJECTED,
     };
     error_result(
         code,
@@ -547,10 +574,13 @@ async fn recv_received_reset(slot: Option<StreamShared>) -> OpResult {
     }
 }
 
+/// Why waiting for the peer to reset the stream failed. The read-side mirror of
+/// [`stopped_failure`], including the exhaustive-match note: `ResetError` has exactly these two
+/// variants upstream, so there is no catch-all arm here either.
 fn reset_failure(error: &ResetError) -> *mut Iroh4kResult {
     let code = match error {
         ResetError::ConnectionLost(_) => ERROR_CLOSED,
-        _ => ERROR_READ,
+        ResetError::ZeroRttRejected => ERROR_ZERO_RTT_REJECTED,
     };
     error_result(
         code,
@@ -598,6 +628,28 @@ fn recv_id(slot: &StreamSlot) -> *mut Iroh4kResult {
         return busy(ERROR_READ, RECEIVE);
     };
     i64_result(stream_id(u64::from(recv.id())))
+}
+
+/// Whether this stream was accepted while the handshake was still in progress.
+///
+/// `noq` decides this once, at the moment the stream is created (`open_bi`/`open_uni`) or accepted
+/// (`accept_bi`/`accept_uni`), and `RecvStream` just remembers the bit — see `is_0rtt` on
+/// `noq-1.1.0`'s `RecvStream`/`UnorderedRecvStream`. The two creation paths are not symmetric.
+/// `poll_accept` (`noq-1.1.0/src/connection.rs:1098`) samples `state.inner.is_handshaking()` alone,
+/// regardless of which side — dialling or accepting — this connection is. `poll_open`
+/// (`noq-1.1.0/src/connection.rs:1031`) additionally requires `state.inner.side().is_client()`: a
+/// stream opened by the *accepting* side (`IncomingZeroRttConnection.openBi` in Kotlin, which is
+/// entirely legal) reports `false` unconditionally, whatever that side's own handshake state is. A
+/// `true` here is the caller's signal that whatever this stream carries arrived before the
+/// handshake vouched for the peer's identity, and is therefore replayable.
+fn recv_is_0rtt(slot: &StreamSlot) -> *mut Iroh4kResult {
+    let Some(recv) = slot.recv.as_ref() else {
+        return wrong_half(RECEIVE);
+    };
+    let Ok(recv) = recv.try_lock() else {
+        return busy(ERROR_READ, RECEIVE);
+    };
+    i64_result(i64::from(recv.is_0rtt()))
 }
 
 // ============================================================================
@@ -758,6 +810,16 @@ pub unsafe extern "C" fn iroh4k_recv_stream_bytes_read(handle: *mut c_void) -> *
     unsafe { with::<StreamSlot>(handle, |slot| recv_bytes_read(slot)) }
 }
 
+/// Whether this stream was accepted while the handshake was still in progress, `0`/`1` in
+/// `i64_val`. See [`recv_is_0rtt`].
+///
+/// # Safety
+/// As [`iroh4k_send_stream_finish`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_recv_stream_is_0rtt(handle: *mut c_void) -> *mut Iroh4kResult {
+    unsafe { with::<StreamSlot>(handle, |slot| recv_is_0rtt(slot)) }
+}
+
 /// This stream's QUIC id, in `i64_val`.
 ///
 /// # Safety
@@ -774,8 +836,10 @@ pub unsafe extern "C" fn iroh4k_recv_stream_id(handle: *mut c_void) -> *mut Iroh
 /// Opens a bidirectional stream; the result carries a stream handle. Asynchronous.
 ///
 /// # Safety
-/// `connection` must be null, or a live `Connection` handle from `connection.rs` that has not been
-/// freed. Kotlin's guard on `Connection` guarantees the second part.
+/// `connection` must be null, or a live connection handle of any of the three kinds — completed or
+/// either 0-RTT — from `connection.rs` that has not been freed, satisfying
+/// [`crate::connection::connection_clone_any`]'s contract. Kotlin's guard on the corresponding handle
+/// type guarantees the second part.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_open_bi(
     connection: *mut c_void,
@@ -783,7 +847,7 @@ pub unsafe extern "C" fn iroh4k_connection_open_bi(
     fun: Completion,
 ) -> i64 {
     unsafe {
-        let connection = connection_clone(connection);
+        let connection = connection_clone_any(connection);
         ops::spawn_callback(callback, fun, open_bi(connection))
     }
 }
@@ -799,7 +863,7 @@ pub unsafe extern "C" fn iroh4k_connection_accept_bi(
     fun: Completion,
 ) -> i64 {
     unsafe {
-        let connection = connection_clone(connection);
+        let connection = connection_clone_any(connection);
         ops::spawn_callback(callback, fun, accept_bi(connection))
     }
 }
@@ -815,7 +879,7 @@ pub unsafe extern "C" fn iroh4k_connection_open_uni(
     fun: Completion,
 ) -> i64 {
     unsafe {
-        let connection = connection_clone(connection);
+        let connection = connection_clone_any(connection);
         ops::spawn_callback(callback, fun, open_uni(connection))
     }
 }
@@ -831,7 +895,7 @@ pub unsafe extern "C" fn iroh4k_connection_accept_uni(
     fun: Completion,
 ) -> i64 {
     unsafe {
-        let connection = connection_clone(connection);
+        let connection = connection_clone_any(connection);
         ops::spawn_callback(callback, fun, accept_uni(connection))
     }
 }
@@ -1108,6 +1172,16 @@ mod jni_facade {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_recvIs0Rtt(
+        mut env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+    ) -> jbyteArray {
+        let result = unsafe { with::<StreamSlot>(as_handle(handle), |slot| recv_is_0rtt(slot)) };
+        finish(&mut env, result)
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_StreamJni_recvId(
         mut env: EnvUnowned,
         _class: JClass,
@@ -1125,7 +1199,7 @@ mod jni_facade {
         _class: JClass,
         connection: jlong,
     ) -> jlong {
-        let connection = unsafe { connection_clone(as_handle(connection)) };
+        let connection = unsafe { connection_clone_any(as_handle(connection)) };
         ops::spawn_channel(open_bi(connection))
     }
 
@@ -1135,7 +1209,7 @@ mod jni_facade {
         _class: JClass,
         connection: jlong,
     ) -> jlong {
-        let connection = unsafe { connection_clone(as_handle(connection)) };
+        let connection = unsafe { connection_clone_any(as_handle(connection)) };
         ops::spawn_channel(accept_bi(connection))
     }
 
@@ -1145,7 +1219,7 @@ mod jni_facade {
         _class: JClass,
         connection: jlong,
     ) -> jlong {
-        let connection = unsafe { connection_clone(as_handle(connection)) };
+        let connection = unsafe { connection_clone_any(as_handle(connection)) };
         ops::spawn_channel(open_uni(connection))
     }
 
@@ -1155,7 +1229,7 @@ mod jni_facade {
         _class: JClass,
         connection: jlong,
     ) -> jlong {
-        let connection = unsafe { connection_clone(as_handle(connection)) };
+        let connection = unsafe { connection_clone_any(as_handle(connection)) };
         ops::spawn_channel(accept_uni(connection))
     }
 
@@ -1234,5 +1308,52 @@ mod jni_facade {
     ) -> jlong {
         let slot = unsafe { share::<StreamSlot>(as_handle(handle)) };
         ops::spawn_channel(recv_received_reset(slot))
+    }
+}
+
+// ============================================================================
+// Tests
+//
+// See the module header's note by `ERROR_ZERO_RTT_REJECTED` for why this exists: the four
+// `ZeroRttRejected` arms cannot be pinned by a live connection deterministically, so they are
+// pinned here instead, calling each mapper directly with a hand-built error value.
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reads a result's error code and frees it, so a test cannot leak the allocation
+    /// `error_result` leaks by design — Kotlin ordinarily frees it through `free_result` once it
+    /// has read the fields it needs, and a test is the one caller on the Rust side that must do
+    /// the same rather than just dropping the pointer.
+    fn error_code_of(result: *mut Iroh4kResult) -> c_int {
+        let code = unsafe { (*result).error };
+        crate::core::free_result(result);
+        code
+    }
+
+    #[test]
+    fn write_failure_maps_zero_rtt_rejected() {
+        let result = write_failure(&WriteError::ZeroRttRejected);
+        assert_eq!(error_code_of(result), ERROR_ZERO_RTT_REJECTED);
+    }
+
+    #[test]
+    fn read_failure_maps_zero_rtt_rejected() {
+        let result = read_failure(&ReadError::ZeroRttRejected);
+        assert_eq!(error_code_of(result), ERROR_ZERO_RTT_REJECTED);
+    }
+
+    #[test]
+    fn stopped_failure_maps_zero_rtt_rejected() {
+        let result = stopped_failure(&StoppedError::ZeroRttRejected);
+        assert_eq!(error_code_of(result), ERROR_ZERO_RTT_REJECTED);
+    }
+
+    #[test]
+    fn reset_failure_maps_zero_rtt_rejected() {
+        let result = reset_failure(&ResetError::ZeroRttRejected);
+        assert_eq!(error_code_of(result), ERROR_ZERO_RTT_REJECTED);
     }
 }

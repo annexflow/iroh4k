@@ -211,6 +211,24 @@ class MdnsConfig(
  *   punching, see [TransportConfig]'s class documentation. A config set on a single connection
  *   **replaces** this one outright rather than merging with it, exactly as [TransportConfig] itself
  *   documents.
+ * @property maxTlsTickets the size of the in-memory TLS session-ticket cache this endpoint keeps
+ *   for connections it dials out. A ticket is what a later [Connecting.zeroRtt] needs in order to
+ *   answer with data instead of `null`, so this cache is what makes 0-RTT possible at all: no
+ *   ticket held for a peer, no 0-RTT to that peer. It lives entirely in the endpoint's own memory —
+ *   nothing is written to disk — so it dies with the endpoint and starts empty again on the next
+ *   bind, even with the same [secretKey]. `null`, the default, leaves upstream's own default of
+ *   256 tickets, which it documents as costing about 150 KiB. `0` is legal, but — measured, not
+ *   assumed, see `maxTlsTickets 0 does not stop a single peer from resuming` in
+ *   `CommonConnectionTests` — it does **not** reliably disable 0-RTT: upstream rounds
+ *   it down to a per-server budget of `0`, and for an endpoint that only ever talks to one peer, an
+ *   implementation quirk in how that budget's backing storage grows means the budget is never
+ *   actually enforced, so a ticket for that one peer is kept exactly as it would be with no limit
+ *   at all. The eviction this setting controls is upstream's own approximation and has sharp,
+ *   non-monotonic edges — a value from `1` to `8` is *worse* than `0`, evicting a ticket the
+ *   instant it is written, for the same single-peer case `0` keeps — so there is no small value
+ *   here that reliably shrinks the cache either. Nothing in this binding is a guaranteed way to
+ *   turn 0-RTT off; do not rely on `0` for that, including as a way to opt out of the replay
+ *   hazard [Connecting.zeroRtt] and [Accepting.zeroRtt] document.
  */
 class EndpointConfig(
     val preset: EndpointPreset = EndpointPreset.N0,
@@ -222,6 +240,7 @@ class EndpointConfig(
     val mdns: MdnsConfig? = null,
     val discovery: List<Discovery> = emptyList(),
     val transportConfig: TransportConfig? = null,
+    val maxTlsTickets: Int? = null,
 ) {
     // Copied in and copied out, for the reason `CustomAddr` copies: a `ByteArray` is mutable, and a
     // configuration that changed under the caller after being built would be a confusing bug.
@@ -642,6 +661,9 @@ class Endpoint private constructor(private val guard: NativeHandle) : AutoClosea
 //                            `TransportConfig.kt`'s `writeTransportConfig`: a counted sequence of
 //                            tagged entries, its own tag family (`TRANSPORT_TAG_*`), documented in
 //                            full there and mirrored by `transport.rs`.
+//   u8      max TLS tickets 0 absent — upstream's own default of 256 — or 1 present, then i64 the
+//                            cache size. Last on the wire, because a bind configuration can only
+//                            ever grow at the end.
 //
 // `addEndpointAddr` sends an `EndpointAddr` as the *whole* payload, so it is written with
 // `encodeEndpointAddr` and read by `addr::decode_endpoint_addr`, which rejects trailing bytes —
@@ -722,6 +744,18 @@ private fun encodeBindConfig(config: EndpointConfig): ByteArray {
     // `relayMode`'s "leave the preset's choice" tag — there is no preset transport configuration to
     // leave alone, so absent always means iroh's own defaults.
     w.writeOptionalTransportConfig(config.transportConfig)
+
+    // Last on the wire, because a bind configuration can only ever grow at the end. An optional
+    // scalar rather than a sentinel: an earlier draft of this used `i64(maxTlsTickets ?: -1)`, which
+    // made the legal-to-write value `-1` indistinguishable from "not set" and would have let Rust
+    // silently treat a genuine `-1` as absent instead of refusing it.
+    val maxTlsTickets = config.maxTlsTickets
+    if (maxTlsTickets == null) {
+        w.u8(ABSENT)
+    } else {
+        w.u8(PRESENT)
+        w.i64(maxTlsTickets.toLong())
+    }
 
     return w.finish()
 }

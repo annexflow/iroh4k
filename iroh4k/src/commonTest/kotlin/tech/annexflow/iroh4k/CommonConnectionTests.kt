@@ -3,6 +3,7 @@ package tech.annexflow.iroh4k
 import assertk.assertThat
 import assertk.assertions.isEqualTo
 import assertk.assertions.isFalse
+import assertk.assertions.isInstanceOf
 import assertk.assertions.isNotEqualTo
 import assertk.assertions.isNotNull
 import assertk.assertions.isNull
@@ -11,6 +12,7 @@ import kotlin.test.assertFailsWith
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.measureTime
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -466,6 +468,21 @@ class CommonConnectionTests {
     }
 
     // ── Identity, measurement and paths ──────────────────────────────────────────────────────
+
+    fun `a connection is a QuicConnection and streams open through the supertype`() = bounded {
+        Loopback.connected { client, _ ->
+            // The type relationship is the whole point of the base class: it is what lets a 0-RTT
+            // connection open a stream without Connection's handshake-completed surface.
+            val shared: QuicConnection = client
+            assertThat(shared.stableId()).isEqualTo(client.stableId())
+
+            // And the stream openers must resolve on the supertype, not just on Connection.
+            val opener: suspend (QuicConnection) -> BiStream = { it.openBi() }
+            opener(shared).use { stream ->
+                assertThat(stream.send.id()).isNotEqualTo(-1L)
+            }
+        }
+    }
 
     fun `side tells the two ends of one connection apart`() = bounded {
         Loopback.connected { client, server ->
@@ -1027,6 +1044,411 @@ class CommonConnectionTests {
 
     /** Polls [condition] on a real clock — see [Loopback.awaitUntil]. */
     private suspend fun awaitUntil(condition: () -> Boolean) = Loopback.awaitUntil(condition)
+
+    // ── 0-RTT, dialling side ─────────────────────────────────────────────────────────────────
+
+    fun `the first dial has no ticket and leaves the attempt usable`() = bounded {
+        Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+            Endpoint.bind(Loopback.config()).use { client ->
+                val accepted = async { server.acceptOne() }
+                client.startConnect(server.addr(), Loopback.alpn).use { connecting ->
+                    // No session ticket for this peer yet, so upstream hands the attempt straight back.
+                    // Unconditional, not a loop: this is the put-back's proof, and it only holds for a
+                    // dial that is genuinely the first one this endpoint has ever made to this peer.
+                    assertThat(connecting.zeroRtt()).isNull()
+
+                    // The whole point of the null: the attempt was NOT consumed and still completes. This is
+                    // the only behavioural proof that the Err arm put the Connecting back into its slot.
+                    connecting.connect().use { outbound ->
+                        assertThat(outbound.remoteId()).isEqualTo(server.id)
+                    }
+                }
+                accepted.await().close()
+            }
+        }
+    }
+
+    fun `a second dial from the same endpoint sends data before the handshake`() = bounded {
+        Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+            // ONE client endpoint for both dials: the TLS ticket cache is per-endpoint and in memory,
+            // so a fresh endpoint here could never resume and this body would pass for the wrong reason.
+            Endpoint.bind(Loopback.config()).use { client ->
+                // The server's session ticket is ordinary post-handshake application data, sent
+                // asynchronously right after the handshake completes rather than bundled into it — so it
+                // can still be in flight, not yet processed, the instant a priming dial's `connect()`
+                // returns. iroh's own 0-RTT tests (`connect_client_0rtt_expect_err` in
+                // `iroh::endpoint::connection`) never hit this race because they always exchange a
+                // request and response before closing, which takes longer than ticket delivery as a side
+                // effect; there is nothing in iroh4k's surface to await instead — no handle on "the
+                // ticket arrived". So this dials repeatedly, completing and releasing each attempt
+                // normally, until `zeroRtt()` itself reports a ticket on a fresh attempt — the earliest
+                // instant priming is provably done, and a real wait rather than a fixed-length substitute
+                // for one. The enclosing `bounded`'s 60s real-time timeout is the backstop: a regression
+                // that never gets a ticket fails by timing out rather than looping forever.
+                var zero: OutgoingZeroRttConnection? = null
+                lateinit var accepted: Deferred<Connection>
+                do {
+                    accepted = async { server.acceptOne() }
+                    val connecting = client.startConnect(server.addr(), Loopback.alpn)
+                    zero = connecting.zeroRtt()
+                    if (zero == null) {
+                        // Not primed yet: finish this attempt like any ordinary connection, and
+                        // release both ends, so the loop's unsuccessful iterations cannot strand
+                        // connection-domain handles across a retry.
+                        connecting.connect().close()
+                        connecting.close()
+                        accepted.await().close()
+                    } else {
+                        // Primed: the attempt itself is spent (see `Connecting.zeroRtt`'s doc), but the
+                        // `Connecting` handle wrapping it is a separate release from the `zero` handle
+                        // just produced, so it still needs its own close.
+                        connecting.close()
+                    }
+                } while (zero == null)
+
+                zero.use { early ->
+                    // Verified empirically rather than trusted from the class doc: whether `remoteId()`
+                    // has already settled here, before `awaitHandshake()` below has run, turns out to be
+                    // a genuine race rather than a fixed fact — on the JVM facade the certificate had
+                    // already arrived by this point in the same test; on the cinterop facade, running
+                    // this whole sequence with far less overhead per call, it consistently had not. So
+                    // this only asserts the part that IS true on every facade: `null` is still the
+                    // documented "not yet", and whenever an answer does exist that early, it is not a
+                    // stale or wrong one.
+                    early.remoteId()?.let { assertThat(it).isEqualTo(server.id) }
+
+                    // Sending early data IS opening a stream — this is what the widened receiver bought.
+                    early.openBi().use { stream -> stream.send.writeAll("early".encodeToByteArray()) }
+
+                    when (val status = early.awaitHandshake()) {
+                        is ZeroRttStatus.Accepted -> status.connection.use {
+                            assertThat(it.remoteId()).isEqualTo(server.id)
+                        }
+                        is ZeroRttStatus.Rejected ->
+                            error("a server that never restarted must not reject: $status")
+                    }
+                }
+                accepted.await().close()
+            }
+        }
+    }
+
+    // ── 0-RTT, accepting side ────────────────────────────────────────────────────────────────
+
+    fun `the accepting side reads a stream before its handshake completes`() = bounded {
+        Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+            Endpoint.bind(Loopback.config()).use { client ->
+                val served = async {
+                    val incoming = server.acceptNext() ?: error("the endpoint was shut down")
+                    incoming.use { it.accept() }.use { accepting ->
+                        accepting.zeroRtt().use { early ->
+                            val stream = early.acceptBi()
+                            val received = stream.use { it.recv.readToEnd(64) }
+                            // The handshake settles the identity this side could not know before it.
+                            early.awaitHandshake().use { completed ->
+                                // The handle behind `early` is still open here — this proves the
+                                // absent-preserving `remoteId()` reader (shared with the dialling
+                                // side's `nativeZeroRttRemoteId`) can answer a *present* value once
+                                // the handshake has actually settled, not only ever `null`. The
+                                // equivalent assertion on the dialling side, above, could not make
+                                // this claim: there, the answer was still racing the certificate's
+                                // arrival at the equivalent point.
+                                assertThat(early.remoteId()).isEqualTo(client.id)
+                                received to completed.remoteId()
+                            }
+                        }
+                    }
+                }
+
+                client.connect(server.addr(), Loopback.alpn).use { outbound ->
+                    outbound.openBi().use { stream ->
+                        stream.send.writeAll("hello".encodeToByteArray())
+                        stream.send.finish()
+                    }
+                    val (received, id) = served.await()
+                    assertThat(received).isEqualTo("hello".encodeToByteArray())
+                    assertThat(id).isEqualTo(client.id)
+                }
+            }
+        }
+    }
+
+    fun `a restarted server rejects the early data and the stream says so`() = bounded {
+        // The server's identity must survive the restart: the client's ticket is keyed by it. A new
+        // SecretKey would make this a first dial again and the body would pass for the wrong reason.
+        // EndpointConfig is not a data class — there is no copy() — so the configuration is built out.
+        val serverKey = SecretKey.generate()
+        fun serverConfig() = EndpointConfig(
+            preset = EndpointPreset.Minimal,
+            secretKey = serverKey,
+            alpns = listOf(Loopback.alpn),
+            relayMode = RelayMode.Disabled,
+            bindAddrs = listOf(SocketAddr.parse("127.0.0.1:0")),
+        )
+
+        Endpoint.bind(Loopback.config()).use { client ->
+            // Prime the ticket against the server's original identity. As in "a second dial from the
+            // same endpoint sends data before the handshake" above, the session ticket is ordinary
+            // post-handshake application data delivered asynchronously, so `zeroRtt()` on the very next
+            // dial can still race its arrival. This dials repeatedly, completing and releasing each
+            // attempt normally, until `zeroRtt()` itself reports a ticket on a fresh attempt — the
+            // earliest instant priming is provably done, and a real wait rather than a fixed delay. The
+            // enclosing `bounded`'s 60s real-time timeout is the backstop.
+            Endpoint.bind(serverConfig()).use { server ->
+                var warm: OutgoingZeroRttConnection? = null
+                lateinit var accepted: Deferred<Connection>
+                do {
+                    accepted = async { server.acceptOne() }
+                    val connecting = client.startConnect(server.addr(), Loopback.alpn)
+                    warm = connecting.zeroRtt()
+                    if (warm == null) {
+                        // Not primed yet: finish this attempt like any ordinary connection, and release
+                        // both ends, so the loop's unsuccessful iterations cannot strand connection-domain
+                        // handles across a retry.
+                        connecting.connect().close()
+                        connecting.close()
+                        accepted.await().close()
+                    } else {
+                        // Primed: the attempt itself is spent (see `Connecting.zeroRtt`'s doc), but the
+                        // `Connecting` handle wrapping it is a separate release from the `zero` handle
+                        // just produced, so it still needs its own close.
+                        connecting.close()
+                    }
+                } while (warm == null)
+
+                warm.use { early ->
+                    (early.awaitHandshake() as ZeroRttStatus.Accepted).connection.close()
+                }
+                accepted.await().close()
+            }
+
+            // The endpoint above is closed, so its resumption state is gone. A new one with the same key
+            // still looks like the same peer to the client, which will therefore try 0-RTT and be refused.
+            Endpoint.bind(serverConfig()).use { restarted ->
+                val accepted = async { restarted.acceptOne() }
+                // Capture the attempt: `zeroRtt()` spends it but the `Connecting` handle wrapping it is
+                // a separate release, exactly as the priming loop above says. `NativeHandle` has no
+                // finalizer, so a discarded one leaks until the process ends.
+                val connecting = client.startConnect(restarted.addr(), Loopback.alpn)
+                val zero = connecting.zeroRtt()
+                connecting.close()
+                assertThat(zero).isNotNull()
+                zero!!.use { early ->
+                    val stream = early.openBi()
+                    val status = early.awaitHandshake()
+                    assertThat(status).isInstanceOf(ZeroRttStatus.Rejected::class)
+
+                    // No assertion here on a write raising `ZeroRttRejected`, deliberately: it cannot be
+                    // made deterministic from Kotlin. `noq` captures whether a stream is 0-RTT exactly
+                    // once, at `open_bi()`'s first poll (`noq-1.1.0/src/connection.rs:1031`) — and
+                    // `zeroRtt`, `openBi` and `awaitHandshake` are each dispatched as their own
+                    // independently scheduled tokio task (`ops.rs:234`). If the connection's background
+                    // driver has already processed the peer's rejection by the moment `open_bi`'s task
+                    // actually gets polled, the stream it hands back is an ordinary post-handshake stream
+                    // — its write then correctly succeeds, and there is no way for anything issued after
+                    // the fact, on the Kotlin side, to close that window. Measured empirically rather than
+                    // assumed: a `writeAll` here failed 0/9 times on the JVM/JNI facade and 10/16 times on
+                    // cinterop. Ordinal 15 is pinned elsewhere instead — see `stream.rs`'s mapper unit
+                    // tests for the four `ZeroRttRejected` arms, and `CommonSmokeTests` for the ordinal
+                    // itself. Only the deterministic half belongs here: the stream is dead, so it is
+                    // closed along with the connection, the same as any other spent 0-RTT attempt.
+                    stream.close()
+                    status.connection.close()
+                }
+                accepted.await().close()
+            }
+        }
+    }
+
+    // ── 0-RTT, two properties nothing else pins ─────────────────────────────────────────────
+
+    fun `awaiting the 0-RTT handshake survives a cancelled await`() = bounded {
+        Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+            Endpoint.bind(Loopback.config()).use { client ->
+                // Prime the ticket cache exactly as "a second dial from the same endpoint sends
+                // data before the handshake" does above: the session ticket is ordinary
+                // post-handshake application data delivered asynchronously, so this dials
+                // repeatedly — completing and releasing each attempt normally — until `zeroRtt()`
+                // itself reports a ticket on a fresh attempt, the earliest instant priming is
+                // provably done. `bounded`'s 60s real-time timeout is the backstop.
+                var zero: OutgoingZeroRttConnection? = null
+                lateinit var accepted: Deferred<Connection>
+                do {
+                    accepted = async { server.acceptOne() }
+                    val connecting = client.startConnect(server.addr(), Loopback.alpn)
+                    zero = connecting.zeroRtt()
+                    if (zero == null) {
+                        // Not primed yet: finish this attempt like any ordinary connection, and
+                        // release both ends, so the loop's unsuccessful iterations cannot strand
+                        // connection-domain handles across a retry.
+                        connecting.connect().close()
+                        connecting.close()
+                        accepted.await().close()
+                    } else {
+                        // Primed: the attempt itself is spent (`zeroRtt()`'s doc), but the
+                        // `Connecting` handle wrapping it is a separate release from the `zero`
+                        // handle just produced, so it still needs its own close.
+                        connecting.close()
+                    }
+                } while (zero == null)
+
+                zero.use { early ->
+                    // Cancel one await outright. Every other transition in this domain would be
+                    // spent by this: a second `Connecting.connect()` answers `Closed`, and so does
+                    // one made after the first was cancelled — `awaitHandshake` is the one
+                    // exception, because upstream backs it with a `Shared` future.
+                    val abandoned = async { early.awaitHandshake() }
+                    abandoned.cancelAndJoin()
+
+                    // `cancelAndJoin` on an already-completed `Deferred` is a no-op: if the real
+                    // handshake happened to settle before the cancel reached it, `abandoned` is
+                    // completed rather than cancelled, and — silently ignored — its result would
+                    // leak the `Connection` handle it carries, since `NativeHandle` has no
+                    // finalizer. `await()` after `cancelAndJoin()` answers immediately either way,
+                    // without re-running the coroutine: it rethrows on the cancelled branch this
+                    // test is named for, or returns the already-settled result on the other one —
+                    // so this closes that handle before requiring the cancelled branch to be what
+                    // actually happened, rather than merely hoping it was.
+                    try {
+                        abandoned.await().connection.close()
+                        error(
+                            "expected the awaitHandshake() coroutine to have been cancelled, not " +
+                                "completed — the race this test relies on did not go the usual way",
+                        )
+                    } catch (_: CancellationException) {
+                        // Expected: the cancel really landed before the handshake settled.
+                    }
+
+                    // The future behind it is shared, so a second await simply works — and mints
+                    // its own fresh `Connection` handle, which is why the two are closed
+                    // separately rather than being the same object reused.
+                    early.awaitHandshake().connection.use { first ->
+                        early.awaitHandshake().connection.use { second ->
+                            // Both handles describe the one connection the shared future settled
+                            // on, not two different ones — this is the actual claim "re-awaitable"
+                            // makes, beyond merely "does not throw".
+                            assertThat(first.stableId()).isEqualTo(second.stableId())
+                        }
+                    }
+                }
+                accepted.await().close()
+            }
+        }
+    }
+
+    fun `maxTlsTickets 0 does not stop a single peer from resuming`() = bounded {
+        // EndpointConfig.maxTlsTickets's KDoc used to claim 0 means "store none" and therefore
+        // "effectively disables 0-RTT". That claim was never run against the real cache — this
+        // body measures it instead, and it is false for the case this suite can exercise: one
+        // endpoint resuming against one peer.
+        //
+        // `Builder::max_tls_tickets(0)` reaches `ClientSessionMemoryCache::new(0)`
+        // (`iroh-1.0.3/src/tls.rs:64`), which rounds down to `max_servers = 0`
+        // (`rustls-0.23.42/src/client/handy.rs:81-82`) and builds `LimitedCache::new(0)` — a
+        // `VecDeque` requested at capacity `0`. `LimitedCache` only evicts an entry when the
+        // insert that just created it leaves the backing `VecDeque` exactly full
+        // (`rustls-0.23.42/src/limited_cache.rs:42`), and confirmed directly against the standard
+        // library rather than assumed from reading it: `VecDeque::with_capacity(0)`'s first
+        // `push_back` reallocates to capacity 4, not 1, so that first entry is never full and is
+        // never evicted. This endpoint only ever dials one peer, so only one server name is ever
+        // inserted — every later dial to it finds an `Occupied` entry, which takes the edit path
+        // and does not consult capacity at all. So the cache keeps growing past its nominal
+        // "zero" size for as long as there is exactly one peer to talk to.
+        //
+        // This is not "0 is secretly a real cache size" — the same rounding, at `maxTlsTickets`
+        // values from 1 to 8, computes `max_servers = 1`, and `VecDeque::with_capacity(1)` does
+        // NOT overshoot: its first `push_back` leaves it exactly full, so the very entry that was
+        // just inserted is evicted immediately, every time, and this endpoint's own single peer
+        // then never accumulates a ticket at all — measured separately, not covered by an
+        // assertion here because it is not what this body's KDoc correction is about. The
+        // takeaway that does belong in the docs is narrower than either extreme: upstream's
+        // eviction is an approximation with sharp, non-monotonic edges, so `0` is not a reliable
+        // way to guarantee 0-RTT is off.
+        //
+        // The bounded-retry shape below is used deliberately, same as the other dialling-side
+        // 0-RTT bodies above: a ticket IS expected here, so a loop that gave up early would be
+        // the wrong kind of flaky, and every run measured while writing this test converged in
+        // single digits of attempts. A configuration for which no ticket is ever expected needs a
+        // wall-clock bound instead of this shape — the do/while below would otherwise spin until
+        // `bounded`'s 60s timeout with nothing to show for it if the answer were really "never".
+        val clientConfig = EndpointConfig(
+            preset = EndpointPreset.Minimal,
+            relayMode = RelayMode.Disabled,
+            bindAddrs = listOf(SocketAddr.parse("127.0.0.1:0")),
+            maxTlsTickets = 0,
+        )
+        Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+            Endpoint.bind(clientConfig).use { client ->
+                var zero: OutgoingZeroRttConnection? = null
+                lateinit var accepted: Deferred<Connection>
+                do {
+                    accepted = async { server.acceptOne() }
+                    val connecting = client.startConnect(server.addr(), Loopback.alpn)
+                    zero = connecting.zeroRtt()
+                    if (zero == null) {
+                        connecting.connect().close()
+                        connecting.close()
+                        accepted.await().close()
+                    } else {
+                        connecting.close()
+                    }
+                } while (zero == null)
+
+                zero.use { early ->
+                    early.openBi().use { stream -> stream.send.writeAll("early".encodeToByteArray()) }
+                    when (val status = early.awaitHandshake()) {
+                        is ZeroRttStatus.Accepted -> status.connection.use {
+                            assertThat(it.remoteId()).isEqualTo(server.id)
+                        }
+                        is ZeroRttStatus.Rejected ->
+                            error("a server that never restarted must not reject: $status")
+                    }
+                }
+                accepted.await().close()
+            }
+        }
+    }
+
+    fun `0-RTT handles are released`() = bounded {
+        val connections = LiveCounters.connectionHandles
+        // Quiescent baseline first, or the ceiling below is slack by whatever the previous body
+        // was still dropping — which is how a leak detector quietly stops detecting.
+        LiveCounters.settle()
+        val baseline = connections.value
+
+        Endpoint.bind(Loopback.config(alpns = listOf(Loopback.alpn))).use { server ->
+            Endpoint.bind(Loopback.config()).use { client ->
+                // Same priming loop as the test above: dial repeatedly, completing and releasing
+                // every unsuccessful attempt, until a fresh attempt reports a ticket.
+                var zero: OutgoingZeroRttConnection? = null
+                lateinit var accepted: Deferred<Connection>
+                do {
+                    accepted = async { server.acceptOne() }
+                    val connecting = client.startConnect(server.addr(), Loopback.alpn)
+                    zero = connecting.zeroRtt()
+                    if (zero == null) {
+                        connecting.connect().close()
+                        connecting.close()
+                        accepted.await().close()
+                    } else {
+                        connecting.close()
+                    }
+                } while (zero == null)
+
+                // Both handles must be closed: `zero` and the `Connection` `awaitHandshake()` mints
+                // are two separate handles over related but distinct native objects, so releasing
+                // only the `Connection` leaves `zero`'s own handle unfreed. `connectionHandles`
+                // counts iroh4k handles, not live QUIC connections, so this is what the assertion
+                // below actually catches — a missing `close()` on `zero` — regardless of whatever
+                // state the underlying QUIC connection itself ends up in.
+                zero.awaitHandshake().connection.close()
+                zero.close()
+                accepted.await().close()
+            }
+        }
+
+        connections.awaitAtMost(baseline)
+    }
 }
 
 /**

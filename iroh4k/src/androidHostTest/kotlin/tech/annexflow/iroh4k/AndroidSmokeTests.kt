@@ -50,4 +50,8 @@ class AndroidSmokeTests {
     @Test
     fun `a short sleep still completes normally`() =
         runner.`a short sleep still completes normally`()
+
+    @Test
+    fun `ordinal 15 decodes to ZeroRttRejected`() =
+        runner.`ordinal 15 decodes to ZeroRttRejected`()
 }

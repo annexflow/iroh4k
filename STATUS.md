@@ -15,8 +15,8 @@ Android — are held to identical behaviour by the same shared test bodies.
 
 | Target | What is actually run |
 | --- | --- |
-| `macosArm64`, `jvm` | 454 test bodies, 227 per facade, on every change |
-| `android` (AAR) | The same 227 shared bodies under Robolectric, plus 6 Android-only tests for `Iroh4kAndroid.multicastLock`, which exists on no other target — 233 in all. Plus 6 instrumented tests, the only ones that exercise the packaged `.so` |
+| `macosArm64`, `jvm` | 480 test bodies, 240 per facade, on every change |
+| `android` (AAR) | The same 240 shared bodies under Robolectric, plus 6 Android-only tests for `Iroh4kAndroid.multicastLock`, which exists on no other target — 246 in all. Plus 6 instrumented tests, the only ones that exercise the packaged `.so` |
 | `iosArm64`, `iosSimulatorArm64` | Compiles and links; cinterop verified in CI |
 | `linuxX64` | Test suite configured in CI on `ubuntu-latest`; not verified locally |
 | `linuxArm64`, `mingwX64` | Cross-compiled and assembled in CI; never executed |
@@ -85,12 +85,76 @@ postcard encoding of a `SocketAddr` has nowhere to put one. So an address that g
 `EndpointTicket` comes back unzoned. This is upstream's encoding, pinned by a test rather than
 hidden — do not rely on a zone surviving a round trip.
 
-### No 0-RTT
+### 0-RTT: both sides work over loopback; two of its edges are not pinned by a live assertion
 
-`Endpoint.startConnect` maps onto iroh's `connect_with_opts`; 0-RTT is upstream's option there and
-this binding does not expose it yet. `Endpoint.watchNetworkChange()` is also derived from address
-changes rather than from iroh's own net-report watcher, which is unstable upstream — read its
-documentation before relying on it.
+Both directions are bound and exercised. `Connecting.zeroRtt()` is the dialling side — it answers
+`null` when the endpoint holds no session ticket for the peer, and the `Connecting` it was called on
+is untouched in that case, so the caller falls back to an ordinary handshake with nothing lost.
+`Accepting.zeroRtt()` is the accepting side, and unlike the dial it is infallible: iroh accepts 0-RTT
+at the TLS layer on every endpoint, so an accepted handshake can always be converted. Both connect
+onward through `awaitHandshake()`.
+
+**Acceptance and rejection are both demonstrated, not just acceptance.** A loopback dial that primes
+a session ticket and reconnects to the same server sees `ZeroRttStatus.Accepted`. Rejection needs a
+server that has forgotten the resumption state without changing identity, and the suite produces that
+by binding the same `SecretKey` twice — closing the endpoint that issued the ticket and standing up a
+fresh one under the same key in its place — which is upstream's own recipe for the situation, not a
+contrivance of this binding's. The client, still holding a ticket for that key, dials again, and
+`ZeroRttStatus.Rejected` comes back for real, over the wire, against a server that was never told to
+reject anything.
+
+**What is not proven is narrower than "the rejection path," though it sounds that way at first.** The
+per-stream error — `ERROR_ZERO_RTT_REJECTED`, `IrohError.Code.ZeroRttRejected`, ordinal 15 — is meant
+to surface from a write on a stream that was opened before the rejection landed. Forcing that from
+Kotlin turns out not to be reliable: `noq`, the QUIC implementation underneath iroh, captures whether
+a stream is 0-RTT exactly once, at `open_bi()`'s first poll — and this binding dispatches `zeroRtt`,
+`openBi` and `awaitHandshake` as three independently scheduled tokio tasks. If the connection's
+background driver has already processed the peer's rejection by the time `open_bi`'s task is actually
+polled, the stream it hands back is an ordinary post-handshake stream, and its write then correctly
+succeeds — there is nothing issued afterwards, from Kotlin, that can close that window. This was
+measured rather than assumed: a `writeAll` on the stream failed 0 times out of 9 runs on the JVM/JNI
+facade, and 10 times out of 16 on cinterop. So the code is pinned a different way — a Rust unit test
+over `stream.rs`'s four failure-mapper arms, together with a Kotlin assertion that ordinal 15 decodes
+to `ZeroRttRejected` and a compile-time assertion in `core.rs` that the constant really is 15 — rather
+than by a write that reliably fails. The rejection itself is still proven end to end, exactly as
+described above; only the specific error code on a specific stream write is not.
+
+**`is0Rtt() == true` is asserted nowhere, and not for one reason but two — one per side.** On the
+accepting side, `poll_accept` upstream samples the handshake state at the moment a stream is
+*accepted*, not when it was *created*. A loopback server accepts fast enough that the handshake has
+routinely already settled by then, so `is0Rtt()` legitimately answers `false` even for a stream the
+client opened before the handshake completed. On the dialling side the flag is asserted for a
+different reason entirely: `noq`'s `poll_open` *does* set it, but capturing that from Kotlin needs a
+stream opened before `awaitHandshake()` settles, and this binding dispatches `zeroRtt`, `openBi` and
+`awaitHandshake` as three independently scheduled tokio tasks — the same race that defeated the
+refused-write assertion two paragraphs above, for the identical reason: nothing issued from Kotlin
+after the fact can close the window between them. Only the accepting side's negative is deterministic
+enough to assert; the suite does, and stops there rather than asserting a `true` that would be racing
+one clock or the other depending on which side wrote the stream.
+
+**`EndpointConfig.maxTlsTickets` is covered for its value type, its encoding, that an endpoint binds
+with it set, and — this once said something false — for what `0` actually does.** Absent by
+default, an explicit size round-trips, and a negative size is refused with
+`IrohError.Code.InvalidArgument`; none of that changed. What changed is `0`: an earlier draft of
+this file called it "store none" and said it "effectively disables 0-RTT". That was never run. It
+is measured now, by `maxTlsTickets 0 does not stop a single peer from resuming` in
+`CommonConnectionTests`, and it is false for the case a hermetic suite can exercise — one endpoint
+talking to one peer. `rustls`'s cache rounds `0` down to a per-server budget of `0`, and a quirk in
+how its backing `VecDeque` grows means that budget is never enforced for the first (and, here, only)
+server name inserted: the entry survives, and 0-RTT works exactly as it would with no limit set. The
+KDoc on `maxTlsTickets` carries the full explanation and the citations into `rustls`; the short
+version is that `0` is not a reliable way to turn 0-RTT off, and — measured separately, not
+asserted by the suite — a value from `1` to `8` is actually worse, evicting the single peer's ticket
+the instant it is written every time. Eviction behaviour beyond this one corner — what happens to a
+cached ticket once a cache sized for more than one peer is actually full — is still not observable
+from this suite and is still not asserted; confirming it needs enough distinct peers to fill the
+cache and a way to tell a stale ticket from an evicted one, neither of which a hermetic loopback
+suite can provide on its own.
+
+### `Endpoint.watchNetworkChange()` is address-derived, not iroh's own net-report watcher
+
+It is built from address changes rather than from upstream's net-report watcher, which is unstable
+upstream — read its documentation before relying on it.
 
 ### Per-connection transport configuration: every tag round-trips, rarely shown to reach the wire
 

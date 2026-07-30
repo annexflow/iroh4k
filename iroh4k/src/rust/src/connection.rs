@@ -152,9 +152,10 @@ use std::{
 use iroh::{
     Endpoint, EndpointId,
     endpoint::{
-        Accepting, ConnectOptions, Connecting, ConnectingError, Connection, ConnectionStats,
-        Incoming, IncomingAddr, LocalTransportAddr, Path, QuicTransportConfig, SendDatagramError,
-        UdpStats, VarInt,
+        Accepting, ConnectOptions, Connecting, ConnectingError, Connection, ConnectionError,
+        ConnectionStats, Incoming, IncomingAddr, IncomingZeroRttConnection, LocalTransportAddr,
+        OutgoingZeroRttConnection, Path, QuicTransportConfig, RecvStream, SendDatagramError,
+        SendStream, UdpStats, VarInt, ZeroRttStatus,
     },
 };
 
@@ -286,9 +287,18 @@ impl<T> Deref for Tracked<T> {
 /// so the future would not be spawnable, and holding a blocking lock across an await invites
 /// deadlock — hence a `tokio::sync::Mutex` here.
 ///
-/// Note this is the same *shape* as `Consumed`, not a second policy: `take` still hands the value to
-/// exactly one caller and every later caller gets `None`. Worth hoisting into `handle.rs` as an
-/// async sibling of `Consumed` once a second domain needs it.
+/// Note this is the same *shape* as `Consumed`, not a second policy: `take` hands the value to one
+/// caller, and every caller that finds the slot already empty gets `None`. Worth hoisting into
+/// `handle.rs` as an async sibling of `Consumed` once a second domain needs it.
+///
+/// One user breaks the "every *later* caller gets `None`" half of that, though not the safety
+/// property it exists for: [`ConnectingSlot`]'s [`connecting_zero_rtt`] takes the value to try
+/// `into_0rtt()`, and on the no-ticket branch puts the same value back rather than leaving the slot
+/// empty, so the next caller sees `Some` again rather than a permanently spent attempt. That is safe
+/// only because `into_0rtt` is synchronous — there is no `await` between the `take` and the put-back,
+/// so a cancellation lands either before the take (nothing taken yet) or after the put-back (the slot
+/// already holds the value again); it can never observe the slot empty. A second, genuinely
+/// asynchronous user of `Once` could not do this and would need its own reasoning.
 struct Once<T> {
     slot: tokio::sync::Mutex<Option<T>>,
 }
@@ -331,6 +341,18 @@ type IncomingHandle = Tracked<Consumed<Incoming>>;
 type AcceptingHandle = Tracked<Once<Accepting>>;
 type ConnectingHandle = Tracked<ConnectingSlot>;
 type ConnectionHandle = Tracked<Connection>;
+/// The client side of a connection still exchanging 0-RTT data.
+///
+/// Upstream's `Connection<OutgoingZeroRtt>`, produced by `Connecting::into_0rtt` — see
+/// `connecting_zero_rtt` below for the one place that creates one, and [`AnyConnection`] for why
+/// the type exists here regardless.
+type OutgoingZeroRttHandle = Tracked<OutgoingZeroRttConnection>;
+/// The server side of a connection still exchanging 0-RTT data.
+///
+/// Upstream's `Connection<IncomingZeroRtt>`, produced by `Accepting::into_0rtt`
+/// (`iroh-1.0.3/src/endpoint/connection.rs:620`) — see `accepting_zero_rtt` below for the one place
+/// that creates one, and [`AnyConnection`] for why the type exists here regardless.
+type IncomingZeroRttHandle = Tracked<IncomingZeroRttConnection>;
 
 type AcceptingShared = Arc<Tagged<AcceptingHandle>>;
 type ConnectingShared = Arc<Tagged<ConnectingHandle>>;
@@ -349,7 +371,11 @@ fn tracked<T>(value: T) -> Tracked<T> {
 /// # Safety
 /// `handle` must be null, or a live handle produced by this module or [`crate::stream`] for `T` and
 /// not yet freed. Kotlin's guard guarantees the second part: it releases a handle only once every
-/// call inside it has returned.
+/// call inside it has returned. A live handle tagged for a *different* type than `T` is also a
+/// supported input, not a violation of this contract: `handle::borrow` gates on `is::<T>(handle)`
+/// before casting (`handle.rs:81-88`) and answers `None` rather than reinterpreting the payload.
+/// [`connection_clone_any`] relies on exactly this, probing a handle against three different tagged
+/// types in turn.
 pub(crate) unsafe fn peek<'a, T: 'static>(handle: *mut c_void) -> Option<&'a Tracked<T>> {
     unsafe {
         if handle.is_null() {
@@ -390,12 +416,274 @@ pub(crate) unsafe fn with<T: 'static>(
 /// task is to own a clone and create the borrow inside the task. `Connection` is an `Arc` inside, so
 /// this is a refcount bump rather than a copy of anything.
 ///
-/// Shared with [`crate::stream`], whose four stream openers all need it.
+/// The remaining caller is [`crate::watch`]'s path watchers (`iroh4k_connection_watch_paths` and
+/// `iroh4k_connection_watch_path_events`, plus their JNI twins): they stay on this strict clone
+/// rather than [`connection_clone_any`] because `paths_stream()` and `path_events()` only exist on
+/// `Connection<HandshakeCompleted>` upstream (`iroh-1.0.3/src/endpoint/connection.rs:1157` and
+/// `:1176`) — the `PathStateReceiver` they read lives in `HandshakeCompletedData`, and a 0-RTT
+/// connection has no such data yet. The five synchronous exports below are strict for the same
+/// reason: `connection_alpn`, `connection_remote_id`, `connection_side`, `connection_paths` and
+/// `connection_rtt`.
 ///
 /// # Safety
 /// As [`peek`], for a `Connection` handle.
 pub(crate) unsafe fn connection_clone(handle: *mut c_void) -> Option<Connection> {
-    unsafe { peek::<Connection>(handle).map(|payload| (**payload).clone()) }
+    unsafe { peek_clone::<Connection>(handle) }
+}
+
+/// Clones the payload behind a handle of any type, for moving into a spawned future.
+///
+/// Nothing here is specific to `Connection` or to 0-RTT: every long-lived operation across this
+/// module's handle kinds — the completed `Connection` and both `OutgoingZeroRttConnection` /
+/// `IncomingZeroRttConnection` tags — needs the identical treatment the module header describes,
+/// because each is an `Arc` inside (a refcount bump, not a copy) and each has at least one accessor
+/// that borrows rather than consumes (`handshake_completed`, `paths_stream`, `path_events`, …), so the
+/// only way to await one from a `'static` task is to own a clone here and create the borrow entirely
+/// inside the spawned block. [`connection_clone`] is this function specialised to `Connection` and
+/// kept as its own name: most call sites want that one concrete type, and its own doc explains which
+/// of them must stay on the strict form rather than going through [`connection_clone_any`]. The
+/// 0-RTT handshake awaits — both the dialling side and the accepting side — peek
+/// `OutgoingZeroRttConnection` and `IncomingZeroRttConnection` straight through this function
+/// instead.
+///
+/// # Safety
+/// As [`peek`], for a handle of type `T`.
+pub(crate) unsafe fn peek_clone<T: Clone + 'static>(handle: *mut c_void) -> Option<T> {
+    unsafe { peek::<T>(handle).map(|payload| (**payload).clone()) }
+}
+
+/// The negotiated ALPN of a 0-RTT connection, or the absent-bytes answer before the handshake has
+/// settled it.
+///
+/// Neither [`with`] nor [`with_any`]: `alpn(&self) -> Option<Vec<u8>>` on `Connection<OutgoingZeroRtt>`
+/// and `Connection<IncomingZeroRtt>` (`iroh-1.0.3/src/endpoint/connection.rs:1201`, `:1236`) already
+/// answers with an absence rather than needing one imposed on it, and that absence is not
+/// [`ERROR_CLOSED`] — it is "not yet", a legitimate value on a handle that is very much still alive.
+/// So this probes the two 0-RTT tags directly instead of going through the `HandshakeCompleted`-only
+/// surface [`with_any`] serves or the strict, `Connection`-only [`with`]. A completed `Connection`
+/// handle is deliberately rejected here: [`iroh4k_connection_alpn`] already serves it, unconditionally.
+///
+/// # Safety
+/// `handle` must be null, or a live `OutgoingZeroRttConnection`/`IncomingZeroRttConnection` handle from
+/// this module that has not been freed.
+unsafe fn zero_rtt_alpn(handle: *mut c_void) -> *mut Iroh4kResult {
+    let alpn = unsafe {
+        if let Some(payload) = peek::<OutgoingZeroRttConnection>(handle) {
+            (**payload).alpn()
+        } else if let Some(payload) = peek::<IncomingZeroRttConnection>(handle) {
+            (**payload).alpn()
+        } else {
+            return released();
+        }
+    };
+    match alpn {
+        Some(alpn) => bytes_result(alpn),
+        None => ok_result(),
+    }
+}
+
+/// The remote's [`EndpointId`], or the absent-bytes answer before the handshake has established it.
+///
+/// As [`zero_rtt_alpn`]: `remote_id(&self)` on both 0-RTT kinds answers
+/// `Result<EndpointId, RemoteEndpointIdError>`, and here an `Err` means only "not yet" — not a fault
+/// worth its own code — so it collapses to the same absent-bytes answer `None` gets.
+///
+/// # Safety
+/// As [`zero_rtt_alpn`].
+unsafe fn zero_rtt_remote_id(handle: *mut c_void) -> *mut Iroh4kResult {
+    let remote_id = unsafe {
+        if let Some(payload) = peek::<OutgoingZeroRttConnection>(handle) {
+            (**payload).remote_id()
+        } else if let Some(payload) = peek::<IncomingZeroRttConnection>(handle) {
+            (**payload).remote_id()
+        } else {
+            return released();
+        }
+    };
+    match remote_id {
+        Ok(id) => bytes_result(id.as_bytes().to_vec()),
+        Err(_) => ok_result(),
+    }
+}
+
+/// A clone of whatever connection a handle holds, whatever handshake state it is in.
+///
+/// The three states are distinct Rust types upstream — `Connection<HandshakeCompleted>`,
+/// `Connection<OutgoingZeroRtt>` and `Connection<IncomingZeroRtt>` — with a private `data` field and
+/// no conversion between them (`iroh-1.0.3/src/endpoint/connection.rs:737`). Everything on
+/// `impl<T: ConnectionState>` is common to all three, so the exports for that surface probe the
+/// three tags in turn and forward through this enum rather than existing three times.
+///
+/// The strict [`connection_clone`] stays: `watch.rs`'s path watchers, `connection_side`,
+/// `connection_alpn`, `connection_remote_id`, `connection_paths` and `connection_rtt` are
+/// `HandshakeCompleted`-only — `alpn`, `remote_id`, `paths` and `side` live on a *separate* `impl`
+/// block upstream that is not generic over `ConnectionState`, and `connection_rtt` reads `paths()`
+/// to find the selected path's latency — so they must reject a 0-RTT handle rather than be handed
+/// one they cannot serve.
+pub(crate) enum AnyConnection {
+    Completed(Connection),
+    Outgoing(OutgoingZeroRttConnection),
+    Incoming(IncomingZeroRttConnection),
+}
+
+/// Runs `$body` against the connection inside `$self`, whatever its state.
+///
+/// A macro rather than a method taking a closure: the three arms hold three different concrete
+/// `Connection<State>` types, so a closure parameter would need `dyn` or a fourth generic — this
+/// keeps every call monomorphic and lets `$body` be `async` where the caller needs it to be.
+macro_rules! any_connection {
+    ($self:expr, $c:ident => $body:expr) => {
+        match $self {
+            AnyConnection::Completed($c) => $body,
+            AnyConnection::Outgoing($c) => $body,
+            AnyConnection::Incoming($c) => $body,
+        }
+    };
+}
+
+impl AnyConnection {
+    /// Opens a bidirectional stream. See `impl<T: ConnectionState> Connection<T>::open_bi`.
+    ///
+    /// `async fn` rather than the brief's `fn` returning `impl Future` explicitly: the two desugar to
+    /// the same borrow of `&self` and the same opaque future, and clippy's `manual_async_fn` — part
+    /// of this crate's `-D warnings` gate — asks for the shorter form.
+    pub(crate) async fn open_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {
+        any_connection!(self, c => c.open_bi().await)
+    }
+
+    /// Accepts the peer's next bidirectional stream. See `Connection::accept_bi`.
+    pub(crate) async fn accept_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {
+        any_connection!(self, c => c.accept_bi().await)
+    }
+
+    /// Opens a unidirectional stream. See `Connection::open_uni`.
+    pub(crate) async fn open_uni(&self) -> Result<SendStream, ConnectionError> {
+        any_connection!(self, c => c.open_uni().await)
+    }
+
+    /// Accepts the peer's next unidirectional stream. See `Connection::accept_uni`.
+    pub(crate) async fn accept_uni(&self) -> Result<RecvStream, ConnectionError> {
+        any_connection!(self, c => c.accept_uni().await)
+    }
+
+    /// Suspends until a datagram arrives, and answers with its bytes.
+    ///
+    /// Answers `Vec<u8>` rather than iroh's own `bytes::Bytes`: `bytes` is not a direct dependency of
+    /// this crate — see the note on [`connection_send_datagram`] — so naming its type here would
+    /// need one. The copy this costs is the same one `connection_read_datagram` already paid before
+    /// this change.
+    pub(crate) async fn read_datagram(&self) -> Result<Vec<u8>, ConnectionError> {
+        any_connection!(self, c => c.read_datagram().await).map(|data| data.to_vec())
+    }
+
+    /// Sends a datagram, waiting for buffer space if there is none. See `Connection::send_datagram_wait`.
+    pub(crate) async fn send_datagram_wait(&self, data: Vec<u8>) -> Result<(), SendDatagramError> {
+        any_connection!(self, c => c.send_datagram_wait(data.into()).await)
+    }
+
+    /// Suspends until the connection closes, then reports why. See `Connection::closed`.
+    pub(crate) async fn closed(&self) -> ConnectionError {
+        any_connection!(self, c => c.closed().await)
+    }
+
+    /// Connection-wide statistics. See `Connection::stats`.
+    pub(crate) fn stats(&self) -> ConnectionStats {
+        any_connection!(self, c => c.stats())
+    }
+
+    /// A connection identifier that survives address and connection-id changes. See
+    /// `Connection::stable_id`.
+    pub(crate) fn stable_id(&self) -> usize {
+        any_connection!(self, c => c.stable_id())
+    }
+
+    /// Why the connection closed, or absent while it is still open. See `Connection::close_reason`.
+    pub(crate) fn close_reason(&self) -> Option<ConnectionError> {
+        any_connection!(self, c => c.close_reason())
+    }
+
+    /// Closes the connection immediately. See `Connection::close`.
+    pub(crate) fn close(&self, code: VarInt, reason: &[u8]) {
+        any_connection!(self, c => c.close(code, reason))
+    }
+
+    /// Sends an unreliable datagram, failing rather than waiting if there is no buffer space.
+    ///
+    /// Takes `Vec<u8>` rather than `bytes::Bytes` for the reason [`read_datagram`](Self::read_datagram)
+    /// gives; the `.into()` conversion is resolved from `Connection::send_datagram`'s own signature.
+    pub(crate) fn send_datagram(&self, data: Vec<u8>) -> Result<(), SendDatagramError> {
+        any_connection!(self, c => c.send_datagram(data.into()))
+    }
+
+    /// The largest datagram this connection can currently carry. See `Connection::max_datagram_size`.
+    pub(crate) fn max_datagram_size(&self) -> Option<usize> {
+        any_connection!(self, c => c.max_datagram_size())
+    }
+
+    /// Bytes free in the outgoing datagram buffer. See `Connection::datagram_send_buffer_space`.
+    pub(crate) fn datagram_send_buffer_space(&self) -> usize {
+        any_connection!(self, c => c.datagram_send_buffer_space())
+    }
+
+    /// Sets how many bidirectional streams the peer may have open at once.
+    pub(crate) fn set_max_concurrent_bi_streams(&self, n: VarInt) {
+        any_connection!(self, c => c.set_max_concurrent_bi_streams(n))
+    }
+
+    /// Sets how many unidirectional streams the peer may have open at once.
+    pub(crate) fn set_max_concurrent_uni_streams(&self, n: VarInt) {
+        any_connection!(self, c => c.set_max_concurrent_uni_streams(n))
+    }
+
+    /// Sets the connection-level flow-control receive window, in bytes.
+    pub(crate) fn set_receive_window(&self, n: VarInt) {
+        any_connection!(self, c => c.set_receive_window(n))
+    }
+}
+
+/// Clones whatever connection `handle` holds, probing the three tags in turn.
+///
+/// Each probe goes through [`peek`] for its own type, so the `TypeId` at offset 0 is compared
+/// rather than assumed — never read the tag once and project over it. The order tried is the
+/// common case first (a handshake-completed `Connection` is by far the most frequent handle this
+/// crate resolves), but it is not a priority order in any other sense: the three tags are disjoint,
+/// so at most one `peek` can ever succeed.
+///
+/// # Safety
+/// As [`peek`], for a connection handle of any of the three kinds.
+pub(crate) unsafe fn connection_clone_any(handle: *mut c_void) -> Option<AnyConnection> {
+    unsafe {
+        if let Some(p) = peek::<Connection>(handle) {
+            return Some(AnyConnection::Completed((**p).clone()));
+        }
+        if let Some(p) = peek::<OutgoingZeroRttConnection>(handle) {
+            return Some(AnyConnection::Outgoing((**p).clone()));
+        }
+        peek::<IncomingZeroRttConnection>(handle).map(|p| AnyConnection::Incoming((**p).clone()))
+    }
+}
+
+/// Runs `f` against the connection behind `handle`, whatever handshake state it is in, or answers
+/// [`ERROR_CLOSED`].
+///
+/// The [`with`] of the shared surface: it resolves through [`connection_clone_any`] rather than
+/// [`peek`], because the shared exports must accept a completed connection as well as either 0-RTT
+/// handle. The clone this takes is an `Arc` refcount bump — an atomic increment paired with the
+/// eventual decrement on drop — rather than a copy of anything, so it is negligible next to the FFI
+/// crossing itself, the same way this crate accounts for `Connection`'s clone cost elsewhere.
+///
+/// # Safety
+/// As [`connection_clone_any`].
+pub(crate) unsafe fn with_any(
+    handle: *mut c_void,
+    f: impl FnOnce(&AnyConnection) -> *mut Iroh4kResult,
+) -> *mut Iroh4kResult {
+    unsafe {
+        match connection_clone_any(handle) {
+            Some(connection) => f(&connection),
+            None => released(),
+        }
+    }
 }
 
 /// Runs `f` inside the shared tokio runtime's context.
@@ -691,8 +979,11 @@ async fn accept_next(endpoint: Option<Endpoint>) -> OpResult {
 /// `opts` carries an optional transport configuration — the same `writeOptionalTransportConfig`
 /// payload `endpoint.rs`'s bind configuration ends with — decoded below and, when present, handed
 /// to `connect_with_opts` through `ConnectOptions::with_transport_config`, replacing the
-/// endpoint's own default outright rather than merging with it. Still not wired up: 0-RTT and
-/// additional ALPNs, the other options `connect_with_opts` takes.
+/// endpoint's own default outright rather than merging with it. Still not wired up: additional
+/// ALPNs, the other option `connect_with_opts` takes. 0-RTT does not travel through this function's
+/// `opts` at all — `ConnectOptions` upstream has no field for it; it is `Connecting::into_0rtt`
+/// instead, wired up separately below as [`connecting_zero_rtt`] and reached from Kotlin through
+/// `Connecting.zeroRtt()`.
 async fn start_connect(
     endpoint: Option<Endpoint>,
     addr: Vec<u8>,
@@ -766,6 +1057,111 @@ async fn connecting_connect(slot: Option<ConnectingShared>) -> OpResult {
     finish_handshake(connecting.await)
 }
 
+/// Converts an outbound attempt into a 0-RTT connection, or hands the attempt back untouched.
+///
+/// The two-way branch of `Connecting::into_0rtt` (`iroh-1.0.3/src/endpoint/connection.rs:528`): the
+/// `Err` arm is *not* a failure, it is "no session ticket for this peer", and it returns the same
+/// still-usable `Connecting`. So the `Err` arm puts the value back under the guard it was taken with
+/// and answers with a null handle and no error, which Kotlin reads as `null`.
+///
+/// `into_0rtt` is synchronous, so there is no await point between the `take` and the put-back and a
+/// cancellation cannot observe an empty slot mid-branch. A cancel while awaiting `lock()` is harmless:
+/// nothing has been taken yet.
+async fn connecting_zero_rtt(slot: Option<ConnectingShared>) -> OpResult {
+    let Some(slot) = slot else {
+        return OpResult::new(released());
+    };
+    let mut guard = slot.inner.lock().await;
+    let Some(connecting) = guard.take() else {
+        return OpResult::new(consumed("connection attempt"));
+    };
+    match connecting.into_0rtt() {
+        Ok(zero) => {
+            let handle = handle::into_handle(tracked(zero));
+            OpResult::with_handle(handle_result(handle), iroh4k_outgoing_zero_rtt_free)
+        }
+        Err(connecting) => {
+            *guard = Some(connecting);
+            OpResult::new(handle_result(std::ptr::null_mut()))
+        }
+    }
+}
+
+/// Converts an accepted handshake into a 0-RTT connection.
+///
+/// Infallible upstream (`iroh-1.0.3/src/endpoint/connection.rs:620`), so unlike [`connecting_zero_rtt`]
+/// there is nothing to put back: the value is taken and never returned to the slot. That asymmetry with
+/// the dialling side is not an oversight — it is the whole reason this is its own function rather than
+/// a shared one parameterised over both sides: iroh accepts 0-RTT at the TLS layer on every endpoint
+/// (`max_early_data_size` is hardcoded, `iroh-1.0.3/src/tls.rs:118`), so an accepted handshake can
+/// always be converted; only a *dial* can lack a session ticket to convert with.
+///
+/// Note that upstream's infallibility rests on an internal
+/// `.expect("incoming connections can always be converted to 0-RTT")` (:624). Under this crate's
+/// `panic = "abort"` that would kill the process if noq's behaviour ever changed. The panic is not ours
+/// and breaks none of our rules, but it is worth knowing rather than discovering.
+async fn accepting_zero_rtt(slot: Option<AcceptingShared>) -> OpResult {
+    let Some(slot) = slot else {
+        return OpResult::new(released());
+    };
+    let Some(accepting) = slot.take().await else {
+        return OpResult::new(consumed("accepting connection"));
+    };
+    let handle = handle::into_handle(tracked(accepting.into_0rtt()));
+    OpResult::with_handle(handle_result(handle), iroh4k_incoming_zero_rtt_free)
+}
+
+/// Awaits the handshake behind a 0-RTT connection, reporting whether the early data was accepted.
+///
+/// Backed by a `Shared` future upstream (`connection.rs:1259`), so this is **re-awaitable**: a
+/// cancelled call may simply be made again, unlike `Connecting::connect`. Each success mints a fresh
+/// `Connection` handle with its own lifetime.
+///
+/// Both arms of `ZeroRttStatus` carry a working connection: rejection means the early streams are dead
+/// and their data must be resent, not that there is no connection.
+async fn outgoing_zero_rtt_await_handshake(zero: Option<OutgoingZeroRttConnection>) -> OpResult {
+    let Some(zero) = zero else {
+        return OpResult::new(released());
+    };
+    match zero.handshake_completed().await {
+        Ok(status) => {
+            let (connection, accepted) = match status {
+                ZeroRttStatus::Accepted(connection) => (connection, 1),
+                ZeroRttStatus::Rejected(connection) => (connection, 0),
+            };
+            let handle = handle::into_handle(tracked(connection));
+            // `Iroh4kResult` carries a handle and a scalar at once (`core.rs:68`), so the accepted
+            // bit needs no codec payload of its own.
+            let result = Iroh4kResult {
+                handle,
+                i64_val: accepted,
+                ..Default::default()
+            }
+            .leak();
+            OpResult::with_handle(result, iroh4k_connection_free)
+        }
+        Err(error) => OpResult::new(error_result(
+            ERROR_CONNECT,
+            format!("the 0-RTT handshake failed: {error}"),
+        )),
+    }
+}
+
+/// Awaits the handshake behind an inbound 0-RTT connection.
+///
+/// No accepted/rejected distinction, unlike [`outgoing_zero_rtt_await_handshake`]:
+/// `IncomingZeroRttConnection::handshake_completed` answers a bare `Connection`
+/// (`iroh-1.0.3/src/endpoint/connection.rs:1217`), because that question is meaningless on this side —
+/// the server is the one who decided to read early data at all, by calling [`accepting_zero_rtt`] in
+/// the first place. Shares the dialling side's re-awaitability and its two-handle lifetime, so
+/// [`finish_handshake`] — already built for exactly this shape — is reused verbatim.
+async fn incoming_zero_rtt_await_handshake(zero: Option<IncomingZeroRttConnection>) -> OpResult {
+    let Some(zero) = zero else {
+        return OpResult::new(released());
+    };
+    finish_handshake(zero.handshake_completed().await)
+}
+
 /// The ALPN negotiated for a handshake still in progress.
 ///
 /// Reads it *without* consuming the future, which is the whole point: this is how a server with
@@ -824,7 +1220,10 @@ fn connection_remote_id(connection: &Connection) -> Vec<u8> {
 ///
 /// iroh types it as `usize`; it is reported as `i64`, which is lossless on every target this builds
 /// for and is the width Kotlin's `Long` has anyway.
-fn connection_stable_id(connection: &Connection) -> i64 {
+///
+/// Takes an [`AnyConnection`] — `stable_id` is on `impl<T: ConnectionState>` upstream, so it answers
+/// for a 0-RTT handle exactly as it does for a completed one.
+fn connection_stable_id(connection: &AnyConnection) -> i64 {
     connection.stable_id() as i64
 }
 
@@ -833,7 +1232,9 @@ fn connection_stable_id(connection: &Connection) -> i64 {
 /// Reported as iroh's `Display` text rather than as a code: `ConnectionError` is `#[non_exhaustive]`
 /// with a dozen variants whose ordinals would be a second wire protocol to keep in step, and the
 /// question a caller asks of a closed connection is "why", not "which discriminant".
-fn connection_close_reason(connection: &Connection) -> Vec<u8> {
+///
+/// Takes an [`AnyConnection`] — see [`connection_stable_id`].
+fn connection_close_reason(connection: &AnyConnection) -> Vec<u8> {
     let mut w = Writer::new();
     match connection.close_reason() {
         None => {
@@ -847,7 +1248,13 @@ fn connection_close_reason(connection: &Connection) -> Vec<u8> {
 }
 
 /// Closes the connection immediately, handing `error_code` and `reason` to the peer verbatim.
-fn connection_close(connection: &Connection, error_code: i64, reason: &[u8]) -> *mut Iroh4kResult {
+///
+/// Takes an [`AnyConnection`] — see [`connection_stable_id`].
+fn connection_close(
+    connection: &AnyConnection,
+    error_code: i64,
+    reason: &[u8],
+) -> *mut Iroh4kResult {
     // A QUIC application error code is a 62-bit varint, which is what [`varint`] enforces.
     match varint(error_code, "a connection error code") {
         Ok(code) => {
@@ -908,7 +1315,9 @@ fn connection_rtt(connection: &Connection) -> i64 {
 /// releases, and they answer a question about the QUIC implementation rather than about the
 /// application. What is here is what an application measures itself against: bytes and datagrams
 /// each way, and what was lost.
-fn connection_stats(connection: &Connection) -> Vec<u8> {
+///
+/// Takes an [`AnyConnection`] — see [`connection_stable_id`].
+fn connection_stats(connection: &AnyConnection) -> Vec<u8> {
     let stats: ConnectionStats = connection.stats();
     let mut w = Writer::new();
     write_udp_stats(&mut w, &stats.udp_tx);
@@ -965,15 +1374,19 @@ fn write_path(w: &mut Writer, path: &Path) {
 /// Absent means datagrams are switched off locally or unsupported by the peer — and it can also
 /// change during the connection as the path MTU estimate moves, which is why it is a call and not a
 /// value read once.
-fn connection_max_datagram_size(connection: &Connection) -> i64 {
+///
+/// Takes an [`AnyConnection`] — see [`connection_stable_id`].
+fn connection_max_datagram_size(connection: &AnyConnection) -> i64 {
     connection.max_datagram_size().map_or(-1, width)
 }
 
 /// Sends an unreliable datagram, failing rather than waiting if there is no buffer space.
-fn connection_send_datagram(connection: &Connection, payload: &[u8]) -> *mut Iroh4kResult {
-    // `.into()` rather than a named `bytes::Bytes`: the crate is not a direct dependency, and
-    // inference resolves the conversion from iroh's own signature without one.
-    match in_runtime(|| connection.send_datagram(payload.to_vec().into())) {
+///
+/// Takes an [`AnyConnection`] — see [`connection_stable_id`]. The `.into()` inside
+/// [`AnyConnection::send_datagram`] is what resolves `payload.to_vec()` into iroh's own
+/// `bytes::Bytes` without this crate needing to name that type: it is not a direct dependency.
+fn connection_send_datagram(connection: &AnyConnection, payload: &[u8]) -> *mut Iroh4kResult {
+    match in_runtime(|| connection.send_datagram(payload.to_vec())) {
         Ok(()) => ok_result(),
         Err(error) => datagram_failure(&error),
     }
@@ -996,11 +1409,13 @@ fn datagram_failure(error: &SendDatagramError) -> *mut Iroh4kResult {
 ///
 /// The three share a body because they share a shape: a QUIC varint out of caller input, applied to
 /// a live connection, reporting nothing back. `what` names the limit in a rejection message.
+///
+/// Takes an [`AnyConnection`] — see [`connection_stable_id`].
 fn connection_set_limit(
-    connection: &Connection,
+    connection: &AnyConnection,
     value: i64,
     what: &str,
-    apply: impl FnOnce(&Connection, VarInt),
+    apply: impl FnOnce(&AnyConnection, VarInt),
 ) -> *mut Iroh4kResult {
     match varint(value, what) {
         Ok(limit) => {
@@ -1014,8 +1429,11 @@ fn connection_set_limit(
 // ----------------------------------------------------------------------------
 // Shared logic — Connection, asynchronous
 //
-// Each of these borrows the connection to make its future, so each takes an owned `Connection` and
-// creates the borrow inside the spawned block. See the module header.
+// Each of these borrows the connection to make its future, so each takes an owned `AnyConnection`
+// and creates the borrow inside the spawned block. See the module header. Resolved through
+// `connection_clone_any` rather than `connection_clone`: `closed`, `send_datagram_wait` and
+// `read_datagram` are all on `impl<T: ConnectionState>` upstream, so a 0-RTT handle answers them
+// too.
 // ----------------------------------------------------------------------------
 
 /// Suspends until the connection closes, then reports why.
@@ -1023,7 +1441,7 @@ fn connection_set_limit(
 /// Not an error: iroh's `closed()` yields a `ConnectionError` for *every* ending, including the
 /// entirely routine ones — the peer closing deliberately, or this side having closed. So the reason
 /// travels as a successful string result and Kotlin decides what to make of it.
-async fn connection_closed(connection: Option<Connection>) -> OpResult {
+async fn connection_closed(connection: Option<AnyConnection>) -> OpResult {
     let Some(connection) = connection else {
         return OpResult::new(released());
     };
@@ -1033,25 +1451,25 @@ async fn connection_closed(connection: Option<Connection>) -> OpResult {
 
 /// Sends a datagram, waiting for buffer space if there is none.
 async fn connection_send_datagram_wait(
-    connection: Option<Connection>,
+    connection: Option<AnyConnection>,
     payload: Vec<u8>,
 ) -> OpResult {
     let Some(connection) = connection else {
         return OpResult::new(released());
     };
-    match connection.send_datagram_wait(payload.into()).await {
+    match connection.send_datagram_wait(payload).await {
         Ok(()) => OpResult::new(ok_result()),
         Err(error) => OpResult::new(datagram_failure(&error)),
     }
 }
 
 /// Suspends until a datagram arrives, and answers with its bytes.
-async fn connection_read_datagram(connection: Option<Connection>) -> OpResult {
+async fn connection_read_datagram(connection: Option<AnyConnection>) -> OpResult {
     let Some(connection) = connection else {
         return OpResult::new(released());
     };
     match connection.read_datagram().await {
-        Ok(datagram) => OpResult::new(bytes_result(datagram.to_vec())),
+        Ok(datagram) => OpResult::new(bytes_result(datagram)),
         // The only way this fails is the connection ending, which is what `ERROR_CLOSED` says.
         Err(error) => OpResult::new(error_result(
             ERROR_CLOSED,
@@ -1065,8 +1483,9 @@ async fn connection_read_datagram(connection: Option<Connection>) -> OpResult {
 /// The one-shot form of `start_connect` + `Connecting::connect`, and iroh's own `Endpoint::connect`
 /// is exactly that: it calls `connect_with_opts` with default options and awaits the `Connecting`.
 /// Both are kept because they answer different questions — this one for "give me a connection", the
-/// two-step one for "let me look at the handshake before I commit to it" (`Connecting::alpn`, and
-/// the 0-RTT and custom-options surface a later milestone will add there rather than here).
+/// two-step one for "let me look at the handshake before I commit to it" (`Connecting::alpn`, the
+/// 0-RTT surface — see `connecting_zero_rtt` — and the per-connection transport configuration
+/// `start_connect` above takes; none of those three has anywhere to attach on the one-shot form).
 async fn connect(endpoint: Option<Endpoint>, addr: Vec<u8>, alpn: Vec<u8>) -> OpResult {
     let Some(endpoint) = endpoint else {
         return OpResult::new(released());
@@ -1171,6 +1590,39 @@ pub unsafe extern "C" fn iroh4k_connecting_free(handle: *mut c_void) {
 pub unsafe extern "C" fn iroh4k_connection_free(handle: *mut c_void) {
     unsafe {
         handle::free::<ConnectionHandle>(handle);
+    }
+}
+
+/// Releases an `OutgoingZeroRttConnection` handle.
+///
+/// Dropping the last reference closes the connection with error code `0` and an empty reason, which
+/// is iroh's own behaviour — exactly as [`iroh4k_connection_free`] documents. The distinction worth
+/// having in mind here: `Connection<OutgoingZeroRtt>::handshake_completed(&self)` borrows rather than
+/// consumes (`iroh-1.0.3/src/endpoint/connection.rs:1259`), and the `Connection` it produces arrives
+/// *inside* the returned `ZeroRttStatus::Accepted` or `ZeroRttStatus::Rejected` (`:693`-`:701`), not
+/// in place of this handle. So a 0-RTT handle is never the last reference once that call has
+/// succeeded — this handle and the `Connection` handle wrapped in its `ZeroRttStatus` are two
+/// independent references, and both must be released before the connection actually closes.
+///
+/// # Safety
+/// As [`iroh4k_incoming_free`], for an `OutgoingZeroRttConnection` handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_outgoing_zero_rtt_free(handle: *mut c_void) {
+    unsafe {
+        handle::free::<OutgoingZeroRttHandle>(handle);
+    }
+}
+
+/// Releases an `IncomingZeroRttConnection` handle.
+///
+/// As [`iroh4k_outgoing_zero_rtt_free`], for the server side of a 0-RTT handshake.
+///
+/// # Safety
+/// As [`iroh4k_incoming_free`], for an `IncomingZeroRttConnection` handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_incoming_zero_rtt_free(handle: *mut c_void) {
+    unsafe {
+        handle::free::<IncomingZeroRttHandle>(handle);
     }
 }
 
@@ -1301,6 +1753,31 @@ pub unsafe extern "C" fn iroh4k_connecting_remote_id(handle: *mut c_void) -> *mu
 }
 
 // ----------------------------------------------------------------------------
+// 0-RTT — synchronous, and answering both handle kinds
+// ----------------------------------------------------------------------------
+
+/// The negotiated ALPN of a 0-RTT connection, as an optional bytes payload — absent before the
+/// handshake has settled it.
+///
+/// # Safety
+/// `handle` must be null, or a live `OutgoingZeroRttConnection`/`IncomingZeroRttConnection` handle
+/// from this module that has not been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_zero_rtt_alpn(handle: *mut c_void) -> *mut Iroh4kResult {
+    unsafe { zero_rtt_alpn(handle) }
+}
+
+/// The remote's endpoint id of a 0-RTT connection, as an optional bytes payload — absent before the
+/// handshake has established it.
+///
+/// # Safety
+/// As [`iroh4k_zero_rtt_alpn`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_zero_rtt_remote_id(handle: *mut c_void) -> *mut Iroh4kResult {
+    unsafe { zero_rtt_remote_id(handle) }
+}
+
+// ----------------------------------------------------------------------------
 // Connection — synchronous
 // ----------------------------------------------------------------------------
 
@@ -1333,11 +1810,12 @@ pub unsafe extern "C" fn iroh4k_connection_remote_id(handle: *mut c_void) -> *mu
 /// A stable identifier for the connection, in `i64_val`.
 ///
 /// # Safety
-/// As [`iroh4k_connection_alpn`].
+/// `handle` must satisfy [`connection_clone_any`]'s contract for a connection handle of any of the
+/// three kinds — `stable_id` is on `impl<T: ConnectionState>` upstream.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_stable_id(handle: *mut c_void) -> *mut Iroh4kResult {
     unsafe {
-        with::<Connection>(handle, |connection| {
+        with_any(handle, |connection| {
             i64_result(connection_stable_id(connection))
         })
     }
@@ -1346,11 +1824,11 @@ pub unsafe extern "C" fn iroh4k_connection_stable_id(handle: *mut c_void) -> *mu
 /// Why the connection closed, as an optional string payload.
 ///
 /// # Safety
-/// As [`iroh4k_connection_alpn`].
+/// As [`iroh4k_connection_stable_id`] — `close_reason` is on `impl<T: ConnectionState>` too.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_close_reason(handle: *mut c_void) -> *mut Iroh4kResult {
     unsafe {
-        with::<Connection>(handle, |connection| {
+        with_any(handle, |connection| {
             bytes_result(connection_close_reason(connection))
         })
     }
@@ -1359,8 +1837,9 @@ pub unsafe extern "C" fn iroh4k_connection_close_reason(handle: *mut c_void) -> 
 /// Closes the connection immediately with `error_code` and `reason`.
 ///
 /// # Safety
-/// `handle` must satisfy [`peek`]'s contract for a `Connection` handle, and `reason`/`reason_len`
-/// must satisfy [`borrowed`]'s.
+/// `handle` must satisfy [`connection_clone_any`]'s contract for a connection handle of any of the
+/// three kinds — `close` is on `impl<T: ConnectionState>` too. `reason`/`reason_len` must satisfy
+/// [`borrowed`]'s contract.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_close(
     handle: *mut c_void,
@@ -1370,7 +1849,7 @@ pub unsafe extern "C" fn iroh4k_connection_close(
 ) -> *mut Iroh4kResult {
     unsafe {
         let reason = borrowed(reason, reason_len);
-        with::<Connection>(handle, |connection| {
+        with_any(handle, |connection| {
             connection_close(connection, error_code, reason)
         })
     }
@@ -1397,11 +1876,11 @@ pub unsafe extern "C" fn iroh4k_connection_rtt(handle: *mut c_void) -> *mut Iroh
 /// Connection-wide statistics, as a codec payload.
 ///
 /// # Safety
-/// As [`iroh4k_connection_alpn`].
+/// As [`iroh4k_connection_stable_id`] — `stats` is on `impl<T: ConnectionState>` too.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_stats(handle: *mut c_void) -> *mut Iroh4kResult {
     unsafe {
-        with::<Connection>(handle, |connection| {
+        with_any(handle, |connection| {
             bytes_result(connection_stats(connection))
         })
     }
@@ -1423,13 +1902,13 @@ pub unsafe extern "C" fn iroh4k_connection_paths(handle: *mut c_void) -> *mut Ir
 /// The largest datagram the connection can currently carry, or `-1`, in `i64_val`.
 ///
 /// # Safety
-/// As [`iroh4k_connection_alpn`].
+/// As [`iroh4k_connection_stable_id`] — `max_datagram_size` is on `impl<T: ConnectionState>` too.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_max_datagram_size(
     handle: *mut c_void,
 ) -> *mut Iroh4kResult {
     unsafe {
-        with::<Connection>(handle, |connection| {
+        with_any(handle, |connection| {
             i64_result(connection_max_datagram_size(connection))
         })
     }
@@ -1438,13 +1917,14 @@ pub unsafe extern "C" fn iroh4k_connection_max_datagram_size(
 /// Bytes free in the outgoing datagram buffer, in `i64_val`.
 ///
 /// # Safety
-/// As [`iroh4k_connection_alpn`].
+/// As [`iroh4k_connection_stable_id`] — `datagram_send_buffer_space` is on
+/// `impl<T: ConnectionState>` too.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_datagram_send_buffer_space(
     handle: *mut c_void,
 ) -> *mut Iroh4kResult {
     unsafe {
-        with::<Connection>(handle, |connection| {
+        with_any(handle, |connection| {
             i64_result(width(connection.datagram_send_buffer_space()))
         })
     }
@@ -1453,8 +1933,9 @@ pub unsafe extern "C" fn iroh4k_connection_datagram_send_buffer_space(
 /// Sends an unreliable datagram, failing rather than waiting for buffer space.
 ///
 /// # Safety
-/// `handle` must satisfy [`peek`]'s contract for a `Connection` handle, and `payload`/`payload_len`
-/// must satisfy [`borrowed`]'s.
+/// `handle` must satisfy [`connection_clone_any`]'s contract for a connection handle of any of the
+/// three kinds — `send_datagram` is on `impl<T: ConnectionState>` too. `payload`/`payload_len` must
+/// satisfy [`borrowed`]'s contract.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_send_datagram(
     handle: *mut c_void,
@@ -1463,7 +1944,7 @@ pub unsafe extern "C" fn iroh4k_connection_send_datagram(
 ) -> *mut Iroh4kResult {
     unsafe {
         let payload = borrowed(payload, payload_len);
-        with::<Connection>(handle, |connection| {
+        with_any(handle, |connection| {
             connection_send_datagram(connection, payload)
         })
     }
@@ -1472,14 +1953,15 @@ pub unsafe extern "C" fn iroh4k_connection_send_datagram(
 /// Sets how many bidirectional streams the peer may have open at once.
 ///
 /// # Safety
-/// As [`iroh4k_connection_alpn`].
+/// As [`iroh4k_connection_stable_id`] — `set_max_concurrent_bi_streams` is on
+/// `impl<T: ConnectionState>` too.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_set_max_concurrent_bi_streams(
     handle: *mut c_void,
     count: i64,
 ) -> *mut Iroh4kResult {
     unsafe {
-        with::<Connection>(handle, |connection| {
+        with_any(handle, |connection| {
             connection_set_limit(
                 connection,
                 count,
@@ -1493,14 +1975,15 @@ pub unsafe extern "C" fn iroh4k_connection_set_max_concurrent_bi_streams(
 /// Sets how many unidirectional streams the peer may have open at once.
 ///
 /// # Safety
-/// As [`iroh4k_connection_alpn`].
+/// As [`iroh4k_connection_stable_id`] — `set_max_concurrent_uni_streams` is on
+/// `impl<T: ConnectionState>` too.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_set_max_concurrent_uni_streams(
     handle: *mut c_void,
     count: i64,
 ) -> *mut Iroh4kResult {
     unsafe {
-        with::<Connection>(handle, |connection| {
+        with_any(handle, |connection| {
             connection_set_limit(
                 connection,
                 count,
@@ -1514,14 +1997,14 @@ pub unsafe extern "C" fn iroh4k_connection_set_max_concurrent_uni_streams(
 /// Sets the connection-level flow-control receive window, in bytes.
 ///
 /// # Safety
-/// As [`iroh4k_connection_alpn`].
+/// As [`iroh4k_connection_stable_id`] — `set_receive_window` is on `impl<T: ConnectionState>` too.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_set_receive_window(
     handle: *mut c_void,
     bytes: i64,
 ) -> *mut Iroh4kResult {
     unsafe {
-        with::<Connection>(handle, |connection| {
+        with_any(handle, |connection| {
             connection_set_limit(
                 connection,
                 bytes,
@@ -1620,6 +2103,24 @@ pub unsafe extern "C" fn iroh4k_accepting_alpn(
     }
 }
 
+/// Converts an accepted handshake into a 0-RTT connection; the result carries an
+/// `IncomingZeroRttConnection` handle. Asynchronous. Unlike [`iroh4k_connecting_zero_rtt`], never
+/// answers a null handle — see [`accepting_zero_rtt`].
+///
+/// # Safety
+/// As [`iroh4k_accepting_connect`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_accepting_zero_rtt(
+    handle: *mut c_void,
+    callback: *mut c_void,
+    fun: Completion,
+) -> i64 {
+    unsafe {
+        let slot = share::<Once<Accepting>>(handle);
+        ops::spawn_callback(callback, fun, accepting_zero_rtt(slot))
+    }
+}
+
 /// Completes an outbound handshake; the result carries a `Connection` handle. Asynchronous.
 ///
 /// # Safety
@@ -1652,6 +2153,62 @@ pub unsafe extern "C" fn iroh4k_connecting_alpn(
     }
 }
 
+/// Converts an outbound attempt into a 0-RTT connection, or hands it back untouched; the result
+/// carries an `OutgoingZeroRttConnection` handle, or a null handle when this endpoint holds no TLS
+/// session ticket for the peer. Asynchronous. See [`connecting_zero_rtt`].
+///
+/// # Safety
+/// As [`iroh4k_connecting_connect`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_connecting_zero_rtt(
+    handle: *mut c_void,
+    callback: *mut c_void,
+    fun: Completion,
+) -> i64 {
+    unsafe {
+        let slot = share::<ConnectingSlot>(handle);
+        ops::spawn_callback(callback, fun, connecting_zero_rtt(slot))
+    }
+}
+
+/// Awaits the handshake behind a 0-RTT connection; the result carries a fresh `Connection` handle,
+/// with the accepted bit in `i64_val`. Asynchronous. See [`outgoing_zero_rtt_await_handshake`].
+///
+/// # Safety
+/// `handle` must satisfy [`peek_clone`]'s contract for an `OutgoingZeroRttConnection` handle.
+/// Resolved through [`peek_clone`] rather than [`share`]: `handshake_completed` borrows rather
+/// than consumes, so — as every other borrowed future in this module — an owned clone is taken here
+/// and the borrow is created entirely inside the spawned task.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_outgoing_zero_rtt_await_handshake(
+    handle: *mut c_void,
+    callback: *mut c_void,
+    fun: Completion,
+) -> i64 {
+    unsafe {
+        let zero = peek_clone::<OutgoingZeroRttConnection>(handle);
+        ops::spawn_callback(callback, fun, outgoing_zero_rtt_await_handshake(zero))
+    }
+}
+
+/// Awaits the handshake behind an inbound 0-RTT connection; the result carries a fresh `Connection`
+/// handle, with no accepted/rejected distinction. Asynchronous. See
+/// [`incoming_zero_rtt_await_handshake`].
+///
+/// # Safety
+/// `handle` must satisfy [`peek_clone`]'s contract for an `IncomingZeroRttConnection` handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh4k_incoming_zero_rtt_await_handshake(
+    handle: *mut c_void,
+    callback: *mut c_void,
+    fun: Completion,
+) -> i64 {
+    unsafe {
+        let zero = peek_clone::<IncomingZeroRttConnection>(handle);
+        ops::spawn_callback(callback, fun, incoming_zero_rtt_await_handshake(zero))
+    }
+}
+
 /// Dials `addr` and completes the handshake; the result carries a `Connection` handle. Asynchronous.
 ///
 /// # Safety
@@ -1677,7 +2234,8 @@ pub unsafe extern "C" fn iroh4k_endpoint_connect(
 /// Suspends until the connection closes, then answers with iroh's reason text. Asynchronous.
 ///
 /// # Safety
-/// `handle` must satisfy [`peek`]'s contract for a `Connection` handle.
+/// `handle` must satisfy [`connection_clone_any`]'s contract for a connection handle of any of the
+/// three kinds — `closed` is on `impl<T: ConnectionState>` upstream.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_closed(
     handle: *mut c_void,
@@ -1685,7 +2243,7 @@ pub unsafe extern "C" fn iroh4k_connection_closed(
     fun: Completion,
 ) -> i64 {
     unsafe {
-        let connection = connection_clone(handle);
+        let connection = connection_clone_any(handle);
         ops::spawn_callback(callback, fun, connection_closed(connection))
     }
 }
@@ -1693,8 +2251,9 @@ pub unsafe extern "C" fn iroh4k_connection_closed(
 /// Sends a datagram, waiting for buffer space if there is none. Asynchronous.
 ///
 /// # Safety
-/// `handle` must satisfy [`peek`]'s contract for a `Connection` handle. `payload`/`payload_len` must
-/// be null/0 or describe that many readable bytes; the buffer is **copied** before the future is
+/// `handle` must satisfy [`connection_clone_any`]'s contract for a connection handle of any of the
+/// three kinds — `send_datagram_wait` is on `impl<T: ConnectionState>` too. `payload`/`payload_len`
+/// must be null/0 or describe that many readable bytes; the buffer is **copied** before the future is
 /// spawned, so the caller may free it as soon as this returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_send_datagram_wait(
@@ -1705,7 +2264,7 @@ pub unsafe extern "C" fn iroh4k_connection_send_datagram_wait(
     fun: Completion,
 ) -> i64 {
     unsafe {
-        let connection = connection_clone(handle);
+        let connection = connection_clone_any(handle);
         let payload = owned_bytes(payload, payload_len);
         ops::spawn_callback(
             callback,
@@ -1718,7 +2277,7 @@ pub unsafe extern "C" fn iroh4k_connection_send_datagram_wait(
 /// Suspends until a datagram arrives, and answers with its bytes. Asynchronous.
 ///
 /// # Safety
-/// As [`iroh4k_connection_closed`].
+/// As [`iroh4k_connection_closed`] — `read_datagram` is on `impl<T: ConnectionState>` too.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iroh4k_connection_read_datagram(
     handle: *mut c_void,
@@ -1726,7 +2285,7 @@ pub unsafe extern "C" fn iroh4k_connection_read_datagram(
     fun: Completion,
 ) -> i64 {
     unsafe {
-        let connection = connection_clone(handle);
+        let connection = connection_clone_any(handle);
         ops::spawn_callback(callback, fun, connection_read_datagram(connection))
     }
 }
@@ -1815,6 +2374,26 @@ mod jni_facade {
         handle: jlong,
     ) {
         unsafe { handle::free::<ConnectionHandle>(as_handle(handle)) };
+    }
+
+    /// As [`super::iroh4k_outgoing_zero_rtt_free`].
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_freeOutgoingZeroRtt(
+        _env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+    ) {
+        unsafe { handle::free::<OutgoingZeroRttHandle>(as_handle(handle)) };
+    }
+
+    /// As [`super::iroh4k_incoming_zero_rtt_free`].
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_freeIncomingZeroRtt(
+        _env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+    ) {
+        unsafe { handle::free::<IncomingZeroRttHandle>(as_handle(handle)) };
     }
 
     // ── Incoming ─────────────────────────────────────────────────────────────────────────────
@@ -1945,6 +2524,30 @@ mod jni_facade {
         finish(&mut env, result)
     }
 
+    // ── 0-RTT — synchronous, answering both handle kinds ─────────────────────────────────────
+
+    /// As [`super::iroh4k_zero_rtt_alpn`].
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_zeroRttAlpn(
+        mut env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+    ) -> jbyteArray {
+        let result = unsafe { zero_rtt_alpn(as_handle(handle)) };
+        finish(&mut env, result)
+    }
+
+    /// As [`super::iroh4k_zero_rtt_remote_id`].
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_zeroRttRemoteId(
+        mut env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+    ) -> jbyteArray {
+        let result = unsafe { zero_rtt_remote_id(as_handle(handle)) };
+        finish(&mut env, result)
+    }
+
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectionAlpn(
         mut env: EnvUnowned,
@@ -1980,7 +2583,7 @@ mod jni_facade {
         handle: jlong,
     ) -> jbyteArray {
         let result = unsafe {
-            with::<Connection>(as_handle(handle), |connection| {
+            with_any(as_handle(handle), |connection| {
                 i64_result(connection_stable_id(connection))
             })
         };
@@ -1994,7 +2597,7 @@ mod jni_facade {
         handle: jlong,
     ) -> jbyteArray {
         let result = unsafe {
-            with::<Connection>(as_handle(handle), |connection| {
+            with_any(as_handle(handle), |connection| {
                 bytes_result(connection_close_reason(connection))
             })
         };
@@ -2011,7 +2614,7 @@ mod jni_facade {
     ) -> jbyteArray {
         let reason = arg(&mut env, &reason);
         let result = unsafe {
-            with::<Connection>(as_handle(handle), |connection| {
+            with_any(as_handle(handle), |connection| {
                 connection_close(connection, error_code, &reason)
             })
         };
@@ -2053,7 +2656,7 @@ mod jni_facade {
         handle: jlong,
     ) -> jbyteArray {
         let result = unsafe {
-            with::<Connection>(as_handle(handle), |connection| {
+            with_any(as_handle(handle), |connection| {
                 bytes_result(connection_stats(connection))
             })
         };
@@ -2081,7 +2684,7 @@ mod jni_facade {
         handle: jlong,
     ) -> jbyteArray {
         let result = unsafe {
-            with::<Connection>(as_handle(handle), |connection| {
+            with_any(as_handle(handle), |connection| {
                 i64_result(connection_max_datagram_size(connection))
             })
         };
@@ -2095,7 +2698,7 @@ mod jni_facade {
         handle: jlong,
     ) -> jbyteArray {
         let result = unsafe {
-            with::<Connection>(as_handle(handle), |connection| {
+            with_any(as_handle(handle), |connection| {
                 i64_result(width(connection.datagram_send_buffer_space()))
             })
         };
@@ -2111,7 +2714,7 @@ mod jni_facade {
     ) -> jbyteArray {
         let payload = arg(&mut env, &payload);
         let result = unsafe {
-            with::<Connection>(as_handle(handle), |connection| {
+            with_any(as_handle(handle), |connection| {
                 connection_send_datagram(connection, &payload)
             })
         };
@@ -2126,7 +2729,7 @@ mod jni_facade {
         count: jlong,
     ) -> jbyteArray {
         let result = unsafe {
-            with::<Connection>(as_handle(handle), |connection| {
+            with_any(as_handle(handle), |connection| {
                 connection_set_limit(
                     connection,
                     count,
@@ -2146,7 +2749,7 @@ mod jni_facade {
         count: jlong,
     ) -> jbyteArray {
         let result = unsafe {
-            with::<Connection>(as_handle(handle), |connection| {
+            with_any(as_handle(handle), |connection| {
                 connection_set_limit(
                     connection,
                     count,
@@ -2166,7 +2769,7 @@ mod jni_facade {
         bytes: jlong,
     ) -> jbyteArray {
         let result = unsafe {
-            with::<Connection>(as_handle(handle), |connection| {
+            with_any(as_handle(handle), |connection| {
                 connection_set_limit(
                     connection,
                     bytes,
@@ -2226,6 +2829,17 @@ mod jni_facade {
         ops::spawn_channel(accepting_alpn(slot))
     }
 
+    /// As [`super::iroh4k_accepting_zero_rtt`].
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_acceptingZeroRttStart(
+        _env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+    ) -> jlong {
+        let slot = unsafe { share::<Once<Accepting>>(as_handle(handle)) };
+        ops::spawn_channel(accepting_zero_rtt(slot))
+    }
+
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectingConnectStart(
         _env: EnvUnowned,
@@ -2244,6 +2858,39 @@ mod jni_facade {
     ) -> jlong {
         let slot = unsafe { share::<ConnectingSlot>(as_handle(handle)) };
         ops::spawn_channel(connecting_alpn(slot))
+    }
+
+    /// As [`super::iroh4k_connecting_zero_rtt`].
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_connectingZeroRttStart(
+        _env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+    ) -> jlong {
+        let slot = unsafe { share::<ConnectingSlot>(as_handle(handle)) };
+        ops::spawn_channel(connecting_zero_rtt(slot))
+    }
+
+    /// As [`super::iroh4k_outgoing_zero_rtt_await_handshake`].
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_outgoingZeroRttAwaitHandshakeStart(
+        _env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+    ) -> jlong {
+        let zero = unsafe { peek_clone::<OutgoingZeroRttConnection>(as_handle(handle)) };
+        ops::spawn_channel(outgoing_zero_rtt_await_handshake(zero))
+    }
+
+    /// As [`super::iroh4k_incoming_zero_rtt_await_handshake`].
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_tech_annexflow_iroh4k_ConnectionJni_incomingZeroRttAwaitHandshakeStart(
+        _env: EnvUnowned,
+        _class: JClass,
+        handle: jlong,
+    ) -> jlong {
+        let zero = unsafe { peek_clone::<IncomingZeroRttConnection>(as_handle(handle)) };
+        ops::spawn_channel(incoming_zero_rtt_await_handshake(zero))
     }
 
     #[unsafe(no_mangle)]
@@ -2266,7 +2913,7 @@ mod jni_facade {
         _class: JClass,
         handle: jlong,
     ) -> jlong {
-        let connection = unsafe { connection_clone(as_handle(handle)) };
+        let connection = unsafe { connection_clone_any(as_handle(handle)) };
         ops::spawn_channel(connection_closed(connection))
     }
 
@@ -2277,7 +2924,7 @@ mod jni_facade {
         handle: jlong,
         payload: JByteArray,
     ) -> jlong {
-        let connection = unsafe { connection_clone(as_handle(handle)) };
+        let connection = unsafe { connection_clone_any(as_handle(handle)) };
         let payload = arg(&mut env, &payload);
         ops::spawn_channel(connection_send_datagram_wait(connection, payload))
     }
@@ -2288,7 +2935,7 @@ mod jni_facade {
         _class: JClass,
         handle: jlong,
     ) -> jlong {
-        let connection = unsafe { connection_clone(as_handle(handle)) };
+        let connection = unsafe { connection_clone_any(as_handle(handle)) };
         ops::spawn_channel(connection_read_datagram(connection))
     }
 }

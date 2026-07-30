@@ -67,8 +67,11 @@
 //!                             `TransportConfig`: a counted, tagged, sparse sequence documented in
 //!                             full in `transport.rs`, whose own tag family that is, deliberately
 //!                             not `addr.rs`'s or this module's `DISCOVERY_TAG_*`. Read by
-//!                             `transport::read_optional`, last on the wire because a bind
-//!                             configuration can only ever grow at the end.
+//!                             `transport::read_optional`.
+//!   u8      max TLS tickets   0 absent — upstream's own default of 256 — or 1 present, then i64
+//!                             the cache size, rejected if negative or if it does not fit a `usize`
+//!                             on this target. Last on the wire because a bind configuration can
+//!                             only ever grow at the end.
 //!
 //! EndpointAddr  (both ways)       — the same layout `addr.rs` documents and writes
 //!   bytes   id
@@ -298,8 +301,12 @@ struct BindConfig {
     discovery: Vec<DiscoverySettings>,
     /// The QUIC transport parameters this endpoint applies to every connection by default.
     /// `None` leaves iroh's own — including the six it overrides for hole punching before any
-    /// caller sees the builder. Last on the wire and last here — see `read_bind_config`.
+    /// caller sees the builder.
     transport_config: Option<QuicTransportConfig>,
+    /// The size of the in-memory TLS session-ticket cache — see `EndpointConfig.maxTlsTickets`
+    /// (Kotlin). `None` leaves upstream's own default of 256. Last on the wire and last here —
+    /// see `read_bind_config`.
+    max_tls_tickets: Option<usize>,
 }
 
 /// What Kotlin can say about mDNS, mirroring `Endpoint.kt`'s `MdnsConfig`.
@@ -362,8 +369,10 @@ fn read_bind_config(payload: &[u8]) -> Outcome<BindConfig> {
     let external_addrs = read_socket_addrs(&mut r)?;
     let mdns = read_mdns(&mut r)?;
     let discovery = read_discovery(&mut r)?;
-    // Last on the wire, after the discovery sequence — see `Endpoint.kt`'s `encodeBindConfig`.
     let transport_config = under(ERROR_INVALID_ARGUMENT, transport::read_optional(&mut r))?;
+    // Last on the wire, after the transport configuration — see `Endpoint.kt`'s
+    // `encodeBindConfig`.
+    let max_tls_tickets = read_max_tls_tickets(&mut r)?;
 
     under(ERROR_BIND, r.finish())?;
 
@@ -377,12 +386,46 @@ fn read_bind_config(payload: &[u8]) -> Outcome<BindConfig> {
         mdns,
         discovery,
         transport_config,
+        max_tls_tickets,
     })
 }
 
-/// Reads the optional mDNS record. Neither last nor second-to-last on the wire any more:
-/// [`read_discovery`] and then `transport::read_optional` follow it before a bind configuration
-/// ends — see `read_bind_config`.
+/// Reads the optional trailing `maxTlsTickets` scalar — the last field on the wire, so nothing
+/// follows it before `Reader::finish()` in `read_bind_config`.
+///
+/// An optional scalar (`u8` presence byte, then `i64`) rather than a sentinel: a value of `-1`
+/// is a legal cache size to *write* on the wire's own terms (it is just an `i64`), so folding
+/// "absent" into it would make a genuine `-1` indistinguishable from "not set" and this function
+/// could never observe the negative value it is supposed to reject. The `i64` itself is read under
+/// [`ERROR_BIND`], same as the presence byte before it — a truncated payload is a malformed
+/// message, not a bad argument value, and the two must not depend on exactly where the truncation
+/// happened to fall. `usize::try_from` rejects both a negative `i64` and, on a 32-bit target, one
+/// too large to fit — that is the genuine bad-value case, and the only one reported as
+/// [`ERROR_INVALID_ARGUMENT`] rather than something to silently wrap or truncate.
+fn read_max_tls_tickets(r: &mut Reader) -> Outcome<Option<usize>> {
+    match under(ERROR_BIND, r.u8())? {
+        ABSENT => Ok(None),
+        PRESENT => {
+            let value = under(ERROR_BIND, r.i64())?;
+            let n = usize::try_from(value).map_err(|_| Failure {
+                code: ERROR_INVALID_ARGUMENT,
+                message: format!(
+                    "maxTlsTickets must be a nonnegative number that fits in this platform's \
+                     usize, got {value}"
+                ),
+            })?;
+            Ok(Some(n))
+        }
+        other => fail(
+            ERROR_BIND,
+            format!("malformed bind configuration: unknown optional-maxTlsTickets tag {other}"),
+        ),
+    }
+}
+
+/// Reads the optional mDNS record. Not the last field on the wire any more: [`read_discovery`],
+/// `transport::read_optional` and [`read_max_tls_tickets`] all follow it before a bind
+/// configuration ends — see `read_bind_config`.
 ///
 /// The fields are read into named bindings rather than straight into the struct literal, so the
 /// order they are consumed in is the order they appear on the wire no matter how the struct is
@@ -524,6 +567,24 @@ fn configure(config: BindConfig, lookup: MemoryLookup) -> Outcome<Builder> {
     // wrong here the way there is for the address-lookup clear below.
     if let Some(transport) = config.transport_config {
         builder = builder.transport_config(transport);
+    }
+
+    // Independent of everything else here too: the size of the in-memory TLS session-ticket
+    // cache, which is what makes 0-RTT possible at all. `0` is legal upstream — `rustls`'s
+    // `ClientSessionMemoryCache::new(0)` does not panic — but it does not reliably disable 0-RTT
+    // either, measured rather than assumed (see `maxTlsTickets 0 does not stop a single peer from
+    // resuming` in `CommonConnectionTests.kt`). `new(0)` rounds down to a per-server budget of `0`
+    // (`rustls-0.23.42/src/client/handy.rs:81-82`) and builds a `LimitedCache` whose backing
+    // `VecDeque` was requested at capacity `0`; that cache only evicts an entry when the insert
+    // that just created it leaves the `VecDeque` exactly full
+    // (`rustls-0.23.42/src/limited_cache.rs:42`), and `VecDeque::with_capacity(0)`'s first
+    // `push_back` reallocates straight past that — to capacity 4, not 1 — so the first entry
+    // survives, and every later entry for the same server name reuses it rather than triggering
+    // eviction again. For an endpoint that only ever dials one peer, this means the "zero" cache
+    // behaves like an unbounded one. `EndpointConfig.maxTlsTickets`'s KDoc has the caveats this
+    // corner deserves; nothing here should claim `0` turns 0-RTT off.
+    if let Some(max_tls_tickets) = config.max_tls_tickets {
+        builder = builder.max_tls_tickets(max_tls_tickets);
     }
 
     // Before the address book, always. A non-empty list means the caller named the services they

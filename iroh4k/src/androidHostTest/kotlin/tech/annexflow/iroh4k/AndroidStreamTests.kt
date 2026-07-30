@@ -55,6 +55,10 @@ class AndroidStreamTests {
         runner.`a stream describes itself`()
 
     @Test
+    fun `an ordinary stream is not a 0-RTT stream`() =
+        runner.`an ordinary stream is not a 0-RTT stream`()
+
+    @Test
     fun `impossible read sizes and stream codes are rejected`() =
         runner.`impossible read sizes and stream codes are rejected`()
 

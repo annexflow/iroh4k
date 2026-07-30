@@ -95,6 +95,7 @@ leaves the peer to work it out from a timeout.
 | **Connections** | The full accept path (`Incoming` → `Accepting` → `Connection`), stats, paths, RTT, MTU |
 | **Streams** | Bidirectional and unidirectional, priorities, resets, `stopped()`, `readToEnd` |
 | **Datagrams** | `sendDatagram`, `sendDatagramWait`, `readDatagram` |
+| **0-RTT** | `Connecting.zeroRtt()` and `Accepting.zeroRtt()` — first-flight data on a repeat dial, for idempotent work only |
 | **Router** | ALPN-routed protocol handlers, in fifty lines of Kotlin over `acceptNext()` |
 | **Watchers** | `watchAddr`, `watchHomeRelay`, `watchPaths`, `watchPathEvents` — real cold `Flow`s |
 | **Addressing** | `EndpointAddr` as a faithful set of transports, tickets, z32, sign and verify |
@@ -120,6 +121,59 @@ at your servers instead. A non-empty list replaces the preset's services rather 
 `EndpointConfig.mdns` adds discovery over the local link, which is the offline-LAN answer — see
 [Android](#android) for the one permission it needs there.
 
+## Sending data in the first flight
+
+A handshake costs a round trip before your bytes can leave. 0-RTT spends the ticket from an earlier
+conversation to skip it: your request goes out in the same flight as the handshake, and on a link
+where the peer is 80 ms away, that is 80 ms you do not wait.
+
+It only applies on a **repeat dial from the same `Endpoint`**. The TLS ticket that makes resumption
+possible is cached in memory inside the endpoint and dies with it, so the first dial to a peer never
+has one, and neither does a fresh endpoint dialling a peer the old one knew.
+
+```kotlin
+val connecting = endpoint.startConnect(addr, alpn)
+val early = connecting.zeroRtt()
+
+if (early == null) {
+    // No ticket for this peer. Not an error — the attempt is untouched and completes normally.
+    connecting.connect().use { /* … */ }
+} else {
+    connecting.close()
+    early.use { zero ->
+        // Sending early data *is* opening a stream. These bytes travel with the handshake.
+        zero.openBi().use { stream -> stream.send.writeAll(request) }
+
+        when (val status = zero.awaitHandshake()) {
+            is ZeroRttStatus.Accepted -> status.connection.use { /* the early stream stands */ }
+            is ZeroRttStatus.Rejected -> status.connection.use { conn ->
+                // The peer refused the early data — it had lost the resumption state, most likely
+                // by restarting. The early streams are dead; resend on this connection.
+            }
+        }
+    }
+}
+```
+
+**Early data can be replayed, so only idempotent work belongs in it.** An attacker who captures the
+first flight can send it again, and the peer has no way to tell the copy from the original — the
+handshake that would have proved otherwise has not happened yet. Fetching a value is fine. Charging
+a card is not. This is a property of 0-RTT itself, not of this binding, and there is no setting that
+makes it safe.
+
+**Rejection is normal and you must handle it.** A server may refuse early data at its discretion, and
+will refuse it whenever it has lost the resumption state. `Rejected` still carries a working
+connection — what died is the streams you opened before the handshake, so the answer is to resend,
+not to give up.
+
+On the accepting side, `Accepting.zeroRtt()` lets a server read early data before its handshake
+completes, and `RecvStream.is0Rtt()` says whether a stream it accepted arrived that way. The same
+replay caveat applies, plus one of its own: anything the server sends back before the handshake
+finishes goes out before the client has been authenticated.
+
+`EndpointConfig.maxTlsTickets` sizes the ticket cache. Note that `0` does **not** turn 0-RTT off —
+see [`STATUS.md`](STATUS.md) for what was measured — so if you want no early data, do not send any.
+
 ## How this relates to iroh-ffi
 
 [iroh-ffi](https://github.com/n0-computer/iroh-ffi) is upstream's own binding, written and maintained
@@ -134,7 +188,7 @@ strategy.
 
 iroh4k is that different strategy: one Rust crate built twice — a `staticlib` linked into
 Kotlin/Native through cinterop, and a `cdylib` reached from the JVM and Android through hand-written
-JNI. Both facades call the same core through the same codec, and the same 227 shared test bodies run
+JNI. Both facades call the same core through the same codec, and the same 240 shared test bodies run
 against each.
 
 Writing the binding by hand rather than generating it also changed three things. They are trade-offs,
@@ -288,6 +342,13 @@ as is. Without `android` in `-Ptargets`, the Android Gradle plugin is never appl
 
 Version `0.1.0`, the first release, targeting **iroh 1.0.3**. Dual licensed Apache-2.0 or MIT.
 
+**Source-compatible, not binary-compatible.** `Stream.kt`'s four extension functions —
+`openBi`, `acceptBi`, `openUni`, `acceptUni` — took `Connection` as their receiver; they now take
+`QuicConnection`, the supertype `Connection` and the two 0-RTT connection types share. A caller that
+recompiles keeps working unchanged, because `Connection` still *is* a `QuicConnection` — but a `.jar`
+or `.klib` built against an earlier `0.1.0` snapshot has the old receiver type baked into its call
+sites, and will not link against this one without recompiling.
+
 The transport itself — endpoints, connections, streams, datagrams, the router — is covered by the
 test suite on every change. Five things around it are in different states, and the difference is
 worth seeing rather than lumping them together. [`STATUS.md`](STATUS.md) has the evidence for each.
@@ -311,8 +372,14 @@ twenty-eight of the twenty-nine, that round trip into iroh's own config object i
 confirming more needs traffic analysis the suite does not do. The exception is
 `datagramReceiveBufferSize`, whose effect the other end can observe directly.
 
-**Not implemented.** No 0-RTT. `Endpoint.startConnect` maps onto iroh's `connect_with_opts`, and
-0-RTT is upstream's option there, waiting for a place in it.
+**Both sides work over loopback; the sharpest edges are not pinned by a live assertion.** 0-RTT is
+`Connecting.zeroRtt()` on the dialling side and `Accepting.zeroRtt()` on the accepting one, and both
+acceptance and rejection are demonstrated end to end — rejection by restarting the server endpoint
+under the same key, so the resumption state the first ticket depended on is gone. Two things stop
+short of that: the per-stream error a rejected write should raise is pinned by a Rust unit test rather
+than a write that reliably fails from Kotlin, and a stream reporting that it carried 0-RTT data is
+never asserted `true`, only `false`, because upstream decides that flag at the moment a stream is
+accepted rather than when it was opened. [`STATUS.md`](STATUS.md) has the measurements behind both.
 
 **Known and pinned.** An IPv6 zone id does not survive an `EndpointTicket`, because upstream's
 encoding has nowhere to put one. A test holds that behaviour in place so it cannot regress quietly.

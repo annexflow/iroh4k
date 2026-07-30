@@ -282,6 +282,38 @@ class RecvStream internal constructor(private val guard: NativeHandle) : AutoClo
      */
     fun bytesRead(): Long = guard.use { nativeRecvStreamBytesRead(it) }
 
+    /**
+     * Whether this side obtained this stream while its handshake was still in progress.
+     *
+     * `true` means the data this stream carries arrived as 0-RTT early data, before the handshake
+     * vouched for the peer's identity — it **is vulnerable to replay attacks and must never drive
+     * non-idempotent work** until the connection it belongs to has authenticated. See [ZeroRttStatus]
+     * for the same hazard on the connection as a whole.
+     *
+     * The flag is decided once and only ever read back afterwards — for a stream from
+     * [QuicConnection.acceptBi]/[QuicConnection.acceptUni], at the moment this side *accepted* it; for one
+     * from [QuicConnection.openBi], at the moment this side *opened* it. The two cases are not
+     * symmetric. On accept, `noq` samples whether *this side's own* handshake was still running right
+     * then, regardless of which side — dialling or accepting — this connection is. On open, `noq`
+     * additionally requires this side to be the **dialling** side: opening a stream while accepting a
+     * connection reports `false` unconditionally, however far along that side's own handshake is,
+     * because [IncomingZeroRttConnection.openBi] is a legal thing to do and upstream only tracks early
+     * data for the client's own writes. Either way, the sample is taken when the stream was created or
+     * accepted, not when it was first observed on the wire.
+     *
+     * For the accepting case in particular that timing means **`false` does not prove the data was not
+     * sent early**: the peer can write to a stream before its own handshake completes, and if this side
+     * does not get around to accepting it until after its own handshake has settled, this reports
+     * `false` for data that genuinely raced the handshake. It only proves this side accepted the stream
+     * once its own handshake had already settled — which on a fast loopback connection is the common
+     * case, so most ordinary streams read `false` even when nothing was ever rejected.
+     *
+     * Unlike [bytesRead], reading this never fails because the stream was stopped or finished — `noq`
+     * remembers the flag on the `RecvStream` value itself rather than asking the connection for it, so
+     * the only way to raise [IrohError.Code.Closed] here is calling it after [close].
+     */
+    fun is0Rtt(): Boolean = guard.use { nativeRecvStreamIs0Rtt(it) }
+
     /** This stream's QUIC id — see [SendStream.id]. For a [BiStream] it is the same id on both halves. */
     fun id(): Long = guard.use { nativeRecvStreamId(it) }
 
@@ -364,30 +396,31 @@ internal object Streams {
 
 // ── The connection's stream entry points ───────────────────────────────────────────────────────
 //
-// Extensions rather than members of `Connection`, because everything they produce belongs to this
-// domain: all they need from a connection is its handle, which `Connection.withHandle` lends under the
-// connection's own guard. So closing a connection while an `acceptBi` is suspended is as safe as
+// Extensions rather than members of `QuicConnection`, because everything they produce belongs to this
+// domain: all they need from a connection is its handle, which `QuicConnection.withHandle` lends under
+// the connection's own guard. So closing a connection while an `acceptBi` is suspended is as safe as
 // closing it while `closed()` is — the handle survives until the call returns.
 
 /**
- * Opens a bidirectional stream.
+ * Opens a bidirectional stream. Works on any connection, 0-RTT included.
  *
  * Returns as soon as QUIC has an id for it — no round trip is involved, and the peer does not learn the
  * stream exists until data is written to it. Which means an [openBi] followed by nothing will never
  * appear at the peer's [acceptBi]; write something, even one byte.
  *
  * Suspends only while the connection is at its bidirectional stream limit and the peer has not yet
- * allowed more; see [Connection.setMaxConcurrentBiStreams] for the other side of that.
+ * allowed more; see [QuicConnection.setMaxConcurrentBiStreams] for the other side of that.
  *
  * @throws IrohError with [IrohError.Code.Closed] if the connection has ended or its handle has been
  *   released.
  */
-suspend fun Connection.openBi(): BiStream = withHandle { handle ->
+suspend fun QuicConnection.openBi(): BiStream = withHandle { handle ->
     biStream(nativeConnectionOpenBi(handle))
 }
 
 /**
- * Suspends until the peer opens a bidirectional stream, and answers with it.
+ * Suspends until the peer opens a bidirectional stream, and answers with it. Works on any connection,
+ * 0-RTT included.
  *
  * **This suspends indefinitely** while the peer opens none. Cancellation ends it and aborts the Rust
  * task; a stream that had just been accepted is released rather than stranded.
@@ -395,27 +428,29 @@ suspend fun Connection.openBi(): BiStream = withHandle { handle ->
  * @throws IrohError with [IrohError.Code.Closed] when the connection ends, which is how an accept loop
  *   terminates.
  */
-suspend fun Connection.acceptBi(): BiStream = withHandle { handle ->
+suspend fun QuicConnection.acceptBi(): BiStream = withHandle { handle ->
     biStream(nativeConnectionAcceptBi(handle))
 }
 
 /**
- * Opens a unidirectional stream, which this side can only write to.
+ * Opens a unidirectional stream, which this side can only write to. Works on any connection, 0-RTT
+ * included.
  *
  * As [openBi] in every other respect, including that the peer learns nothing until data is written.
  *
  * @throws IrohError with [IrohError.Code.Closed] as [openBi].
  */
-suspend fun Connection.openUni(): SendStream = withHandle { handle ->
+suspend fun QuicConnection.openUni(): SendStream = withHandle { handle ->
     SendStream(NativeHandle(nativeConnectionOpenUni(handle), SEND_STREAM, ::nativeStreamFree))
 }
 
 /**
  * Suspends until the peer opens a unidirectional stream, and answers with the end this side reads.
+ * Works on any connection, 0-RTT included.
  *
  * @throws IrohError with [IrohError.Code.Closed] as [acceptBi].
  */
-suspend fun Connection.acceptUni(): RecvStream = withHandle { handle ->
+suspend fun QuicConnection.acceptUni(): RecvStream = withHandle { handle ->
     RecvStream(NativeHandle(nativeConnectionAcceptUni(handle), RECV_STREAM, ::nativeStreamFree))
 }
 
@@ -463,6 +498,8 @@ internal expect fun nativeSendStreamId(handle: Long): Long
 internal expect fun nativeRecvStreamStop(handle: Long, errorCode: Long)
 
 internal expect fun nativeRecvStreamBytesRead(handle: Long): Long
+
+internal expect fun nativeRecvStreamIs0Rtt(handle: Long): Boolean
 
 internal expect fun nativeRecvStreamId(handle: Long): Long
 

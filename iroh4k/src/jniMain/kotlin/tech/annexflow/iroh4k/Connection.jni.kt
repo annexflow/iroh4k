@@ -34,6 +34,12 @@ internal object ConnectionJni {
 
     external fun freeConnection(handle: Long)
 
+    /** Releases an `OutgoingZeroRttConnection` handle — see `connection.rs`'s `iroh4k_outgoing_zero_rtt_free`. */
+    external fun freeOutgoingZeroRtt(handle: Long)
+
+    /** Releases an `IncomingZeroRttConnection` handle — see `connection.rs`'s `iroh4k_incoming_zero_rtt_free`. */
+    external fun freeIncomingZeroRtt(handle: Long)
+
     // ── Incoming — synchronous ───────────────────────────────────────────────────────────────
 
     external fun incomingAccept(handle: Long): ByteArray
@@ -55,6 +61,12 @@ internal object ConnectionJni {
     // ── Connecting and Connection — synchronous ──────────────────────────────────────────────
 
     external fun connectingRemoteId(handle: Long): ByteArray
+
+    /** As [ConnectionJni.connectionAlpn], but answering both 0-RTT handle kinds. */
+    external fun zeroRttAlpn(handle: Long): ByteArray
+
+    /** As [ConnectionJni.connectionRemoteId], but answering both 0-RTT handle kinds. */
+    external fun zeroRttRemoteId(handle: Long): ByteArray
 
     external fun connectionAlpn(handle: Long): ByteArray
 
@@ -103,9 +115,17 @@ internal object ConnectionJni {
 
     external fun acceptingAlpnStart(handle: Long): Long
 
+    external fun acceptingZeroRttStart(handle: Long): Long
+
     external fun connectingConnectStart(handle: Long): Long
 
     external fun connectingAlpnStart(handle: Long): Long
+
+    external fun connectingZeroRttStart(handle: Long): Long
+
+    external fun outgoingZeroRttAwaitHandshakeStart(handle: Long): Long
+
+    external fun incomingZeroRttAwaitHandshakeStart(handle: Long): Long
 
     external fun connectionClosedStart(handle: Long): Long
 
@@ -140,6 +160,10 @@ internal actual fun nativeConnectingFree(handle: Long) = ConnectionJni.freeConne
 
 internal actual fun nativeConnectionFree(handle: Long) = ConnectionJni.freeConnection(handle)
 
+internal actual fun nativeOutgoingZeroRttFree(handle: Long) = ConnectionJni.freeOutgoingZeroRtt(handle)
+
+internal actual fun nativeIncomingZeroRttFree(handle: Long) = ConnectionJni.freeIncomingZeroRtt(handle)
+
 // ── Incoming — synchronous ────────────────────────────────────────────────────────────────────
 
 internal actual fun nativeIncomingAccept(handle: Long): Long =
@@ -170,6 +194,12 @@ internal actual fun nativeIncomingAcceptWith(handle: Long, endpoint: Long, opts:
 
 internal actual fun nativeConnectingRemoteId(handle: Long): ByteArray =
     ConnectionJni.connectingRemoteId(handle).jniBytesOrThrow()
+
+internal actual fun nativeZeroRttAlpn(handle: Long): ByteArray? =
+    ConnectionJni.zeroRttAlpn(handle).jniBytesOrNull()
+
+internal actual fun nativeZeroRttRemoteId(handle: Long): ByteArray? =
+    ConnectionJni.zeroRttRemoteId(handle).jniBytesOrNull()
 
 internal actual fun nativeConnectionAlpn(handle: Long): ByteArray =
     ConnectionJni.connectionAlpn(handle).jniBytesOrThrow()
@@ -241,11 +271,39 @@ internal actual suspend fun nativeAcceptingConnect(handle: Long): Long =
 internal actual suspend fun nativeAcceptingAlpn(handle: Long): ByteArray =
     jniOp({ ConnectionJni.acceptingAlpnStart(handle) }) { it.payload() }
 
+// Unlike `nativeConnectingZeroRtt`, this never answers `0`: `acceptingZeroRttStart` is infallible
+// upstream — see `connection.rs`'s `accepting_zero_rtt` — so the handle it produces is always real.
+internal actual suspend fun nativeAcceptingZeroRtt(handle: Long): Long =
+    jniOp(
+        { ConnectionJni.acceptingZeroRttStart(handle) },
+        ConnectionJni::freeIncomingZeroRtt,
+    ) { it.handle }
+
 internal actual suspend fun nativeConnectingConnect(handle: Long): Long =
     jniOp({ ConnectionJni.connectingConnectStart(handle) }, ConnectionJni::freeConnection) { it.handle }
 
 internal actual suspend fun nativeConnectingAlpn(handle: Long): ByteArray =
     jniOp({ ConnectionJni.connectingAlpnStart(handle) }) { it.payload() }
+
+internal actual suspend fun nativeConnectingZeroRtt(handle: Long): Long =
+    jniOp(
+        { ConnectionJni.connectingZeroRttStart(handle) },
+        ConnectionJni::freeOutgoingZeroRtt,
+    ) { it.handle }
+
+internal actual suspend fun nativeOutgoingZeroRttAwaitHandshake(handle: Long): Pair<Long, Boolean> =
+    jniOp(
+        { ConnectionJni.outgoingZeroRttAwaitHandshakeStart(handle) },
+        ConnectionJni::freeConnection,
+    ) { it.handle to (it.longValue != 0L) }
+
+// No accepted/rejected pair to read here — `incomingZeroRttAwaitHandshakeStart` answers a bare handle,
+// exactly like `nativeAcceptingConnect` and `nativeConnectingConnect`.
+internal actual suspend fun nativeIncomingZeroRttAwaitHandshake(handle: Long): Long =
+    jniOp(
+        { ConnectionJni.incomingZeroRttAwaitHandshakeStart(handle) },
+        ConnectionJni::freeConnection,
+    ) { it.handle }
 
 internal actual suspend fun nativeEndpointConnect(
     handle: Long,

@@ -38,7 +38,9 @@ import tech.annexflow.iroh4k.internal.NativeHandle
  * ## What is not here yet
  *
  * [Connection.paths] is the snapshot form; the streaming form lives in `Watch.kt` as
- * `Connection.watchPaths()` and `Connection.watchPathEvents()`. Still absent: 0-RTT.
+ * `Connection.watchPaths()` and `Connection.watchPathEvents()`. 0-RTT is below, both sides:
+ * [Connecting.zeroRtt] and [OutgoingZeroRttConnection] for the dialling side, [Accepting.zeroRtt] and
+ * [IncomingZeroRttConnection] for the accepting one.
  */
 
 // ── Addresses ─────────────────────────────────────────────────────────────────────────────────
@@ -416,6 +418,14 @@ class Accepting internal constructor(private val guard: NativeHandle) : AutoClos
     override fun close() = guard.close()
 
     override fun toString(): String = if (guard.isReleased) "Accepting(released)" else "Accepting()"
+
+    /**
+     * Runs [block] against this handshake's native handle, holding the guard across it.
+     *
+     * The counterpart of [Connecting.useHandle]: [zeroRtt] needs to reach the handle without [guard]
+     * itself becoming visible outside this class.
+     */
+    internal suspend fun <T> useHandle(block: suspend (Long) -> T): T = guard.useSuspending(block)
 }
 
 /**
@@ -456,50 +466,34 @@ class Connecting internal constructor(private val guard: NativeHandle) : AutoClo
 
     override fun toString(): String =
         runCatching { "Connecting(${remoteId()})" }.getOrElse { "Connecting(released)" }
+
+    /**
+     * Runs [block] against this attempt's native handle, holding the guard across it.
+     *
+     * The hook [zeroRtt] needs to reach the handle without [guard] itself becoming visible outside
+     * this class — the exact counterpart of [QuicConnection.withHandle], which does the same job for
+     * [Connection]'s own extension functions.
+     */
+    internal suspend fun <T> useHandle(block: suspend (Long) -> T): T = guard.useSuspending(block)
 }
 
 // ── Connection ────────────────────────────────────────────────────────────────────────────────
 
 /**
- * An established QUIC connection to another endpoint.
+ * What every QUIC connection can do, whatever state its handshake is in.
  *
- * Carries identity ([alpn], [remoteId], [stableId], [side]), lifecycle ([close], [isClosed],
- * [closeReason], [closed]), measurement ([stats], [rtt], [paths]), unreliable datagrams
- * ([sendDatagram], [readDatagram]), and — through `openBi`, `acceptBi`, `openUni` and `acceptUni` in
- * `Stream.kt` — the reliable ordered byte streams most applications actually use.
+ * This is upstream's `impl<T: ConnectionState> Connection<T>` (`iroh-1.0.3/src/endpoint/connection.rs:811`)
+ * expressed in Kotlin: the members here are exactly the ones that do not need a completed handshake, and
+ * they are therefore the ones a 0-RTT connection can offer. [Connection] adds what only a completed
+ * handshake has — identity, side and paths.
  *
- * **Thread-safe**, as every handle-owning type here is: any member may be called from any thread or
- * coroutine, including concurrently with [close].
+ * A **class** rather than an interface, deliberately: Kotlin forbids `internal` interface members, and
+ * `Stream.kt` reaches the handle through [withHandle], which must not be public API. Sealed, so the three
+ * subclasses below are the whole world and a `when` over them is exhaustive.
  *
- * Note the two `close`es, the same split [Endpoint] makes and for the same reason:
- * [close(errorCode, reason)][close] is iroh's `Connection::close`, which tells the peer why; the
- * no-argument [close] is [AutoCloseable]'s, which releases the handle. Releasing without closing
- * first is legal — iroh then closes with error code `0` and an empty reason — but says nothing.
- *
- * ## Streams or datagrams
- *
- * A stream is reliable, ordered and flow-controlled, and there is no cost to opening one — QUIC
- * multiplexes as many as wanted onto the connection without head-of-line blocking between them. A
- * datagram is none of those things: it may be lost, may arrive out of order, and must fit in a single
- * packet ([maxDatagramSize]). Reach for a stream unless losing the data is genuinely acceptable.
+ * **Thread-safe**, as every handle-owning type here is.
  */
-class Connection internal constructor(private val guard: NativeHandle) : AutoCloseable {
-
-    /**
-     * The negotiated ALPN protocol, as raw bytes.
-     *
-     * Always present: iroh refuses a connection that completed without one, so an established
-     * [Connection] always has an ALPN both sides agreed on.
-     */
-    fun alpn(): ByteArray = guard.use { nativeConnectionAlpn(it) }
-
-    /**
-     * The remote's [EndpointId], taken from the certificate it presented during the handshake.
-     *
-     * Cryptographically established rather than claimed, which is what makes it the identity to
-     * authorise against.
-     */
-    fun remoteId(): EndpointId = guard.use { EndpointId.validated(nativeConnectionRemoteId(it)) }
+sealed class QuicConnection protected constructor(internal val guard: NativeHandle) : AutoCloseable {
 
     /**
      * An identifier that stays fixed for the connection's whole life.
@@ -565,15 +559,6 @@ class Connection internal constructor(private val guard: NativeHandle) : AutoClo
     suspend fun closed(): String = guard.useSuspending { nativeConnectionClosed(it) }
 
     /**
-     * Which end of the connection this is.
-     *
-     * [ConnectionSide.Client] for the side that dialled, [ConnectionSide.Server] for the side that
-     * accepted. Worth knowing because QUIC stream ids encode it, and because a protocol usually gives
-     * the two sides different jobs.
-     */
-    fun side(): ConnectionSide = guard.use { ConnectionSide.of(nativeConnectionSide(it)) }
-
-    /**
      * The connection's totals so far.
      *
      * A snapshot: read it twice to measure an interval. Covers all traffic on the connection, not only
@@ -581,31 +566,6 @@ class Connection internal constructor(private val guard: NativeHandle) : AutoClo
      */
     fun stats(): ConnectionStats = guard.use { handle ->
         decodeConnectionStats(BinaryReader(nativeConnectionStats(handle)))
-    }
-
-    /**
-     * Current round-trip-time estimate for the path traffic is taking, or `null` if no path reports
-     * one yet.
-     *
-     * iroh's own `rtt` takes a path id; this one uses the *selected* path — the one application data is
-     * actually going over — falling back to the first open path when nothing is selected yet. Per-path
-     * figures are in [paths].
-     */
-    fun rtt(): Duration? = guard.use { handle ->
-        nativeConnectionRtt(handle).takeIf { it >= 0 }?.microseconds
-    }
-
-    /**
-     * The connection's open network paths, as they are right now.
-     *
-     * Usually one — a direct loopback or LAN connection has nothing else — and up to two once a relayed
-     * connection has hole-punched its way to a direct path. Empty for a connection that has closed.
-     *
-     * A snapshot, not a subscription: paths that open or close afterwards are not in it. Use
-     * `Connection.watchPaths()` in `Watch.kt` to observe the changes over time.
-     */
-    fun paths(): List<PathSnapshot> = guard.use { handle ->
-        BinaryReader(nativeConnectionPaths(handle)).seq { decodePathSnapshot(it) }
     }
 
     /**
@@ -700,10 +660,6 @@ class Connection internal constructor(private val guard: NativeHandle) : AutoClo
      */
     override fun close() = guard.close()
 
-    override fun toString(): String =
-        runCatching { "Connection(${remoteId()}, ${stableId()})" }
-            .getOrElse { "Connection(released)" }
-
     /**
      * Runs [block] against this connection's native handle, holding the guard across it.
      *
@@ -714,17 +670,274 @@ class Connection internal constructor(private val guard: NativeHandle) : AutoClo
      * while an `acceptBi` is suspended is therefore as safe as closing it while [closed] is.
      */
     internal suspend fun <T> withHandle(block: suspend (Long) -> T): T = guard.useSuspending(block)
+}
+
+/**
+ * An established QUIC connection to another endpoint.
+ *
+ * Carries identity ([alpn], [remoteId], [stableId], [side]), lifecycle ([close], [isClosed],
+ * [closeReason], [closed]), measurement ([stats], [rtt], [paths]), unreliable datagrams
+ * ([sendDatagram], [readDatagram]), and — through `openBi`, `acceptBi`, `openUni` and `acceptUni` in
+ * `Stream.kt` — the reliable ordered byte streams most applications actually use.
+ *
+ * **Thread-safe**, as every handle-owning type here is: any member may be called from any thread or
+ * coroutine, including concurrently with [close].
+ *
+ * Note the two `close`es, the same split [Endpoint] makes and for the same reason:
+ * [close(errorCode, reason)][close] is iroh's `Connection::close`, which tells the peer why; the
+ * no-argument [close] is [AutoCloseable]'s, which releases the handle. Releasing without closing
+ * first is legal — iroh then closes with error code `0` and an empty reason — but says nothing.
+ *
+ * ## Streams or datagrams
+ *
+ * A stream is reliable, ordered and flow-controlled, and there is no cost to opening one — QUIC
+ * multiplexes as many as wanted onto the connection without head-of-line blocking between them. A
+ * datagram is none of those things: it may be lost, may arrive out of order, and must fit in a single
+ * packet ([maxDatagramSize]). Reach for a stream unless losing the data is genuinely acceptable.
+ */
+class Connection internal constructor(guard: NativeHandle) : QuicConnection(guard) {
+
+    /**
+     * The negotiated ALPN protocol, as raw bytes.
+     *
+     * Always present: iroh refuses a connection that completed without one, so an established
+     * [Connection] always has an ALPN both sides agreed on.
+     */
+    fun alpn(): ByteArray = guard.use { nativeConnectionAlpn(it) }
+
+    /**
+     * The remote's [EndpointId], taken from the certificate it presented during the handshake.
+     *
+     * Cryptographically established rather than claimed, which is what makes it the identity to
+     * authorise against.
+     */
+    fun remoteId(): EndpointId = guard.use { EndpointId.validated(nativeConnectionRemoteId(it)) }
+
+    /**
+     * Which end of the connection this is.
+     *
+     * [ConnectionSide.Client] for the side that dialled, [ConnectionSide.Server] for the side that
+     * accepted. Worth knowing because QUIC stream ids encode it, and because a protocol usually gives
+     * the two sides different jobs.
+     */
+    fun side(): ConnectionSide = guard.use { ConnectionSide.of(nativeConnectionSide(it)) }
+
+    /**
+     * Current round-trip-time estimate for the path traffic is taking, or `null` if no path reports
+     * one yet.
+     *
+     * iroh's own `rtt` takes a path id; this one uses the *selected* path — the one application data is
+     * actually going over — falling back to the first open path when nothing is selected yet. Per-path
+     * figures are in [paths].
+     */
+    fun rtt(): Duration? = guard.use { handle ->
+        nativeConnectionRtt(handle).takeIf { it >= 0 }?.microseconds
+    }
+
+    /**
+     * The connection's open network paths, as they are right now.
+     *
+     * Usually one — a direct loopback or LAN connection has nothing else — and up to two once a relayed
+     * connection has hole-punched its way to a direct path. Empty for a connection that has closed.
+     *
+     * A snapshot, not a subscription: paths that open or close afterwards are not in it. Use
+     * `Connection.watchPaths()` in `Watch.kt` to observe the changes over time.
+     */
+    fun paths(): List<PathSnapshot> = guard.use { handle ->
+        BinaryReader(nativeConnectionPaths(handle)).seq { decodePathSnapshot(it) }
+    }
+
+    override fun toString(): String =
+        runCatching { "Connection(${remoteId()}, ${stableId()})" }
+            .getOrElse { "Connection(released)" }
 
     companion object {
         /**
-         * Connection-domain handles still alive in Rust — [Incoming], [Accepting], [Connecting] and
-         * [Connection] together.
+         * Connection-domain handles still alive in Rust — [Incoming], [Accepting], [Connecting],
+         * [Connection], [OutgoingZeroRttConnection] and [IncomingZeroRttConnection] together.
          *
          * Exposed for tests, as [Endpoint.liveHandleCount] is: it must return to its baseline once
          * every handle is closed, which is how a leak in the accept chain would be caught.
          */
         internal val liveHandleCount: Long get() = nativeConnectionLiveHandleCount()
     }
+}
+
+// ── 0-RTT, dialling side ──────────────────────────────────────────────────────────────────────
+
+/**
+ * A connection that may carry application data sent before the handshake completed.
+ *
+ * From [Connecting.zeroRtt]. Everything on [QuicConnection] works — streams above all, since sending
+ * early data *is* opening a stream — and [alpn] and [remoteId] answer `null` until the handshake
+ * settles them, which is exactly why this is not a [Connection].
+ *
+ * ## Two hazards, both upstream's own words
+ *
+ * 0-RTT data **is vulnerable to replay attacks and must never invoke non-idempotent operations**. And a
+ * server may reject it at its discretion: accepting requires resumption state the server may limit or
+ * lose, and [awaitHandshake] is where you find out.
+ *
+ * ## Closing
+ *
+ * Once [awaitHandshake] has answered, you hold two handles over one connection, and this one keeps it
+ * alive: the future behind it caches its own output, which contains that [Connection]. **Close this
+ * handle once you hold the [Connection]** — releasing only the [Connection] leaves the connection open
+ * indefinitely. [close] with an error code closes it for both.
+ */
+class OutgoingZeroRttConnection internal constructor(guard: NativeHandle) : QuicConnection(guard) {
+    /** The negotiated ALPN, or `null` while the handshake has not settled it. */
+    fun alpn(): ByteArray? = guard.use { nativeZeroRttAlpn(it) }
+
+    /** The peer's [EndpointId], or `null` while the handshake has not established it. */
+    fun remoteId(): EndpointId? = guard.use { nativeZeroRttRemoteId(it)?.let(EndpointId::validated) }
+
+    override fun toString(): String =
+        if (guard.isReleased) "OutgoingZeroRttConnection(released)" else "OutgoingZeroRttConnection()"
+}
+
+/** What the handshake decided about the early data — see [OutgoingZeroRttConnection.awaitHandshake]. */
+sealed interface ZeroRttStatus {
+    /** The connection, established either way. */
+    val connection: Connection
+
+    /** The peer read the early data. Streams opened before the handshake stay usable. */
+    data class Accepted(override val connection: Connection) : ZeroRttStatus
+
+    /**
+     * The peer refused the early data — it had lost the resumption state, most likely by restarting.
+     * Streams opened before the handshake are dead and everything written on them must be resent on
+     * [connection]; reading or writing one raises an `IrohError` naming the rejection.
+     */
+    data class Rejected(override val connection: Connection) : ZeroRttStatus
+}
+
+/**
+ * Turns this attempt into a 0-RTT connection, or answers `null` when 0-RTT is not available.
+ *
+ * `null` means this endpoint holds no TLS session ticket for the peer — it has not spoken to it before,
+ * or the ticket has been evicted from the endpoint's ticket cache. **This attempt is then untouched
+ * and [Connecting.connect] still completes it**, which is the whole reason the answer is nullable rather
+ * than an error. A non-null answer consumes the attempt: a later [Connecting.connect] raises
+ * [IrohError] with [IrohError.Code.Closed]. [Connecting.remoteId] answers either way.
+ *
+ * **A cancelled call can consume the attempt too, without ever handing back a non-null answer.** On
+ * the has-a-ticket branch, the `Connecting` is taken out of its slot before the resulting
+ * [OutgoingZeroRttConnection] handle is delivered back to Kotlin; if the coroutine calling this is
+ * cancelled while that delivery is in flight, the handle is freed unseen (see `ops.rs`'s module
+ * header for why that is not a leak) but the slot stays empty regardless — the attempt was already
+ * spent. A [Connecting.connect] made afterwards then answers `Closed` the same as it would after a
+ * normal non-null answer, even though the caller here only ever observed a cancellation.
+ *
+ * The ticket cache lives in the [Endpoint] and dies with it, so 0-RTT is only ever available on a second
+ * or later dial **from the same endpoint**.
+ */
+suspend fun Connecting.zeroRtt(): OutgoingZeroRttConnection? = useHandle { handle ->
+    val zero = nativeConnectingZeroRtt(handle)
+    if (zero == 0L) null
+    else OutgoingZeroRttConnection(
+        NativeHandle(zero, OUTGOING_ZERO_RTT, ::nativeOutgoingZeroRttFree),
+    )
+}
+
+/**
+ * Waits for the handshake and reports what became of the early data.
+ *
+ * **Re-awaitable**, unlike every other transition in this domain: the future behind it is shared, so a
+ * cancelled call may simply be made again where [Connecting.connect] would answer
+ * [IrohError.Code.Closed]. Each success mints a **fresh** [Connection] handle with its own lifetime —
+ * close each one you take.
+ *
+ * @throws IrohError with [IrohError.Code.Connect] if the handshake fails outright.
+ */
+suspend fun OutgoingZeroRttConnection.awaitHandshake(): ZeroRttStatus = withHandle { handle ->
+    val (connection, accepted) = nativeOutgoingZeroRttAwaitHandshake(handle)
+    val completed = Connection(NativeHandle(connection, CONNECTION, ::nativeConnectionFree))
+    if (accepted) ZeroRttStatus.Accepted(completed) else ZeroRttStatus.Rejected(completed)
+}
+
+// ── 0-RTT, accepting side ─────────────────────────────────────────────────────────────────────
+
+/**
+ * A connection that may carry application data read before its handshake completed, from the
+ * accepting side.
+ *
+ * From [Accepting.zeroRtt]. Mirrors [OutgoingZeroRttConnection] in nearly everything: [alpn] and
+ * [remoteId] answer `null` until the handshake settles them, for the same reason on both sides — and
+ * are read through the exact same pair of exports [OutgoingZeroRttConnection] already uses
+ * (`iroh4k_zero_rtt_alpn`/`iroh4k_zero_rtt_remote_id`), which probe either 0-RTT handle kind. There is
+ * no `IncomingZeroRttConnection`-specific pair to add.
+ *
+ * ## Two hazards, both upstream's own words
+ *
+ * As on the dialling side, 0-RTT data **is vulnerable to replay attacks and must never invoke
+ * non-idempotent operations**. This side carries a hazard the dialling side does not: because iroh
+ * accepts 0-RTT at the TLS layer unconditionally (see [Accepting.zeroRtt]'s doc), **0.5-RTT data this
+ * side sends back may reach the peer before that peer is authenticated** — this endpoint's own
+ * certificate has already gone out over the wire, but the identity behind the *client's* certificate
+ * has not yet been proven. Code that replies to early data before [awaitHandshake] resolves is
+ * replying to someone it has not yet verified.
+ *
+ * ## Closing
+ *
+ * Once [awaitHandshake] has answered, you hold two handles over one connection — exactly as
+ * [OutgoingZeroRttConnection] documents, and for the same reason: the future behind it caches its own
+ * output, which contains the resulting [Connection]. **Close this handle once you hold the
+ * [Connection]** — releasing only the [Connection] leaves the connection open indefinitely.
+ */
+class IncomingZeroRttConnection internal constructor(guard: NativeHandle) : QuicConnection(guard) {
+    /** The negotiated ALPN, or `null` while the handshake has not settled it. */
+    fun alpn(): ByteArray? = guard.use { nativeZeroRttAlpn(it) }
+
+    /** The peer's [EndpointId], or `null` while the handshake has not established it. */
+    fun remoteId(): EndpointId? = guard.use { nativeZeroRttRemoteId(it)?.let(EndpointId::validated) }
+
+    override fun toString(): String =
+        if (guard.isReleased) "IncomingZeroRttConnection(released)" else "IncomingZeroRttConnection()"
+}
+
+/**
+ * Turns this accepted handshake into a 0-RTT connection, so early data can be read before it
+ * completes.
+ *
+ * **Infallible**, unlike [Connecting.zeroRtt]: iroh accepts 0-RTT at the TLS layer on every endpoint —
+ * `max_early_data_size` is hardcoded (`iroh-1.0.3/src/tls.rs:118`) — so the only decision available to
+ * an application is whether it *reads* the early data at all. There is nothing to configure and
+ * nothing to refuse, which is also why this answers [IncomingZeroRttConnection] directly rather than a
+ * nullable one: unlike a dial, an accepted handshake never has "no ticket" to fail on.
+ *
+ * That infallibility is upstream's own guarantee, not one this binding derives independently: it rests
+ * on an internal `.expect("incoming connections can always be converted to 0-RTT")`
+ * (`iroh-1.0.3/src/endpoint/connection.rs:624`). Under this crate's `panic = "abort"` (see
+ * `AGENTS.md`), that `expect` failing would abort the host process rather than raise a Kotlin
+ * exception — the one place in this operation where a change to upstream's own invariant, not to
+ * anything iroh4k controls, could turn "always succeeds" into "always aborts."
+ *
+ * Consumes this handshake: a later [Accepting.connect] raises [IrohError] with [IrohError.Code.Closed].
+ */
+suspend fun Accepting.zeroRtt(): IncomingZeroRttConnection = useHandle { handle ->
+    IncomingZeroRttConnection(
+        NativeHandle(nativeAcceptingZeroRtt(handle), INCOMING_ZERO_RTT, ::nativeIncomingZeroRttFree),
+    )
+}
+
+/**
+ * Waits for the handshake and answers the established [Connection].
+ *
+ * There is no accepted/rejected distinction here, unlike [OutgoingZeroRttConnection.awaitHandshake]:
+ * that question belongs to the dialling side, which is the one that finds out whether its early data
+ * was actually read. `IncomingZeroRttConnection::handshake_completed` answers a bare `Connection`
+ * upstream (`iroh-1.0.3/src/endpoint/connection.rs:1217`) rather than the two-armed status the dialling
+ * side gets, and this mirrors that shape exactly.
+ *
+ * Re-awaitable and two-handled exactly as [OutgoingZeroRttConnection.awaitHandshake]: the future
+ * behind it is shared, so a cancelled call may simply be made again, and each success mints a fresh
+ * [Connection] handle with its own lifetime — close this handle once you hold the [Connection].
+ *
+ * @throws IrohError with [IrohError.Code.Connect] if the handshake fails.
+ */
+suspend fun IncomingZeroRttConnection.awaitHandshake(): Connection = withHandle { handle ->
+    Connection(NativeHandle(nativeIncomingZeroRttAwaitHandshake(handle), CONNECTION, ::nativeConnectionFree))
 }
 
 // ── The endpoint's accept and dial entry points ────────────────────────────────────────────────
@@ -792,8 +1005,9 @@ suspend fun Endpoint.connect(addr: EndpointAddr, alpn: ByteArray): Connection = 
  * when neither of those matters.
  *
  * Maps onto iroh's `connect_with_opts`, which is also why [transportConfig] lives here and not on
- * [connect]: upstream offers per-attempt options on that call alone. 0-RTT is the other thing that
- * belongs here, and it has not arrived yet.
+ * [connect]: upstream offers per-attempt options on that call alone. 0-RTT does not travel through
+ * `connect_with_opts` or [transportConfig] at all — call [Connecting.zeroRtt] on what this returns,
+ * before [Connecting.connect].
  *
  * @param transportConfig QUIC transport parameters for this connection alone. It **replaces** the
  *   endpoint's own [EndpointConfig.transportConfig] rather than merging with it — upstream's
@@ -825,6 +1039,8 @@ private const val INCOMING = "incoming connection"
 private const val ACCEPTING = "accepting connection"
 private const val CONNECTING = "connection attempt"
 private const val CONNECTION = "connection"
+private const val OUTGOING_ZERO_RTT = "outgoing 0-RTT connection"
+private const val INCOMING_ZERO_RTT = "incoming 0-RTT connection"
 
 // ── The connection codec ──────────────────────────────────────────────────────────────────────
 //
@@ -928,6 +1144,10 @@ internal expect fun nativeConnectingFree(handle: Long)
 
 internal expect fun nativeConnectionFree(handle: Long)
 
+internal expect fun nativeOutgoingZeroRttFree(handle: Long)
+
+internal expect fun nativeIncomingZeroRttFree(handle: Long)
+
 /** Returns the handle of the [Accepting] this produced. */
 internal expect fun nativeIncomingAccept(handle: Long): Long
 
@@ -947,6 +1167,12 @@ internal expect fun nativeIncomingRemoteAddrValidated(handle: Long): Boolean
 internal expect fun nativeIncomingAcceptWith(handle: Long, endpoint: Long, opts: ByteArray): Long
 
 internal expect fun nativeConnectingRemoteId(handle: Long): ByteArray
+
+/** The negotiated ALPN of a 0-RTT connection, or `null` while the handshake has not settled it. */
+internal expect fun nativeZeroRttAlpn(handle: Long): ByteArray?
+
+/** The remote's endpoint id of a 0-RTT connection, or `null` while the handshake has not settled it. */
+internal expect fun nativeZeroRttRemoteId(handle: Long): ByteArray?
 
 internal expect fun nativeConnectionAlpn(handle: Long): ByteArray
 
@@ -1008,6 +1234,21 @@ internal expect suspend fun nativeAcceptingConnect(handle: Long): Long
 
 internal expect suspend fun nativeAcceptingAlpn(handle: Long): ByteArray
 
+/** Returns the handle of the [IncomingZeroRttConnection] this produced — see [Accepting.zeroRtt]. */
+internal expect suspend fun nativeAcceptingZeroRtt(handle: Long): Long
+
 internal expect suspend fun nativeConnectingConnect(handle: Long): Long
 
 internal expect suspend fun nativeConnectingAlpn(handle: Long): ByteArray
+
+/** `0` when this endpoint holds no TLS session ticket for the peer — see [Connecting.zeroRtt]. */
+internal expect suspend fun nativeConnectingZeroRtt(handle: Long): Long
+
+/** The handle of the fresh [Connection], and whether the early data was accepted. */
+internal expect suspend fun nativeOutgoingZeroRttAwaitHandshake(handle: Long): Pair<Long, Boolean>
+
+/**
+ * Returns the handle of the fresh [Connection] — see [IncomingZeroRttConnection.awaitHandshake]. No
+ * accepted/rejected pair here: that distinction is the dialling side's alone.
+ */
+internal expect suspend fun nativeIncomingZeroRttAwaitHandshake(handle: Long): Long

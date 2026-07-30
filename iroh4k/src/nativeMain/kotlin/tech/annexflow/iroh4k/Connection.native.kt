@@ -6,10 +6,12 @@ import iroh4k.ffi.Iroh4kResult
 import iroh4k.ffi.iroh4k_accepting_alpn
 import iroh4k.ffi.iroh4k_accepting_connect
 import iroh4k.ffi.iroh4k_accepting_free
+import iroh4k.ffi.iroh4k_accepting_zero_rtt
 import iroh4k.ffi.iroh4k_connecting_alpn
 import iroh4k.ffi.iroh4k_connecting_connect
 import iroh4k.ffi.iroh4k_connecting_free
 import iroh4k.ffi.iroh4k_connecting_remote_id
+import iroh4k.ffi.iroh4k_connecting_zero_rtt
 import iroh4k.ffi.iroh4k_connection_alpn
 import iroh4k.ffi.iroh4k_connection_close
 import iroh4k.ffi.iroh4k_connection_close_reason
@@ -43,6 +45,12 @@ import iroh4k.ffi.iroh4k_incoming_refuse
 import iroh4k.ffi.iroh4k_incoming_remote_addr
 import iroh4k.ffi.iroh4k_incoming_remote_addr_validated
 import iroh4k.ffi.iroh4k_incoming_retry
+import iroh4k.ffi.iroh4k_incoming_zero_rtt_await_handshake
+import iroh4k.ffi.iroh4k_incoming_zero_rtt_free
+import iroh4k.ffi.iroh4k_outgoing_zero_rtt_await_handshake
+import iroh4k.ffi.iroh4k_outgoing_zero_rtt_free
+import iroh4k.ffi.iroh4k_zero_rtt_alpn
+import iroh4k.ffi.iroh4k_zero_rtt_remote_id
 import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.CPointed
 import kotlinx.cinterop.CPointer
@@ -89,6 +97,31 @@ private inline fun <T> ByteArray.usePtr(block: (CPointer<UByteVar>?, Int) -> T):
     }
 
 /**
+ * Reads `handle` and `i64_val` from the same result and frees it once — what
+ * [nativeOutgoingZeroRttAwaitHandshake] needs, since `outgoing_zero_rtt_await_handshake` answers with
+ * both the fresh [Connection] handle and the accepted bit in the one envelope. Chaining [handleOrThrow]
+ * with a second read of `i64_val` would free the result after the first call's `finally` and then read
+ * a field on the now-freed pointer, so both fields are taken here before the single free.
+ *
+ * This is also the only place in the file that performs the null-check / error-raise / free sequence
+ * on a handle-bearing result — [handleOrThrow] is expressed over it rather than repeating that
+ * sequence a second time, so a future fix to the teardown (a different free ordering, a new guard on
+ * a null handle) only has one place to land.
+ */
+private fun CPointer<Iroh4kResult>?.handleAndAcceptedOrThrow(): Pair<Long, Boolean> {
+    try {
+        val result = this?.pointed
+            ?: throw IllegalStateException("Invalid Iroh4kResult pointer: cannot dereference null")
+        if (result.error != IrohError.OK) {
+            IrohError(IrohError.Code.of(result.error), result.error_message?.toKString()).raise()
+        }
+        return (result.handle?.toLong() ?: 0L) to (result.i64_val != 0L)
+    } finally {
+        iroh4k_free_result(this)
+    }
+}
+
+/**
  * Reads the `handle` field of a result, then frees the result — always, even on failure.
  *
  * `ffi.kt` has `orThrow`, `longOrThrow` and `bytesOrThrow` but no handle reader, because until this
@@ -96,20 +129,10 @@ private inline fun <T> ByteArray.usePtr(block: (CPointer<UByteVar>?, Int) -> T):
  * now because they share a private `use { }` helper this file cannot reach.
  *
  * `0` for a null handle. That is not an error: it is how `acceptNext` reports iroh's `None` for an
- * endpoint that has been shut down.
+ * endpoint that has been shut down — and, for [nativeConnectingZeroRtt], how a peer with no cached
+ * session ticket is reported; see the comment there.
  */
-private fun CPointer<Iroh4kResult>?.handleOrThrow(): Long {
-    try {
-        val result = this?.pointed
-            ?: throw IllegalStateException("Invalid Iroh4kResult pointer: cannot dereference null")
-        if (result.error != IrohError.OK) {
-            IrohError(IrohError.Code.of(result.error), result.error_message?.toKString()).raise()
-        }
-        return result.handle?.toLong() ?: 0L
-    } finally {
-        iroh4k_free_result(this)
-    }
-}
+private fun CPointer<Iroh4kResult>?.handleOrThrow(): Long = handleAndAcceptedOrThrow().first
 
 // ── Handle lifecycle ──────────────────────────────────────────────────────────────────────────
 
@@ -129,6 +152,14 @@ internal actual fun nativeConnectingFree(handle: Long) {
 
 internal actual fun nativeConnectionFree(handle: Long) {
     iroh4k_connection_free(handle.asHandle())
+}
+
+internal actual fun nativeOutgoingZeroRttFree(handle: Long) {
+    iroh4k_outgoing_zero_rtt_free(handle.asHandle())
+}
+
+internal actual fun nativeIncomingZeroRttFree(handle: Long) {
+    iroh4k_incoming_zero_rtt_free(handle.asHandle())
 }
 
 // ── Incoming — synchronous, as every one of these is in iroh ───────────────────────────────────
@@ -166,6 +197,12 @@ internal actual fun nativeIncomingAcceptWith(handle: Long, endpoint: Long, opts:
 
 internal actual fun nativeConnectingRemoteId(handle: Long): ByteArray =
     iroh4k_connecting_remote_id(handle.asHandle()).bytesOrThrow()
+
+internal actual fun nativeZeroRttAlpn(handle: Long): ByteArray? =
+    iroh4k_zero_rtt_alpn(handle.asHandle()).bytesOrNull()
+
+internal actual fun nativeZeroRttRemoteId(handle: Long): ByteArray? =
+    iroh4k_zero_rtt_remote_id(handle.asHandle()).bytesOrNull()
 
 internal actual fun nativeConnectionAlpn(handle: Long): ByteArray =
     iroh4k_connection_alpn(handle.asHandle()).bytesOrThrow()
@@ -259,6 +296,13 @@ internal actual suspend fun nativeAcceptingConnect(handle: Long): Long =
 internal actual suspend fun nativeAcceptingAlpn(handle: Long): ByteArray =
     iroh { c -> iroh4k_accepting_alpn(handle.asHandle(), c, completion) }.bytesOrThrow()
 
+// Unlike `nativeConnectingZeroRtt`, this never answers `0`: `iroh4k_accepting_zero_rtt` is infallible
+// upstream — see `connection.rs`'s `accepting_zero_rtt` — so the handle it produces is always real.
+internal actual suspend fun nativeAcceptingZeroRtt(handle: Long): Long =
+    iroh(::iroh4k_incoming_zero_rtt_free) { c ->
+        iroh4k_accepting_zero_rtt(handle.asHandle(), c, completion)
+    }.handleOrThrow()
+
 internal actual suspend fun nativeConnectingConnect(handle: Long): Long =
     iroh(::iroh4k_connection_free) { c ->
         iroh4k_connecting_connect(handle.asHandle(), c, completion)
@@ -266,6 +310,29 @@ internal actual suspend fun nativeConnectingConnect(handle: Long): Long =
 
 internal actual suspend fun nativeConnectingAlpn(handle: Long): ByteArray =
     iroh { c -> iroh4k_connecting_alpn(handle.asHandle(), c, completion) }.bytesOrThrow()
+
+// A `0` handle from `handleOrThrow()` here is the answer, not a fault: `iroh4k_connecting_zero_rtt`
+// never sets an error for "no session ticket for this peer", it just leaves the result's `handle`
+// null, so `handleOrThrow`'s ordinary null-handle-means-zero reading already says exactly what
+// [Connecting.zeroRtt] needs — the caller is the one that decides a `0` here means "try `connect`
+// instead" rather than "shut down", the same way it already reads `acceptNext`'s `0` as "endpoint
+// closed" and not the other way round.
+internal actual suspend fun nativeConnectingZeroRtt(handle: Long): Long =
+    iroh(::iroh4k_outgoing_zero_rtt_free) { c ->
+        iroh4k_connecting_zero_rtt(handle.asHandle(), c, completion)
+    }.handleOrThrow()
+
+internal actual suspend fun nativeOutgoingZeroRttAwaitHandshake(handle: Long): Pair<Long, Boolean> =
+    iroh(::iroh4k_connection_free) { c ->
+        iroh4k_outgoing_zero_rtt_await_handshake(handle.asHandle(), c, completion)
+    }.handleAndAcceptedOrThrow()
+
+// No accepted/rejected pair to read here — `incoming_zero_rtt_await_handshake` answers a bare handle
+// through `finish_handshake`, exactly like `nativeAcceptingConnect` and `nativeConnectingConnect`.
+internal actual suspend fun nativeIncomingZeroRttAwaitHandshake(handle: Long): Long =
+    iroh(::iroh4k_connection_free) { c ->
+        iroh4k_incoming_zero_rtt_await_handshake(handle.asHandle(), c, completion)
+    }.handleOrThrow()
 
 internal actual suspend fun nativeEndpointConnect(
     handle: Long,

@@ -69,6 +69,10 @@ class NativeConnectionTests {
         runner.`connect refuses the impossible rather than leaving it hanging`()
 
     @Test
+    fun `a connection is a QuicConnection and streams open through the supertype`() =
+        runner.`a connection is a QuicConnection and streams open through the supertype`()
+
+    @Test
     fun `side tells the two ends of one connection apart`() =
         runner.`side tells the two ends of one connection apart`()
 
@@ -139,4 +143,32 @@ class NativeConnectionTests {
     @Test
     fun `acceptWith refuses an empty ALPN list without touching the incoming connection`() =
         runner.`acceptWith refuses an empty ALPN list without touching the incoming connection`()
+
+    @Test
+    fun `the first dial has no ticket and leaves the attempt usable`() =
+        runner.`the first dial has no ticket and leaves the attempt usable`()
+
+    @Test
+    fun `a second dial from the same endpoint sends data before the handshake`() =
+        runner.`a second dial from the same endpoint sends data before the handshake`()
+
+    @Test
+    fun `the accepting side reads a stream before its handshake completes`() =
+        runner.`the accepting side reads a stream before its handshake completes`()
+
+    @Test
+    fun `a restarted server rejects the early data and the stream says so`() =
+        runner.`a restarted server rejects the early data and the stream says so`()
+
+    @Test
+    fun `awaiting the 0-RTT handshake survives a cancelled await`() =
+        runner.`awaiting the 0-RTT handshake survives a cancelled await`()
+
+    @Test
+    fun `0-RTT handles are released`() =
+        runner.`0-RTT handles are released`()
+
+    @Test
+    fun `maxTlsTickets 0 does not stop a single peer from resuming`() =
+        runner.`maxTlsTickets 0 does not stop a single peer from resuming`()
 }

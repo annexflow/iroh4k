@@ -40,6 +40,15 @@ pub const ERROR_TICKET: c_int = 11;
 pub const ERROR_RELAY: c_int = 12;
 pub const ERROR_SERVICES: c_int = 13;
 pub const ERROR_DISCOVERY: c_int = 14;
+/// A stream that carried 0-RTT data, after the peer refused it. The data must be resent.
+pub const ERROR_ZERO_RTT_REJECTED: c_int = 15;
+
+// Kotlin pins `IrohError.Code.entries[15]` to `ZeroRttRejected` by ordinal (see
+// `CommonSmokeTests`'s "ordinal 15 decodes to ZeroRttRejected"); this pins the Rust side to the
+// same number. Together they turn a mid-list insertion above — one that renumbers this constant
+// off 15 without a matching edit to `IrohError.kt` — into a build failure here, instead of a
+// silent remap of every error the binding reports.
+const _: () = assert!(ERROR_ZERO_RTT_REJECTED == 15);
 
 // ============================================================================
 // C-ABI types

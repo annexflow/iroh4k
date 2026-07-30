@@ -32,6 +32,17 @@ class IrohError(
         Relay,
         Services,
         Discovery,
+
+        /**
+         * A stream that carried 0-RTT (early) data, raised after the peer refused that data —
+         * see [ZeroRttStatus.Rejected]. The stream this arrived on is dead: whatever was written
+         * to or read from it before the rejection is not delivered and never will be. The right
+         * response is to **retry the same operation on [ZeroRttStatus.Rejected.connection]**,
+         * the now-established connection, rather than to treat this as an ordinary [Read] or
+         * [Write] failure and give up — the peer is still there, it just could not decrypt data
+         * sent before it was willing to vouch for its own identity.
+         */
+        ZeroRttRejected,
         ;
 
         companion object {

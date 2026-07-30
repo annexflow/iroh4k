@@ -78,9 +78,11 @@ are the only thing that would notice. Add at the end, on both sides, in the same
 
 ## Handles
 
-Ten iroh objects have identity and lifetime and cross as an opaque `*mut c_void`. Everything else
-(keys, addresses, tickets, relay maps) is a value type that lives entirely in Kotlin — do not give
-a value type a handle; it buys nothing and costs a free routine and a leak to worry about.
+Twelve iroh objects have identity and lifetime and cross as an opaque `*mut c_void` — ten of them
+predate 0-RTT, plus `OutgoingZeroRttConnection` and `IncomingZeroRttConnection`, the dialling and
+accepting halves of a connection still exchanging data before its handshake has finished. Everything
+else (keys, addresses, tickets, relay maps) is a value type that lives entirely in Kotlin — do not
+give a value type a handle; it buys nothing and costs a free routine and a leak to worry about.
 
 - Every handle is a `handle::Tagged<T>`: a `TypeId` at offset 0 (`#[repr(C)]`, tag first) followed
   by the value. `borrow`/`clone_arc`/`free` all check the tag first, so a wrong-type handle is an
@@ -90,7 +92,13 @@ a value type a handle; it buys nothing and costs a free routine and a leak to wo
 - Consumed-once iroh types get `handle::Consumed` (synchronous: `Incoming`) or `connection.rs`'s
   `Once` (async, over a `tokio::sync::Mutex`: `Accepting`, `Connecting` — their `alpn` is `async`,
   and a `std::sync::MutexGuard` held across an `await` is not `Send`). A second use returns
-  `ERROR_CLOSED`. Never `expect("already consumed")`: see the panic rule.
+  `ERROR_CLOSED` — **except one caller.** `connecting_zero_rtt` takes a `Connecting` out of its
+  `Once` to try `into_0rtt()`, and on the no-ticket branch puts the same value back instead of
+  leaving the slot empty, so the *next* caller sees `Some` again rather than a permanently spent
+  attempt. `Once`'s own doc in `connection.rs` explains why that is still safe (`into_0rtt` is
+  synchronous, so a cancellation can never observe the slot empty) — read it before assuming every
+  `Once` behaves like `Consumed` on a second use. Never `expect("already consumed")`: see the panic
+  rule.
 - On the Kotlin side, `internal/NativeHandle.kt` is the **only** handle guard. One `AtomicLong`
   holds a closed bit in bit 63 and the in-flight caller count below it, so exactly one of `close()`
   and the final `release()` frees. A second copy of this would drift, and the failure mode is a
@@ -154,7 +162,14 @@ agreeing, and the resulting bug **compiles cleanly**.
 | `addr.rs` `write_transport_addr` / `write_endpoint_addr` / `read_endpoint_addr` / `decode_endpoint_addr` and the `TAG_*` constants | `Addr.kt` `writeTransportAddr` / `writeEndpointAddr` / `readEndpointAddr` and its mirrored `TAG_*` |
 | `jni.rs` `finish` (the result envelope writer) | `JniResult.kt` (the only envelope decoder) and `jniOp` |
 | `internal/NativeHandle.kt` | — the only handle guard |
-| `connection.rs` `with` / `share` / `released` / `varint` / `in_runtime` / `Tracked` | reused by `stream.rs` and `watch.rs`, not re-implemented |
+| `connection.rs` `with` / `share` / `released` / `varint` / `in_runtime` / `Tracked` / `connection_clone_any` | reused by `stream.rs` and `watch.rs`, not re-implemented |
+
+`connection_clone` — the strict, `Connection`-only clone — is not on that row and stays that way. It
+is not folded into `connection_clone_any`: `watch.rs`'s path watchers and `connection.rs`'s own
+`connection_alpn` / `connection_remote_id` / `connection_side` / `connection_paths` /
+`connection_rtt` are `HandshakeCompleted`-only upstream, so they must reject a 0-RTT handle rather
+than be handed one they cannot serve. `connection_clone_any` exists beside it for the surface that
+*is* common to all three handshake states — see `AnyConnection` in `connection.rs`.
 
 Two specific traps:
 
@@ -200,7 +215,7 @@ callback into application code on the back of that VM being available.
 - **Bodies live once.** `commonTest`'s `Common*Tests` classes hold the test bodies;
   `nativeTest`, `jvmTest` and `androidHostTest` are thin classes that construct the runner and
   delegate one `@Test` per method. Every facade is held to identical behaviour, so a body added to
-  a runner must be added to all **three** delegators — 227 shared bodies run in each. The Android ones
+  a runner must be added to all **three** delegators — 240 shared bodies run in each. The Android ones
   additionally carry `@RunWith(RobolectricTestRunner::class)` and `@Config(sdk = [34])`. Note what
   that does *not* buy: the shared bodies touch no Android API, so a delegator that omits the runner
   still passes — measured, not assumed. It is there so the class is an Android unit test rather
@@ -209,13 +224,13 @@ callback into application code on the back of that VM being available.
   one) would need. Keep it on new delegators; nothing will fail loudly if you don't.
   (`BinaryReaderTests` is the one exception on the shared side: pure-Kotlin decoder tests with no
   facade, so they carry `@Test` directly in `commonTest` and are picked up by every compilation.
-  The 227 is 221 delegated bodies plus its 6.)
-- **The counts are not symmetric, and the asymmetry is deliberate.** 227 shared bodies per facade,
-  so 454 across the two tested facades (`jvmTest`, `macosArm64Test`), and `androidHostTest` runs
-  those 227 **plus 6 Android-only tests** — `AndroidMulticastLockTests`, the one class in that
+  The 240 is 234 delegated bodies plus its 6.)
+- **The counts are not symmetric, and the asymmetry is deliberate.** 240 shared bodies per facade,
+  so 480 across the two tested facades (`jvmTest`, `macosArm64Test`), and `androidHostTest` runs
+  those 240 **plus 6 Android-only tests** — `AndroidMulticastLockTests`, the one class in that
   source set that is not a delegator, because `Iroh4kAndroid.multicastLock` is `androidMain` code
-  over `WifiManager` and there is no other facade to hold to the same behaviour. 233 on Android,
-  687 host tests in all. Something that exists only on Android belongs in a class of its own there,
+  over `WifiManager` and there is no other facade to hold to the same behaviour. 246 on Android,
+  726 host tests in all. Something that exists only on Android belongs in a class of its own there,
   with a KDoc saying why it is not a delegator; do not invent a `Common*Tests` body that only one
   facade can run, and do not "restore symmetry" by deleting the class.
 - **`androidDeviceTest` is deliberately not a fourth delegator.** It runs on a device or emulator
@@ -229,7 +244,7 @@ callback into application code on the back of that VM being available.
   shared bodies at all — Kotlin turns a suspend lambda inside ``fun `a name with spaces`()`` into a
   class whose name contains spaces, which DEX rejects below version 040, i.e. below `minSdk 35`.
   That is why its methods are named without backticks and why the compilation is left out of the
-  `test` source-set tree. Everything these tests found was invisible to all 687 host tests: a
+  `test` source-set tree. Everything these tests found was invisible to all 726 host tests: a
   process-aborting missing init, and a missing `INTERNET` permission.
 - **Robolectric gives each test class its own sandbox classloader**, so under `androidHostTest`
   every class loads its *own copy* of the host `libiroh4k.so` — the loader in `androidMain`
@@ -263,22 +278,29 @@ callback into application code on the back of that VM being available.
 
 ## Build and verification
 
-Gates, the standard four:
+Gates, the standard five:
 
 ```bash
 cargo fmt --manifest-path iroh4k/src/rust/Cargo.toml -- --check
 cargo clippy --manifest-path iroh4k/src/rust/Cargo.toml --release -- -D warnings
+cargo test --manifest-path iroh4k/src/rust/Cargo.toml
 ./gradlew :iroh4k:macosArm64Test
 ./gradlew :iroh4k:jvmTest
 ```
 
-A fifth for anything in `commonMain`, `commonTest` or `jniMain`, which Android shares verbatim:
+**Not `--release` on the test invocation** — `[profile.release]` sets `panic = "abort"`, which
+breaks the test harness, and clippy without `--all-targets` does not even typecheck a
+`#[cfg(test)] mod tests` the way `cargo test` does. This is what runs `stream.rs`'s unit tests, the
+substitute for the write-based `ZeroRttRejected` assertion the branch could not make — see its
+module header and `STATUS.md`.
+
+A sixth for anything in `commonMain`, `commonTest` or `jniMain`, which Android shares verbatim:
 
 ```bash
 ./gradlew :iroh4k:testAndroidHostTest -Ptargets=jvm,android
 ```
 
-It needs an Android SDK, so it is not in the standard four — but it is the only gate that runs the
+It needs an Android SDK, so it is not in the standard five — but it is the only gate that runs the
 shared bodies through the Android loader, and CI runs it on every change.
 
 Anything touching `src/androidMain`, `src/rust/src/android.rs` or the Android manifest also wants a

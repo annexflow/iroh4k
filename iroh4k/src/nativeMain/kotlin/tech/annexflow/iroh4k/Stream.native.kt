@@ -10,6 +10,7 @@ import iroh4k.ffi.iroh4k_connection_open_uni
 import iroh4k.ffi.iroh4k_free_result
 import iroh4k.ffi.iroh4k_recv_stream_bytes_read
 import iroh4k.ffi.iroh4k_recv_stream_id
+import iroh4k.ffi.iroh4k_recv_stream_is_0rtt
 import iroh4k.ffi.iroh4k_recv_stream_read
 import iroh4k.ffi.iroh4k_recv_stream_read_exact
 import iroh4k.ffi.iroh4k_recv_stream_read_to_end
@@ -136,6 +137,9 @@ internal actual fun nativeRecvStreamStop(handle: Long, errorCode: Long) {
 
 internal actual fun nativeRecvStreamBytesRead(handle: Long): Long =
     iroh4k_recv_stream_bytes_read(handle.asHandle()).longOrThrow()
+
+internal actual fun nativeRecvStreamIs0Rtt(handle: Long): Boolean =
+    iroh4k_recv_stream_is_0rtt(handle.asHandle()).longOrThrow() != 0L
 
 internal actual fun nativeRecvStreamId(handle: Long): Long =
     iroh4k_recv_stream_id(handle.asHandle()).longOrThrow()
