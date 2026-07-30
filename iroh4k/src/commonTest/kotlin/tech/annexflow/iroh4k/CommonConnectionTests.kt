@@ -16,6 +16,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
@@ -1315,6 +1316,12 @@ class CommonConnectionTests {
                             "expected the awaitHandshake() coroutine to have been cancelled, not " +
                                 "completed — the race this test relies on did not go the usual way",
                         )
+                    } catch (timeout: TimeoutCancellationException) {
+                        // `bounded`'s own 60s wall clock is a `CancellationException` too, so
+                        // without this arm a timeout landing exactly on this `await()` would be
+                        // swallowed as "the cancel worked" and the body would carry on to fail
+                        // somewhere less informative.
+                        throw timeout
                     } catch (_: CancellationException) {
                         // Expected: the cancel really landed before the handshake settled.
                     }

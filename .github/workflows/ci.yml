@@ -249,6 +249,22 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: rustup component add clippy rustfmt
+
+      # This job builds the crate twice — clippy in the release profile, the unit tests in the dev
+      # one — so it pays the cold-build cost twice over without a cache. Its own key rather than
+      # the matrix job's: the two write different target directories, and sharing a key would let
+      # whichever finished first decide what the other restores. No `~/.konan` here, since nothing
+      # in this job touches Kotlin/Native.
+      - name: Cache cargo and the Rust target directory
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            iroh4k/src/rust/target
+          key: macos-latest-lint-${{ hashFiles('iroh4k/src/rust/Cargo.lock') }}
+          restore-keys: macos-latest-lint-
+
       - name: Format
         run: cargo fmt --manifest-path iroh4k/src/rust/Cargo.toml -- --check
       - name: Clippy
