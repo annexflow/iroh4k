@@ -50,7 +50,7 @@ jobs:
           key: ${{ matrix.os }}-iroh4k-${{ hashFiles('iroh4k/src/rust/Cargo.lock') }}
           restore-keys: ${{ matrix.os }}-iroh4k-
 
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/setup-gradle@v6.2.0
 
       # Run the two test tasks in separate invocations. Sharing one invocation has been observed
       # to let a Rust rebuild swap the JNI shared library out from under a running test JVM,
@@ -115,7 +115,7 @@ jobs:
       - name: Install cargo-ndk
         run: command -v cargo-ndk || cargo install cargo-ndk --locked
 
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/setup-gradle@v6.2.0
 
       # The runner image exports ANDROID_NDK_HOME, which is where `rustJni` looks first; on a
       # machine without it the plugin falls back to ndk.dir/sdk.dir in local.properties.
@@ -238,7 +238,7 @@ jobs:
           key: ${{ matrix.os }}-${{ matrix.target }}-${{ hashFiles('iroh4k/src/rust/Cargo.lock') }}
           restore-keys: ${{ matrix.os }}-${{ matrix.target }}-
 
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/setup-gradle@v6.2.0
 
       - name: Assemble
         run: ./gradlew :iroh4k:assemble -Ptargets=${{ matrix.target }}
