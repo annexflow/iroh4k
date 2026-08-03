@@ -123,7 +123,7 @@ jobs:
         shell: bash
         run: command -v cargo-ndk || cargo install cargo-ndk --locked
 
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/setup-gradle@v6.2.0
         if: matrix.android
 
       - name: Build Android JNI libraries
@@ -156,11 +156,11 @@ jobs:
       - name: Install Rust
         run: rustup show
 
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/setup-gradle@v6.2.0
 
       # The AAR needs an Android SDK to configure and package, and the publisher cannot move off
       # macOS to find one.
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
 
       - name: Resolve the version
         id: version
@@ -181,13 +181,13 @@ jobs:
         if: steps.version.outputs.release == 'true'
         run: scripts/check-release-version.sh "${{ steps.version.outputs.version }}"
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: rust-*
           merge-multiple: true
           path: rust-artifacts
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: android-jnilibs
           path: iroh4k/src/androidMain/jniLibs
