@@ -48,7 +48,7 @@ iroh-metrics = { version = "1.0.1" }
 # both advertises this endpoint on the local link and resolves the peers advertising themselves on
 # it. Only reached when `EndpointConfig.mdns` is set, so an endpoint that does not ask for it sends
 # no multicast traffic at all.
-iroh-mdns-address-lookup = { version = "0.4.0" }
+iroh-mdns-address-lookup = { version = "0.5.0" }
 
 # https://crates.io/crates/noq-proto
 # Only for the two congestion controller configs. `iroh` re-exports the `ControllerFactory` trait
