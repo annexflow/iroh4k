@@ -31,7 +31,7 @@ class CommonSmokeTests {
 
     fun `version reports both iroh4k and iroh versions`() {
         val version = Iroh4k.version
-        // Format is "<iroh4k version>+iroh<iroh version>", e.g. "0.2.0+iroh1.0.3".
+        // Format is "<iroh4k version>+iroh<iroh version>", e.g. "0.2.0+iroh1.3.0".
         assertThat(version).startsWith("0.2.0+iroh")
         assertThat(version).contains("+iroh1.")
     }

@@ -32,23 +32,25 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 # `tls-ring` is part of iroh's default feature set. Keep it: the alternative
 # (`tls-aws-lc-rs`) needs cmake + a C toolchain and cross-compiles poorly to
 # iOS/Android/mingw. Never enable `tls-aws-lc-rs` here.
-iroh = { version = "1.0.3" }
+iroh = { version = "1.3.0" }
 # https://crates.io/crates/iroh-base
-iroh-base = { version = "1.0.3" }
+iroh-base = { version = "1.3.0" }
 # https://crates.io/crates/iroh-relay
-iroh-relay = { version = "1.0.3", default-features = false }
+iroh-relay = { version = "1.3.0", default-features = false }
 # https://crates.io/crates/iroh-services
+# 2.0's opaque Caps supports only three predefined grants, with no way to construct the
+# arbitrary capability sets exposed by ServicesClient.grantCapability. Keep 1.x until it does.
 iroh-services = { version = "1.0.0", default-features = false }
 # https://crates.io/crates/iroh-tickets
 iroh-tickets = { version = "1.0.0" }
 # https://crates.io/crates/iroh-metrics
-iroh-metrics = { version = "1.0.1" }
+iroh-metrics = { version = "1.0.2" }
 # https://crates.io/crates/iroh-mdns-address-lookup
 # mDNS is not part of the `iroh` crate in 1.0; it is this separate address-lookup service, which
 # both advertises this endpoint on the local link and resolves the peers advertising themselves on
 # it. Only reached when `EndpointConfig.mdns` is set, so an endpoint that does not ask for it sends
 # no multicast traffic at all.
-iroh-mdns-address-lookup = { version = "0.4.0" }
+iroh-mdns-address-lookup = { version = "0.6.0" }
 
 # https://crates.io/crates/noq-proto
 # Only for the two congestion controller configs. `iroh` re-exports the `ControllerFactory` trait
@@ -59,7 +61,7 @@ iroh-mdns-address-lookup = { version = "0.4.0" }
 # too, pulling `fastbloom`/`libm`/`siphasher` into every artifact for a feature nothing in this
 # crate reaches. `pub mod congestion`, and neither `CubicConfig` nor `NewRenoConfig`, is
 # feature-gated, so the two configs used here compile identically without defaults.
-noq-proto = { version = "1.1", default-features = false }
+noq-proto = { version = "1.3", default-features = false }
 
 # https://crates.io/crates/url
 url = "2"
@@ -91,4 +93,4 @@ ndk-context = { version = "0.1.1" }
 
 [build-dependencies]
 # https://crates.io/crates/cbindgen
-cbindgen = "0.29.2"
+cbindgen = "0.29.4"

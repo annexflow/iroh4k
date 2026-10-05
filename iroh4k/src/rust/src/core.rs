@@ -293,9 +293,9 @@ pub fn runtime() -> &'static Runtime {
 
 /// The version of the `iroh` crate this build links against. Kept in sync with
 /// `Cargo.toml` by hand — there is no build-time way to read a dependency's version.
-pub const IROH_VERSION: &str = "1.0.3";
+pub const IROH_VERSION: &str = "1.3.0";
 
-/// `"<iroh4k version>+iroh<iroh version>"`, e.g. `"0.1.0+iroh1.0.3"`.
+/// `"<iroh4k version>+iroh<iroh version>"`, e.g. `"0.1.0+iroh1.3.0"`.
 pub fn version() -> Vec<u8> {
     format!("{}+iroh{}", env!("CARGO_PKG_VERSION"), IROH_VERSION).into_bytes()
 }

@@ -49,7 +49,7 @@ internal data class SmokeRecord(
  * At M0 this exposes only what the smoke tests need; the endpoint/QUIC surface lands in M3–M5.
  */
 object Iroh4k {
-    /** `"<iroh4k version>+iroh<iroh version>"`, e.g. `"0.1.0+iroh1.0.3"`. */
+    /** `"<iroh4k version>+iroh<iroh version>"`, e.g. `"0.1.0+iroh1.3.0"`. */
     val version: String get() = nativeVersion()
 
     /**

@@ -340,7 +340,7 @@ as is. Without `android` in `-Ptargets`, the Android Gradle plugin is never appl
 
 ## Status
 
-Version `0.2.0`, targeting **iroh 1.0.3**. Dual licensed Apache-2.0 or MIT.
+Version `0.2.0`, targeting **iroh 1.3.0**. Dual licensed Apache-2.0 or MIT.
 
 **Source-compatible with `0.1.0`, not binary-compatible.** `Stream.kt`'s four extension functions —
 `openBi`, `acceptBi`, `openUni`, `acceptUni` — took `Connection` as their receiver; they now take
