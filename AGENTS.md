@@ -7,6 +7,17 @@ you happen to be editing, and each one is here because breaking it has already c
 Every rule below has its reason attached. A rule without a reason gets "simplified" away; that has
 happened in this repository, which is why several of the single-definition rules exist at all.
 
+## Task skills
+
+Project workflows live in `.agents/skills`. Read the skill relevant to the task; this file remains
+the source of project invariants.
+
+- [`check`](.agents/skills/check/SKILL.md): local verification and platform-specific gates.
+- [`commit`](.agents/skills/commit/SKILL.md): commit messages and release context.
+- [`pr`](.agents/skills/pr/SKILL.md): pull request titles, descriptions, and creation.
+- [`style`](.agents/skills/style/SKILL.md): Rust, Kotlin, and build code conventions.
+- [`prose`](.agents/skills/prose/SKILL.md): Markdown guides and public API documentation.
+
 ## Layout
 
 One Rust crate (`iroh4k/src/rust`), built twice: a `staticlib` linked into Kotlin/Native through
