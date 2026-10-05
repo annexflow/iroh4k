@@ -340,9 +340,17 @@ as is. Without `android` in `-Ptargets`, the Android Gradle plugin is never appl
 
 ## Status
 
-Version `0.2.0`, targeting **iroh 1.3.0**. Dual licensed Apache-2.0 or MIT.
+Version `0.2.0`, targeting **iroh 1.3.0** and **iroh-services 2.0.0**. Dual licensed Apache-2.0 or MIT.
 
-**Source-compatible with `0.1.0`, not binary-compatible.** `Stream.kt`'s four extension functions —
+**Services capability migration.** `ServicesClient.grantCapability` now accepts one
+`ServicesCapability` instead of a set: replace `grantCapability(id, setOf(ServicesCapability.RelayUse))`
+with `grantCapability(id, ServicesCapability.RelayUse)`. The three supported presets are `Client`,
+`RelayUse` and `NetDiagnosticsGetAny`, matching the public constructors of iroh-services 2.0's opaque
+`Caps`. `All`, `MetricsPutAny`, `NetDiagnosticsPutAny` and custom combinations have no equivalent in
+that API. `Client` includes relay use, metrics push and diagnostics; choosing it instead of an
+individual upload permission grants more rights and must be an explicit application decision.
+
+**Stream calls require recompilation.** `Stream.kt`'s four extension functions —
 `openBi`, `acceptBi`, `openUni`, `acceptUni` — took `Connection` as their receiver; they now take
 `QuicConnection`, the supertype `Connection` and the two 0-RTT connection types share. A caller that
 recompiles keeps working unchanged, because `Connection` still *is* a `QuicConnection` — but a `.jar`

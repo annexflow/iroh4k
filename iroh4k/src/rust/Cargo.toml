@@ -38,9 +38,7 @@ iroh-base = { version = "1.3.0" }
 # https://crates.io/crates/iroh-relay
 iroh-relay = { version = "1.3.0", default-features = false }
 # https://crates.io/crates/iroh-services
-# 2.0's opaque Caps supports only three predefined grants, with no way to construct the
-# arbitrary capability sets exposed by ServicesClient.grantCapability. Keep 1.x until it does.
-iroh-services = { version = "1.0.0", default-features = false }
+iroh-services = { version = "2.0.0", default-features = false }
 # https://crates.io/crates/iroh-tickets
 iroh-tickets = { version = "1.0.0" }
 # https://crates.io/crates/iroh-metrics

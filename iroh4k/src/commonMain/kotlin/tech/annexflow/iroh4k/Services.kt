@@ -170,30 +170,21 @@ class ServicesConfig(
 )
 
 /**
- * A capability a services client can grant to another endpoint with
+ * A capability preset a services client can grant to another endpoint with
  * [ServicesClient.grantCapability].
  *
- * Each entry carries the canonical string iroh-services itself uses, and that string — not an
- * ordinal — is what crosses the boundary, so the capability vocabulary has exactly one definition
- * (upstream's `Cap`) and a capability added in a later iroh-services needs no new wire tag here. The
- * set of names this build understands is asserted against Rust's own list in `CommonServicesTests`.
+ * Mirrors the three public constructors on iroh-services 2.0's opaque `Caps`: `client`, `relay_use`
+ * and `net_diagnostics_get_any`. Arbitrary combinations and individual metrics/upload grants are
+ * unavailable upstream. The string crosses the boundary and selects the corresponding constructor
+ * in Rust; it is checked against that decoder's vocabulary in `CommonServicesTests`.
  */
 enum class ServicesCapability(internal val canonical: String) {
-
-    /** Everything. Only granted from a credential registered with the service — an SSH key. */
-    All("all"),
 
     /** The capability set an API secret grants: relay use, metrics push, diagnostics. */
     Client("client"),
 
     /** Use the project's relays. */
     RelayUse("relay:use"),
-
-    /** Push metrics for any endpoint. */
-    MetricsPutAny("metrics:put-any"),
-
-    /** Upload a network diagnostics report for any endpoint. */
-    NetDiagnosticsPutAny("net-diagnostics:put-any"),
 
     /** Read a network diagnostics report for any endpoint. */
     NetDiagnosticsGetAny("net-diagnostics:get-any"),
@@ -444,27 +435,26 @@ class ServicesClient private constructor(private val guard: NativeHandle) : Auto
     // ── Capabilities ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Grants [capabilities] to the endpoint [grantee], as a token the service stores for it.
+     * Grants [capability] to the endpoint [grantee], as a token the service stores for it.
      *
      * This client signs the token with its endpoint's secret key; [grantee] presents it when it dials
      * the service, and is then authorised for exactly these capabilities. Tokens expire after 30
      * days, which is upstream's fixed default.
      *
-     * Only a client whose own credential permits it can grant — an API secret's [ServicesCapability.Client]
-     * set cannot grant [ServicesCapability.All]. iroh-ffi does not expose this operation at all.
+     * Only a client whose own credential permits it can grant. This accepts one of the three
+     * presets supported by iroh-services 2.0; their permissions cannot be composed into a custom
+     * set. [ServicesCapability.Client] includes relay use, metrics push and diagnostics.
      *
-     * @throws IrohError with [IrohError.Code.Services] if [capabilities] is empty, or if the service
-     *   is unreachable or refuses the grant.
+     * @throws IrohError with [IrohError.Code.Services] if the service is unreachable or refuses the
+     *   grant.
      */
-    suspend fun grantCapability(grantee: EndpointId, capabilities: Set<ServicesCapability>) =
+    suspend fun grantCapability(grantee: EndpointId, capability: ServicesCapability) =
         suspending { handle ->
             val w = BinaryWriter()
             w.bytes(grantee.toBytes())
-            // Sorted so the payload is deterministic for a given set, whatever iteration order the
-            // caller's `Set` implementation happens to have.
-            val names = capabilities.map { it.canonical }.sorted()
-            w.i32(names.size)
-            for (name in names) w.string(name)
+            // Keep the sequence layout shared with Rust, with exactly one supported preset.
+            w.i32(1)
+            w.string(capability.canonical)
             nativeServicesGrantCapability(handle, w.finish())
         }
 
@@ -579,9 +569,8 @@ class ServicesClient private constructor(private val guard: NativeHandle) : Auto
          * The capability strings the linked Rust build understands.
          *
          * Exposed for tests: [ServicesCapability]'s canonical names must be exactly this set, or a
-         * grant would be rejected by iroh-services with an "unknown capability" that no Kotlin-side
-         * test would have caught. One of the few properties of this domain that can be checked
-         * without a live service.
+         * grant would be rejected by the Rust decoder. These names come from the same constructor
+         * table used to decode grants, so this agreement can be checked without a live service.
          */
         internal val capabilityNames: List<String>
             get() = BinaryReader(nativeServicesCapabilityNames()).seq { it.string() }

@@ -59,8 +59,8 @@ class JvmServicesTests {
         runner.`every service operation fails promptly when the service is unreachable`()
 
     @Test
-    fun `granting no capability at all is refused`() =
-        runner.`granting no capability at all is refused`()
+    fun `unsupported capability payloads are refused before accessing the client`() =
+        runner.`unsupported capability payloads are refused before accessing the client`()
 
     @Test
     fun `a client outlives the endpoint handle it was created from`() =

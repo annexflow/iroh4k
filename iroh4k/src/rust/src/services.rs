@@ -35,8 +35,8 @@
 //! `register_metrics_group` is deliberately **not** exposed: it takes an `Arc<dyn MetricsGroup>`,
 //! which is a Rust trait object with no representation Kotlin could construct. The endpoint's own
 //! metrics group is registered by `ClientBuilder::new`, which is what a Kotlin caller has to report
-//! on anyway. `rcan` is likewise not exposed: an `Rcan<Caps>` can only be obtained from one of the
-//! credential paths already modelled here.
+//! on anyway. Upstream's capability tokens are opaque and are not exposed by this binding.
+//! Grants use the three presets constructible through `iroh_services::caps::Caps`'s public API.
 //!
 //! ## Diagnostics are modelled, not summarised
 //!
@@ -76,7 +76,8 @@
 //!
 //! Capabilities  (Kotlin → Rust)
 //!   bytes   grantee endpoint id
-//!   i32     count             then count × str (a canonical `Cap` string, e.g. "metrics:put-any")
+//!   i32     count             must be 1; retained from the original sequence layout
+//!   str     grant preset      "client", "relay:use" or "net-diagnostics:get-any"
 //!
 //! Name  (Rust → Kotlin)
 //!   str?    the name the client last saw, or absent
@@ -120,7 +121,6 @@
 
 use std::{
     ffi::{c_int, c_void},
-    str::FromStr,
     sync::{
         Arc, OnceLock,
         atomic::{AtomicI64, Ordering},
@@ -134,7 +134,7 @@ use iroh::{
 };
 use iroh_services::{
     Client, ClientBuilder,
-    caps::Cap,
+    caps::Caps,
     net_diagnostics::{DiagnosticsReport, PortMapProbe},
 };
 
@@ -188,6 +188,15 @@ const TRI_TRUE: u8 = 2;
 
 /// Raw byte length of an endpoint id, fixed by Ed25519.
 const ENDPOINT_ID_LEN: usize = 32;
+
+/// The wire names and the corresponding public iroh-services 2.0 constructors.
+/// Both the payload decoder and the Kotlin vocabulary test use this one table.
+type CapabilityPreset = (&'static str, fn() -> Caps);
+const CAPABILITIES: [CapabilityPreset; 3] = [
+    ("client", Caps::client),
+    ("relay:use", Caps::relay_use),
+    ("net-diagnostics:get-any", Caps::net_diagnostics_get_any),
+];
 
 // ============================================================================
 // Failures
@@ -603,12 +612,8 @@ async fn push_metrics(client: &Client) -> *mut Iroh4kResult {
     }
 }
 
-/// Grants `caps` to `grantee`, as a token the service stores on its behalf.
-async fn grant_capability(
-    client: &Client,
-    grantee: EndpointId,
-    caps: Vec<Cap>,
-) -> *mut Iroh4kResult {
+/// Grants a capability preset to `grantee`, as a token the service stores on its behalf.
+async fn grant_capability(client: &Client, grantee: EndpointId, caps: Caps) -> *mut Iroh4kResult {
     match client.grant_capability(grantee, caps).await {
         Ok(()) => ok_result(),
         Err(error) => error_result(
@@ -638,34 +643,32 @@ async fn net_diagnostics(client: &Client, send: bool) -> *mut Iroh4kResult {
     }
 }
 
-/// Reads the grantee id and capability set for [`grant_capability`].
-fn read_capabilities(payload: &[u8]) -> Outcome<(EndpointId, Vec<Cap>)> {
+/// Reads the grantee id and single capability preset for [`grant_capability`].
+fn read_capabilities(payload: &[u8]) -> Outcome<(EndpointId, Caps)> {
     let mut r = Reader::new(payload);
     let grantee = parse_endpoint_id(under(ERROR_KEY, r.bytes())?)?;
 
     let count = under(ERROR_SERVICES, r.count())?;
-    let mut caps = Vec::with_capacity(count);
-    for _ in 0..count {
-        let text = under(ERROR_SERVICES, r.str())?;
-        // Kotlin sends `Cap`'s own canonical strings, produced by upstream's `strum::Display` and
-        // parsed by its `FromStr`, so the capability vocabulary has exactly one definition and a
-        // capability iroh-services adds later needs no new wire tag.
-        caps.push(Cap::from_str(text).map_err(|error| Failure {
-            code: ERROR_SERVICES,
-            message: format!("unknown capability {text:?}: {error}"),
-        })?);
-    }
-    under(ERROR_SERVICES, r.finish())?;
-
-    if caps.is_empty() {
-        // `Caps::new([])` would build an empty capability set and sign a token that permits
-        // nothing, which is never what a caller meant by "grant".
+    if count != 1 {
+        // Caps is opaque in 2.0: composing presets or constructing an empty set is unavailable.
+        // Reject an old multi-capability payload rather than broadening it to Client or issuing
+        // several independent grants that could only partially succeed.
         return fail(
             ERROR_SERVICES,
-            "granting a capability needs at least one capability",
+            "granting capabilities requires exactly one preset",
         );
     }
-    Ok((grantee, caps))
+    let text = under(ERROR_SERVICES, r.str())?;
+    under(ERROR_SERVICES, r.finish())?;
+    for (name, create) in CAPABILITIES {
+        if text == name {
+            return Ok((grantee, create()));
+        }
+    }
+    fail(
+        ERROR_SERVICES,
+        format!("unsupported capability preset {text:?}"),
+    )
 }
 
 // ============================================================================
@@ -771,28 +774,97 @@ fn probe_tag(probe: Probe) -> u8 {
     }
 }
 
-/// The canonical capability strings this build understands, as a codec sequence.
+/// The supported capability preset names, as a codec sequence.
 ///
-/// Exposed so Kotlin's `ServicesCapability` enum can be checked against upstream's own vocabulary
-/// rather than against a hand-copied list that would drift silently. Every string here round-trips
-/// through `Cap`'s `FromStr`/`Display`, which is what [`read_capabilities`] relies on — and it is one
-/// of the few things in this domain that *can* be verified without a live service.
+/// Uses the same constructor table as [`read_capabilities`], so Kotlin's enum cannot advertise a
+/// name this decoder refuses. Upstream's opaque Caps no longer exposes FromStr or Display.
 fn capability_names() -> Vec<u8> {
-    use iroh_services::caps::{MetricsCap, NetDiagnosticsCap, RelayCap};
-
-    let caps = [
-        Cap::All,
-        Cap::Client,
-        Cap::Relay(RelayCap::Use),
-        Cap::Metrics(MetricsCap::PutAny),
-        Cap::NetDiagnostics(NetDiagnosticsCap::PutAny),
-        Cap::NetDiagnostics(NetDiagnosticsCap::GetAny),
-    ];
     let mut w = Writer::new();
-    w.seq(&caps, |w, cap| {
-        w.str(&cap.to_string());
+    w.seq(&CAPABILITIES, |w, (name, _)| {
+        w.str(name);
     });
     w.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn grant_payload(names: &[&str]) -> Vec<u8> {
+        let id = iroh::SecretKey::from_bytes(&[7; 32]).public();
+        let mut w = Writer::new();
+        w.bytes(id.as_bytes()).seq(names, |w, name| {
+            w.str(name);
+        });
+        w.finish()
+    }
+
+    fn assert_error(payload: &[u8], expected: c_int) {
+        match read_capabilities(payload) {
+            Err(failure) => assert_eq!(failure.code, expected, "{}", failure.message),
+            Ok(_) => panic!("invalid capability payload was accepted"),
+        }
+    }
+
+    #[test]
+    fn supported_grants_preserve_the_requested_permissions() {
+        let grantee = iroh::SecretKey::from_bytes(&[7; 32]).public();
+        for (name, expected) in [
+            ("client", Caps::client()),
+            ("relay:use", Caps::relay_use()),
+            ("net-diagnostics:get-any", Caps::net_diagnostics_get_any()),
+        ] {
+            let (decoded_grantee, caps) = match read_capabilities(&grant_payload(&[name])) {
+                Ok(decoded) => decoded,
+                Err(failure) => panic!("{name} was refused: {}", failure.message),
+            };
+            assert_eq!(decoded_grantee, grantee);
+            assert_eq!(caps, expected, "permissions for {name}");
+        }
+    }
+
+    #[test]
+    fn unsupported_grants_are_refused() {
+        for name in [
+            "all",
+            "metrics:put-any",
+            "net-diagnostics:put-any",
+            "unknown",
+        ] {
+            assert_error(&grant_payload(&[name]), ERROR_SERVICES);
+        }
+    }
+
+    #[test]
+    fn multiple_grants_are_refused() {
+        assert_error(&grant_payload(&["client", "relay:use"]), ERROR_SERVICES);
+        assert_error(&grant_payload(&["relay:use", "relay:use"]), ERROR_SERVICES);
+    }
+
+    #[test]
+    fn malformed_grants_are_refused() {
+        let payload = grant_payload(&["relay:use"]);
+        for end in 0..payload.len() {
+            assert!(read_capabilities(&payload[..end]).is_err());
+        }
+        let mut trailing = payload;
+        trailing.push(0);
+        assert_error(&trailing, ERROR_SERVICES);
+
+        let id = iroh::SecretKey::from_bytes(&[7; 32]).public();
+        for count in [0, -1, i32::MAX] {
+            let mut w = Writer::new();
+            w.bytes(id.as_bytes()).i32(count);
+            assert_error(&w.finish(), ERROR_SERVICES);
+        }
+        let mut w = Writer::new();
+        w.bytes(&[0; 31]).i32(1).str("relay:use");
+        assert_error(&w.finish(), ERROR_KEY);
+
+        let mut w = Writer::new();
+        w.bytes(id.as_bytes()).i32(1).bytes(&[0xff]);
+        assert_error(&w.finish(), ERROR_SERVICES);
+    }
 }
 
 // ============================================================================

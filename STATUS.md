@@ -6,7 +6,8 @@ summary; this file carries the evidence.
 Version `0.2.0`, targeting **iroh 1.3.0**. Published as `tech.annexflow.iroh4k:iroh4k` from a `v*`
 tag by [`.github/workflows/release.yml`](.github/workflows/release.yml), dual licensed Apache-2.0 or
 MIT — the same terms as iroh itself, so a consumer picks up nothing stricter than upstream. The
-version string reports both halves: `Iroh4k.version` is `"0.2.0+iroh1.3.0"`.
+version string reports both halves: `Iroh4k.version` is `"0.2.0+iroh1.3.0"`. The services client
+uses **iroh-services 2.0.0**.
 
 ## What runs where
 
@@ -33,6 +34,13 @@ The instrumented tests have run on an emulator in CI, on a physical Galaxy A22 (
 operations — naming an endpoint, liveness, metric push, network reports — are covered only against
 the failure path they take when the service cannot be reached. Credential handling, configuration
 and lifecycle are tested properly; the successful round trips are not tested at all.
+
+Capability grants accept one of the three public `Caps` presets in 2.0: `Client`, `RelayUse` or
+`NetDiagnosticsGetAny`. All three reach the offline RPC failure path through each facade. Rust unit
+tests verify the exact preset selected and reject malformed, unsupported or composite payloads;
+shared facade tests verify rejection before the client is accessed. The old individual upload
+permissions and arbitrary combinations are unavailable through upstream's public client API; see
+the migration note in [`README.md`](README.md).
 
 ### mDNS discovery is wired but never exercised by a test
 

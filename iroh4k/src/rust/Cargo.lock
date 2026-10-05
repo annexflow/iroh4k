@@ -1633,21 +1633,21 @@ dependencies = [
 
 [[package]]
 name = "iroh-services"
-version = "1.0.0"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1a88cd95fbd20abd9eadc4df91c722915dc943412b964e915f35b0b0a46a1fd"
+checksum = "7e03fe6d35ad303cf364941cba65946f2ad1eb9d531f17954f1cf7b6885fc4ea"
 dependencies = [
- "anyhow",
  "base64 0.22.1",
  "built",
  "bytes",
+ "cfg_aliases",
  "data-encoding",
- "derive_more",
  "ed25519-dalek",
  "futures-buffered",
  "getrandom 0.4.3",
  "iroh",
  "iroh-metrics",
+ "iroh-services-proto",
  "iroh-tickets",
  "irpc",
  "irpc-iroh",
@@ -1659,11 +1659,28 @@ dependencies = [
  "rcan",
  "serde",
  "serde_json",
- "strum",
- "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "iroh-services-proto"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9c8f9110c270a6079bacb2b0fc4b59ed84555692edbe89cb6a9cec4c48b1eb2"
+dependencies = [
+ "derive_more",
+ "iroh",
+ "iroh-metrics",
+ "irpc",
+ "n0-error",
+ "rcan",
+ "serde",
+ "strum",
+ "tracing",
  "uuid",
 ]
 

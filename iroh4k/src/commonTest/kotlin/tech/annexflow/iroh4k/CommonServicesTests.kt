@@ -22,6 +22,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import tech.annexflow.iroh4k.internal.BinaryWriter
 
 /**
  * Test bodies shared by every target, so the FFI (Kotlin/Native) and JNI (JVM/Android) facades are
@@ -119,9 +120,7 @@ class CommonServicesTests {
     // ── Capability vocabulary ────────────────────────────────────────────────────────────────
 
     fun `the capability vocabulary matches the linked rust build`() = runTest(timeout = TEST_TIMEOUT) {
-        // The one place a Kotlin enum has to agree with a string vocabulary defined upstream. A
-        // renamed or added capability in iroh-services would otherwise surface as a runtime
-        // "unknown capability" from `grantCapability` — an operation no offline test can reach.
+        // Kotlin must advertise exactly the presets constructible by the Rust decoder.
         val fromRust = bounded { ServicesClient.capabilityNames }
         val fromKotlin = ServicesCapability.entries.map { it.canonical }
 
@@ -131,17 +130,12 @@ class CommonServicesTests {
         assertThat(fromRust).hasSize(fromRust.toSet().size)
         assertThat(fromKotlin).hasSize(fromKotlin.toSet().size)
 
-        // And the canonical strings really are what upstream renders, not a plausible guess.
-        assertThat(fromRust).contains("all")
-        assertThat(fromRust).contains("client")
-        assertThat(fromRust).contains("relay:use")
-        assertThat(fromRust).contains("metrics:put-any")
-        assertThat(fromRust).contains("net-diagnostics:put-any")
-        assertThat(fromRust).contains("net-diagnostics:get-any")
+        // Only the three presets constructible through iroh-services 2.0's public Caps API.
+        assertThat(fromRust).containsExactly("client", "relay:use", "net-diagnostics:get-any")
 
         // `toString` is the canonical string too, so a capability logged by name is greppable
         // against iroh-services' own documentation.
-        assertThat(ServicesCapability.MetricsPutAny.toString()).isEqualTo("metrics:put-any")
+        assertThat(ServicesCapability.RelayUse.toString()).isEqualTo("relay:use")
     }
 
     // ── Creation ─────────────────────────────────────────────────────────────────────────────
@@ -438,19 +432,20 @@ class CommonServicesTests {
             bounded {
                 Endpoint.bind(endpointConfig()).use { endpoint ->
                     ServicesClient.create(endpoint, clientConfig()).use { client ->
-                        val operations: List<Pair<String, suspend () -> Any?>> = listOf(
+                        val operations = listOf<Pair<String, suspend () -> Any?>>(
                             "ping" to { client.ping() },
                             "setName" to { client.setName("a-valid-name") },
                             "pushMetrics" to { client.pushMetrics() },
-                            "grantCapability" to {
+                        ) + ServicesCapability.entries.map { capability ->
+                            "grantCapability($capability)" to suspend {
                                 client.grantCapability(
                                     SecretKey.generate().public(),
-                                    setOf(ServicesCapability.MetricsPutAny),
+                                    capability,
                                 )
-                            },
-                        )
+                            }
+                        }
 
-                        // This is the honest extent of the coverage for these four: they are
+                        // This is the honest extent of the coverage for these operations: they are
                         // exercised only against the failure path. What that still proves is real —
                         // the payload marshalled, the operation ran, Rust's error reached Kotlin
                         // under the right code, and the registry drained — and it is bounded,
@@ -464,6 +459,11 @@ class CommonServicesTests {
                                     }
                                 assertThat(error.code, "code for $name")
                                     .isEqualTo(IrohError.Code.Services)
+                                if (name.startsWith("grantCapability")) {
+                                    // A decoder rejection has the same code. Pin the RPC error so
+                                    // every public preset is shown to reach the client itself.
+                                    assertThat(error.message!!).contains("could not grant capabilities")
+                                }
                             }
                             assertThat(elapsed < 5.seconds, "$name should fail promptly").isTrue()
                         }
@@ -471,28 +471,54 @@ class CommonServicesTests {
                 }
             }
 
-            // Four operations, all failed: an error path that forgot to remove its registry entry
+            // Six operations, all failed: an error path that forgot to remove its registry entry
             // would leave the count above the settled baseline and never come back down.
             ops.awaitAtMost(opBaseline)
         }
 
-    fun `granting no capability at all is refused`() = runTest(timeout = TEST_TIMEOUT) {
-        bounded {
-            Endpoint.bind(endpointConfig()).use { endpoint ->
-                ServicesClient.create(endpoint, clientConfig()).use { client ->
-                    // An empty set would sign a token permitting nothing, which is never what
-                    // "grant" meant. Refused in Rust before any token is created — so unlike the
-                    // failure-path assertions above, this one is about the request and not the
-                    // network.
-                    val error = assertFailsWith<IrohError> {
-                        client.grantCapability(SecretKey.generate().public(), emptySet())
+    fun `unsupported capability payloads are refused before accessing the client`() =
+        runTest(timeout = TEST_TIMEOUT) {
+            bounded {
+                // An unbuilt slot makes a successfully decoded request report Closed. Invalid grants
+                // must instead report Services before looking up the client, on every facade.
+                val handle = nativeServicesNew()
+                try {
+                    val grantee = SecretKey.generate().public()
+                    for (capability in ServicesCapability.entries) {
+                        val payload = BinaryWriter().apply {
+                            bytes(grantee.toBytes())
+                            i32(1)
+                            string(capability.canonical)
+                        }.finish()
+                        val error = assertFailsWith<IrohError> {
+                            nativeServicesGrantCapability(handle, payload)
+                        }
+                        assertThat(error.code).isEqualTo(IrohError.Code.Closed)
                     }
-                    assertThat(error.code).isEqualTo(IrohError.Code.Services)
-                    assertThat(error.message!!).contains("at least one capability")
+                    val unsupported = listOf(
+                        emptyList(),
+                        listOf("client", "relay:use"),
+                        listOf("all"),
+                        listOf("metrics:put-any"),
+                        listOf("net-diagnostics:put-any"),
+                        listOf("unknown"),
+                    )
+                    for (names in unsupported) {
+                        val payload = BinaryWriter().apply {
+                            bytes(grantee.toBytes())
+                            i32(names.size)
+                            for (name in names) string(name)
+                        }.finish()
+                        val error = assertFailsWith<IrohError> {
+                            nativeServicesGrantCapability(handle, payload)
+                        }
+                        assertThat(error.code).isEqualTo(IrohError.Code.Services)
+                    }
+                } finally {
+                    nativeServicesFree(handle)
                 }
             }
         }
-    }
 
     fun `a client outlives the endpoint handle it was created from`() = runTest(timeout = TEST_TIMEOUT) {
         bounded {
@@ -534,7 +560,7 @@ class CommonServicesTests {
                     "ping" to { client.ping() },
                     "pushMetrics" to { client.pushMetrics() },
                     "grantCapability" to {
-                        client.grantCapability(endpoint.id, setOf(ServicesCapability.Client))
+                        client.grantCapability(endpoint.id, ServicesCapability.Client)
                     },
                     "netDiagnostics" to { client.netDiagnostics() },
                 )

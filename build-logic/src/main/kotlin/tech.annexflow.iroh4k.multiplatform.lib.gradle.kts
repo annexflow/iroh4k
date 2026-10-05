@@ -132,7 +132,14 @@ fun KotlinNativeTarget.rust(target: String) {
                 )
                 onlyIf { !prebuilt }
             }
-            tasks.getByName(interopProcessingTaskName) { dependsOn(cargoTask) }
+            tasks.getByName(interopProcessingTaskName) {
+                dependsOn(cargoTask)
+                // cinterop embeds the archive in its klib. A dependency alone only orders the
+                // tasks: without this input, a Rust rebuild with unchanged headers leaves the
+                // cached klib containing the previous library.
+                inputs.files(cargoTask).withPropertyName("rustStaticLibrary")
+                    .withPathSensitivity(PathSensitivity.NONE)
+            }
         }
     }
 }
